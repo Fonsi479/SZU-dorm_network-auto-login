@@ -2,6 +2,8 @@
 
 深圳大学宿舍区 Dr.COM / ePortal 自动登录工具，适用于 macOS 本地使用。它可以在断网时自动检测宿舍区网关并尝试登录，也提供一个状态栏客户端用于手动登录、暂停、退出账号和查看日志。
 
+这完全是vibe coding产物并借鉴了github上的一些开源项目（致谢名单附后），我自己debug了几轮，用起来几乎没什么问题了，有任何bug就自己修复吧，因为我也不懂代码哈哈哈
+
 ## 功能
 
 - 自动检测外网连通性，已联网时不会重复登录
@@ -273,19 +275,30 @@ launchctl setenv SZU_NETLOGIN_HOME "/path/to/szu-netlogin"
 xattr -dr com.apple.quarantine "dist/SZU Dorm Login.app"
 ```
 
-## 公开发布建议
+## 致谢 / Acknowledgements
 
-建议只发布源码包，不发布本地生成的 `dist/` 和 `build/`。一个干净的源码包可以这样生成：
+本项目在实现过程中参考和借鉴了以下开源项目与工具，在此表示感谢：
 
-```bash
-git archive --format=zip --output=szu-dorm-netlogin-source.zip HEAD
-```
+* [1136623363/SZU-Drcom](https://github.com/1136623363/SZU-Drcom)
+  提供了深圳大学宿舍区 Dr.COM / ePortal 自动登录场景的参考，尤其是宿舍区网关与登录流程相关思路。
 
-如果当前目录还没有初始化 Git，可以用 `zip` 手动排除本地文件：
+* [Sleepstars/SZU-login](https://github.com/Sleepstars/SZU-login)
+  提供了深圳大学教学区与宿舍区网络认证差异的参考，尤其是教学区 srun 与宿舍区 ePortal/Dr.COM 的区分、配置文件和自动检测思路。
 
-```bash
-zip -r szu-dorm-netlogin-source.zip . \
-  -x "config.yaml" "logs/*" "build/*" "dist/*" "__pycache__/*" "src/**/__pycache__/*" ".DS_Store"
+* [ackness/szu-autoconnect](https://github.com/ackness/szu-autoconnect)
+  提供了深大校园网自动联网、保持在线以及 UI 化控制的参考思路。
+
+* [ceynri/szu-network-connecter](https://github.com/ceynri/szu-network-connecter)
+  提供了深大校园网一键登录认证、浏览器插件交互和用户体验设计方面的参考。
+
+* [Sleepstars/SZU_Utils](https://github.com/Sleepstars/SZU_Utils)
+  提供了深大校园网实用脚本集合方面的参考。
+
+* [jaredks/rumps](https://github.com/jaredks/rumps)
+  本项目的 macOS 状态栏客户端如使用 Python 实现，可基于 rumps 构建菜单栏应用。
+
+本项目主要面向个人学习与自用场景。若项目中存在直接引用、修改或复用上述项目代码的部分，请遵循对应项目的开源许可证要求，并在相关文件中保留原作者版权与许可证声明。
+
 ```
 
 ## 项目结构
