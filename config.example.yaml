@@ -1,0 +1,33 @@
+auth:
+  type: dorm_drcom
+  login_url: "http://172.30.255.42:801/eportal/portal/login"
+  # 留空时会默认把 login_url 末尾的 /login 推导为 /logout；如果学校接口变了，再抓包后填写真实地址。
+  logout_url: ""
+  callback: "dr1003"
+  logout_callback: "dr1004"
+  login_method: "1"
+  account_prefix: ",1,"
+  timeout_seconds: 8
+
+user:
+  username: "你的校园卡号，不要写密码"
+
+network:
+  dorm_gateway_hosts:
+    - "172.30.255.42"
+  campus_wifi_names:
+    - "SZU_CTC&CMCC"
+  test_urls:
+    - "https://www.baidu.com/"
+    - "http://captive.apple.com/hotspot-detect.html"
+
+security:
+  # 可选值：env、keychain、private_file
+  password_source: "keychain"
+  password_env_name: "SZU_NET_PASSWORD"
+  # 当 password_source: "keychain" 时使用。
+  keychain_service: "szu-netlogin"
+  # 可选；不填则使用 user.username。
+  keychain_account: ""
+  # 当 password_source: "private_file" 时使用。文件内容可以是第一行密码，或 password: "密码"。
+  password_file: "~/.szu-netlogin/password.yaml"
