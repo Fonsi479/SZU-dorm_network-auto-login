@@ -20,25 +20,6 @@
 
 它不处理教学区网络，不处理 srun，不需要 `sudo`，也不会把密码写进 `config.yaml`。
 
-## 安全说明
-
-公开仓库应只提交源码、脚本、示例配置和文档。请不要提交以下内容：
-
-- `config.yaml`
-- `logs/`
-- `build/`
-- `dist/`
-- `__pycache__/`
-- `.DS_Store`
-- 任何包含账号、密码、Token、本机用户名或绝对路径的文件
-
-默认的 `.gitignore` 已经排除了这些本地文件。发布前可以用下面的命令做一次快速检查：
-
-```bash
-rg -n "password|token|secret|/Users/|username|account|学号|校园卡|@" .
-```
-
-如果输出来自 `config.example.yaml` 或 README 中的占位说明，需要人工判断；如果输出来自真实配置、日志或构建产物，请不要提交。
 
 ## 环境要求
 
@@ -74,7 +55,7 @@ cp config.example.yaml config.yaml
 设置校园网账号：
 
 ```bash
-python3 -m src.szu_netlogin.control set-username 学号
+python3 -m src.szu_netlogin.control set-username 校园卡号
 ```
 
 设置密码：
@@ -175,7 +156,6 @@ security:
   password_file: "~/.szu-netlogin/password.yaml"
 ```
 
-私有密码文件不要提交到 GitHub。
 
 ## 状态栏客户端
 
