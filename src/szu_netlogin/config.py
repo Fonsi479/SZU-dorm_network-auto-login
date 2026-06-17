@@ -21,9 +21,20 @@ def get_project_root() -> Path:
         return Path(configured_home).expanduser().resolve()
 
     if getattr(sys, "frozen", False):
+        bundled_project_root = _find_project_root_from_executable()
+        if bundled_project_root is not None:
+            return bundled_project_root
         return DEFAULT_APP_PROJECT_ROOT
 
     return SOURCE_PROJECT_ROOT
+
+
+def _find_project_root_from_executable() -> Path | None:
+    executable = Path(sys.executable).resolve()
+    for candidate in executable.parents:
+        if (candidate / "src" / "szu_netlogin" / "config.py").exists():
+            return candidate
+    return None
 
 
 PROJECT_ROOT = get_project_root()

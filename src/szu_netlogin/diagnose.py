@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .config import ConfigError, load_config
-from .portal_detect import check_gateway_reachable, check_internet, maybe_need_login
+from .portal_detect import probe_network
 
 
 def main() -> int:
@@ -13,13 +13,11 @@ def main() -> int:
         print(f"配置检查失败：{exc}")
         return 2
 
-    internet_ok = check_internet(config)
-    gateway_ok = check_gateway_reachable(config)
-    need_login = maybe_need_login(config)
+    status = probe_network(config)
 
-    print(f"外网访问：{'正常' if internet_ok else '不可用'}")
-    print(f"宿舍区网关：{'可连接' if gateway_ok else '不可连接'}")
-    print(f"是否可能需要登录：{'是' if need_login else '否'}")
+    print(f"外网：{'可用' if status.campus_internet_ok else '不可用'}")
+    print(f"宿舍区网关：{'可连接' if status.gateway_reachable else '不可连接'}")
+    print(f"是否可能需要登录：{'是' if status.maybe_need_login else '否'}")
     return 0
 
 

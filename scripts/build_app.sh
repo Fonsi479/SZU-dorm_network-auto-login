@@ -39,4 +39,8 @@ if [[ ! -d "dist/${APP_NAME}.app" ]]; then
   exit 1
 fi
 
+if [[ -d "dist/${APP_NAME}" ]]; then
+  rm -rf "dist/${APP_NAME}"
+fi
+
 echo "打包完成：dist/${APP_NAME}.app"

@@ -8,7 +8,9 @@ import subprocess
 import sys
 import traceback
 from datetime import datetime
+from logging.handlers import QueueHandler, QueueListener
 from pathlib import Path
+from queue import Queue
 from typing import Any
 
 if __package__ in (None, ""):
@@ -21,7 +23,7 @@ if __package__ in (None, ""):
         load_config,
     )
     from src.szu_netlogin.password_store import set_password
-    from src.szu_netlogin.portal_detect import check_gateway_reachable, check_internet
+    from src.szu_netlogin.portal_detect import NetworkStatus, probe_network
     from src.szu_netlogin.state import is_paused
 else:
     from .config import (
@@ -32,7 +34,7 @@ else:
         load_config,
     )
     from .password_store import set_password
-    from .portal_detect import check_gateway_reachable, check_internet
+    from .portal_detect import NetworkStatus, probe_network
     from .state import is_paused
 
 try:
@@ -47,8 +49,10 @@ else:
 MENUBAR_LOG_FILE = PROJECT_ROOT / "logs" / "menubar.log"
 MENUBAR_ERR_LOG_FILE = Path.home() / "Library" / "Logs" / "szu-netlogin" / "menubar-err.log"
 CONTROL_MODULE = "src.szu_netlogin.control"
+CONTROL_DISPATCH_ARG = "--szu-netlogin-control"
 USERNAME_PLACEHOLDER = "你的校园卡号，不要写密码"
 RumpsAppBase = rumps.App if rumps is not None else object
+MENUBAR_LOG_LISTENERS: list[QueueListener] = []
 
 
 def get_menubar_logger() -> logging.Logger:
@@ -59,21 +63,36 @@ def get_menubar_logger() -> logging.Logger:
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
-    if not any(getattr(handler, "baseFilename", "") == str(MENUBAR_LOG_FILE) for handler in logger.handlers):
-        handler = logging.FileHandler(MENUBAR_LOG_FILE, encoding="utf-8")
-        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-        logger.addHandler(handler)
+    if any(isinstance(handler, QueueHandler) for handler in logger.handlers):
+        return logger
 
-    if not any(
-        getattr(handler, "baseFilename", "") == str(MENUBAR_ERR_LOG_FILE)
-        for handler in logger.handlers
-    ):
-        error_handler = logging.FileHandler(MENUBAR_ERR_LOG_FILE, encoding="utf-8")
-        error_handler.setLevel(logging.ERROR)
-        error_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-        logger.addHandler(error_handler)
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    handlers: list[logging.Handler] = []
+
+    handler = SafeFileHandler(MENUBAR_LOG_FILE, encoding="utf-8", delay=True)
+    handler.setFormatter(formatter)
+    handlers.append(handler)
+
+    error_handler = SafeFileHandler(MENUBAR_ERR_LOG_FILE, encoding="utf-8", delay=True)
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(formatter)
+    handlers.append(error_handler)
+
+    log_queue: Queue[logging.LogRecord] = Queue()
+    logger.addHandler(QueueHandler(log_queue))
+    listener = QueueListener(log_queue, *handlers, respect_handler_level=True)
+    listener.start()
+    MENUBAR_LOG_LISTENERS.append(listener)
 
     return logger
+
+
+class SafeFileHandler(logging.FileHandler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            super().emit(record)
+        except OSError:
+            pass
 
 
 def install_exception_logging(logger: logging.Logger) -> None:
@@ -94,6 +113,7 @@ def install_exception_logging(logger: logging.Logger) -> None:
 class SzuDormMenubarApp(RumpsAppBase):
     def __init__(self) -> None:
         self.logger = get_menubar_logger()
+        self._refresh_in_progress = False
         self._warn_if_config_missing()
         self._warn_if_optional_dependencies_missing()
 
@@ -132,7 +152,6 @@ class SzuDormMenubarApp(RumpsAppBase):
 
         self.timer = rumps.Timer(self.refresh_status, 30)
         self.timer.start()
-        self.refresh_status(None)
 
     def _warn_if_config_missing(self) -> None:
         if DEFAULT_CONFIG_PATH.exists():
@@ -162,20 +181,23 @@ class SzuDormMenubarApp(RumpsAppBase):
         rumps.alert("SZU Dorm 依赖缺失", message)
 
     def refresh_status(self, _sender: Any) -> None:
+        if self._refresh_in_progress:
+            return
+
+        self._refresh_in_progress = True
         try:
             config, config_error = self._load_config_for_status()
             paused = is_paused()
-            online = check_internet(config)
-            gateway_reachable = check_gateway_reachable(config)
+            network_status = probe_network(config) if config else NetworkStatus(False, False)
 
             run_label = "已暂停" if paused else "运行中"
-            online_label = "已联网" if online else "未联网"
-            gateway_label = "网关可达" if gateway_reachable else "网关不可达"
-            self.status_item.title = f"状态：{run_label}｜{online_label}｜{gateway_label}"
+            campus_label = "外网已连通" if network_status.campus_internet_ok else "外网未连通"
+            gateway_label = "网关可达" if network_status.gateway_reachable else "网关不可达"
+            self.status_item.title = f"状态：{run_label}｜{campus_label}｜{gateway_label}"
             self.pause_item.title = "恢复自动登录" if paused else "暂停自动登录"
 
             message = (
-                f"状态刷新：{run_label}，{online_label}，{gateway_label}，"
+                f"状态刷新：{run_label}，{campus_label}，{gateway_label}，"
                 f"时间={datetime.now().strftime('%H:%M:%S')}"
             )
             if config_error:
@@ -183,6 +205,8 @@ class SzuDormMenubarApp(RumpsAppBase):
             self.logger.info(message)
         except Exception as exc:
             self._handle_exception("刷新状态失败", exc)
+        finally:
+            self._refresh_in_progress = False
 
     def login_now(self, _sender: Any) -> None:
         try:
@@ -379,14 +403,12 @@ class SzuDormMenubarApp(RumpsAppBase):
         args: list[str],
         timeout: int,
     ) -> subprocess.CompletedProcess[str]:
-        command = ["python3", "-m", CONTROL_MODULE, *args]
+        command = [*build_control_command(), *args]
         try:
-            env = os.environ.copy()
-            env.setdefault(PROJECT_HOME_ENV, str(PROJECT_ROOT))
             result = subprocess.run(
                 command,
                 cwd=PROJECT_ROOT,
-                env=env,
+                env=build_control_env(),
                 check=False,
                 capture_output=True,
                 text=True,
@@ -446,6 +468,34 @@ def short_output(result: subprocess.CompletedProcess[str]) -> str:
     return output.replace("\r", " ")[:1000]
 
 
+def build_control_command() -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, CONTROL_DISPATCH_ARG]
+    return [sys.executable, "-m", CONTROL_MODULE]
+
+
+def build_control_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env[PROJECT_HOME_ENV] = str(PROJECT_ROOT)
+
+    pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        str(PROJECT_ROOT)
+        if not pythonpath
+        else os.pathsep.join([str(PROJECT_ROOT), pythonpath])
+    )
+    return env
+
+
+def run_control_dispatch() -> int:
+    if __package__ in (None, ""):
+        from src.szu_netlogin import control
+    else:
+        from . import control
+
+    return control.main(sys.argv[2:])
+
+
 def show_startup_alert(title: str, message: str) -> None:
     if rumps is not None:
         try:
@@ -492,6 +542,9 @@ def verify_required_dependencies(logger: logging.Logger) -> bool:
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == CONTROL_DISPATCH_ARG:
+        raise SystemExit(run_control_dispatch())
+
     logger = get_menubar_logger()
     install_exception_logging(logger)
     logger.info("状态栏客户端启动")

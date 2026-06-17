@@ -4,7 +4,7 @@
 
 ## 功能
 
-- 自动检测外网连通性，已联网时不会重复登录
+- 自动检测校园网出口连通性，校园网已登录时不会重复登录
 - 只在宿舍区网关可达时尝试 Dr.COM / ePortal 登录
 - 支持 macOS Keychain、环境变量或私有文件读取密码
 - 提供命令行控制：登录、退出、暂停、恢复、诊断
@@ -95,7 +95,7 @@ python3 -m src.szu_netlogin.login --dry-run
 python3 -m src.szu_netlogin.login
 ```
 
-只在未联网且宿舍区网关可达时登录：
+只在校园网出口不可用且宿舍区网关可达时登录：
 
 ```bash
 python3 -m src.szu_netlogin.login --check-and-login
@@ -127,7 +127,7 @@ python3 -m src.szu_netlogin.control resume
 python3 -m src.szu_netlogin.control logout
 ```
 
-诊断当前网络状态：
+诊断当前校园网状态：
 
 ```bash
 python3 -m src.szu_netlogin.control diagnose
@@ -301,4 +301,4 @@ diagnose.py              兼容诊断入口
 
 ## 注意
 
-校园网接口可能会调整。如果登录或退出失败，先运行诊断命令并查看脱敏日志，再根据新的门户接口更新 `config.example.yaml` 或自己的 `config.yaml`。
+校园网接口可能会调整。如果登录或退出失败，先运行诊断命令并查看脱敏日志，再根据新的门户接口更新 `config.example.yaml` 或自己的 `config.yaml`。诊断里的“校园网出口”只代表宿舍区网关这条路径；如果 Mac 通过 VPN、热点或其他网络仍能上网，它也可能显示为不可用。

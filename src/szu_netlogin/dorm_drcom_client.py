@@ -139,12 +139,20 @@ class DormDrcomClient:
 
         parsed = self.parse_jsonp_response(response.text)
         result = self.is_success_response(parsed)
-        self.logger.info("宿舍区 Dr.COM 退出判断结果：%s", _result_label(result))
 
         if result is True:
+            self.logger.info("宿舍区 Dr.COM 退出判断结果：成功")
             return LogoutResult("success", "server_success")
+
         if result is False:
+            if self.is_inactive_logout_response(parsed):
+                self.logger.info("宿舍区 Dr.COM 退出判断结果：已无可注销会话")
+                return LogoutResult("success", "already_logged_out")
+
+            self.logger.info("宿舍区 Dr.COM 退出判断结果：失败")
             return LogoutResult("failed", "server_failed")
+
+        self.logger.info("宿舍区 Dr.COM 退出判断结果：不确定")
         return LogoutResult("unknown", "server_unknown")
 
     def _get_logout_url(self) -> str:
@@ -209,6 +217,18 @@ class DormDrcomClient:
             return True
         return None
 
+    def is_inactive_logout_response(self, parsed_or_text: Any) -> bool:
+        if isinstance(parsed_or_text, dict):
+            values = {
+                str(key).lower(): value for key, value in parsed_or_text.items()
+            }
+            message = " ".join(str(value) for value in values.values())
+            result_value = values.get("result", values.get("ret_code", values.get("code")))
+            return _is_negative_result(result_value) and _contains_inactive_logout_message(message)
+
+        return _contains_inactive_logout_message(str(parsed_or_text))
+
+
 def _contains_success(text: str) -> bool:
     lowered = text.lower()
     success_words = (
@@ -247,6 +267,31 @@ def _contains_failure(text: str) -> bool:
         "错误",
     )
     return any(word in lowered for word in failure_words)
+
+
+def _contains_inactive_logout_message(text: str) -> bool:
+    lowered = text.lower()
+    inactive_words = (
+        "不在线",
+        "未在线",
+        "未登录",
+        "未登陆",
+        "没有登录",
+        "没有登陆",
+        "no active",
+        "no session",
+        "not online",
+        "not logged in",
+        "already logged out",
+    )
+    return any(word in lowered for word in inactive_words)
+
+
+def _is_negative_result(value: Any) -> bool:
+    if isinstance(value, bool):
+        return not value
+    normalized = str(value).strip().lower()
+    return normalized in ("0", "false", "fail", "failed", "error", "-1")
 
 
 def _get_source_ip(url: str, timeout_seconds: int) -> str:

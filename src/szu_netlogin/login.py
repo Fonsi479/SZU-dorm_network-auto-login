@@ -12,7 +12,7 @@ from .config import ConfigError, get_password_env_name, load_config
 from .dorm_drcom_client import DormDrcomClient
 from .logger import get_logger
 from .password_store import describe_password_source, get_password, has_password
-from .portal_detect import check_gateway_reachable, check_internet
+from .portal_detect import probe_network
 from .state import is_paused
 
 
@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--check-and-login",
         action="store_true",
-        help="先检查是否已联网，未联网时再尝试登录",
+        help="先检查外网是否已可用，不可用时再尝试登录",
     )
     return parser.parse_args()
 
@@ -76,17 +76,18 @@ def main() -> int:
 
         if args.check_and_login:
             logger.info("运行模式：check-and-login")
-            print("正在检查是否已经可以访问外网...")
-            if check_internet(config):
-                print("已经可以访问外网，不需要登录。")
+            print("正在检查外网是否已经可用...")
+            network_status = probe_network(config)
+            if network_status.campus_internet_ok:
+                print("外网已经可用，不需要登录。")
                 print("如果只是想测试登录接口，请运行：python3 -m src.szu_netlogin.login")
-                logger.info("已联网，退出")
+                logger.info("外网已可用，退出")
                 return 0
 
             gateway_hosts = ((config.get("network") or {}).get("dorm_gateway_hosts") or ["172.30.255.42"])
             gateway_label = ", ".join(str(host) for host in gateway_hosts)
-            print(f"当前看起来还不能访问外网，正在检查宿舍区网关 {gateway_label}:801...")
-            if not check_gateway_reachable(config):
+            print(f"当前外网不可用，已检查宿舍区网关 {gateway_label}:801...")
+            if not network_status.gateway_reachable:
                 print("宿舍区网关不可访问，本次不尝试登录。")
                 logger.info("网关不可达，退出")
                 return 0

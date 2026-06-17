@@ -17,9 +17,12 @@ network:
     - "172.30.255.42"
   campus_wifi_names:
     - "SZU_CTC&CMCC"
+  timeout_seconds: 3
+  max_test_urls: 3
   test_urls:
-    - "https://www.baidu.com/"
     - "http://captive.apple.com/hotspot-detect.html"
+    - "http://www.baidu.com/"
+    - "https://www.baidu.com/"
 
 security:
   # 可选值：env、keychain、private_file

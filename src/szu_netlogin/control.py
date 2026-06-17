@@ -14,7 +14,7 @@ from typing import Any
 from .config import ConfigError, DEFAULT_CONFIG_PATH, PROJECT_ROOT, load_config
 from .logger import LOG_FILE, get_logger
 from .password_store import describe_password_source, has_password, set_password
-from .portal_detect import check_gateway_reachable, check_internet
+from .portal_detect import NetworkStatus, probe_network
 from .state import PAUSE_FLAG_FILE, is_paused, pause, resume
 
 
@@ -30,7 +30,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers.add_parser("resume", help="恢复自动登录")
     subparsers.add_parser("status", help="查看当前状态")
     subparsers.add_parser("login-now", help="立即登录")
-    subparsers.add_parser("check-and-login", help="检查外网，不通时自动登录")
+    subparsers.add_parser("check-and-login", help="检查校园网出口，不通时自动登录")
     subparsers.add_parser("diagnose", help="诊断当前网络状态")
     subparsers.add_parser("logout", help="退出校园网账号并暂停自动登录")
 
@@ -49,12 +49,29 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     if args.command == "pause":
-        pause()
+        try:
+            pause()
+        except OSError as exc:
+            print(f"暂停自动登录失败：无法写入暂停标记 {PAUSE_FLAG_FILE}：{exc}")
+            return 1
+        if not is_paused():
+            print("暂停自动登录失败：暂停标记没有写入。")
+            return 1
+        get_logger().info("已暂停自动登录：%s", PAUSE_FLAG_FILE)
         print("已暂停自动登录")
+        print(f"暂停标记：{PAUSE_FLAG_FILE}")
         return 0
 
     if args.command == "resume":
-        resume()
+        try:
+            resume()
+        except OSError as exc:
+            print(f"恢复自动登录失败：无法删除暂停标记 {PAUSE_FLAG_FILE}：{exc}")
+            return 1
+        if is_paused():
+            print("恢复自动登录失败：暂停标记仍然存在。")
+            return 1
+        get_logger().info("已恢复自动登录：%s", PAUSE_FLAG_FILE)
         print("已恢复自动登录")
         return 0
 
@@ -97,15 +114,16 @@ def print_status() -> int:
     config, config_error = _load_config_for_status()
     username = _get_username(config)
     launchagents = find_auto_login_launchagents()
+    network_status = probe_network(config) if config else NetworkStatus(False, False)
 
     print("SZU Netlogin 状态")
     print(f"当前是否暂停：{_yes_no(is_paused())}")
-    print(f"是否能访问外网：{_yes_no(check_internet(config))}")
-    print(f"宿舍区网关是否可达：{_yes_no(check_gateway_reachable(config))}")
+    print(f"外网是否可用：{_yes_no(network_status.campus_internet_ok)}")
+    print(f"宿舍区网关是否可达：{_yes_no(network_status.gateway_reachable)}")
     print(f"config.yaml 是否存在：{_yes_no(config_exists)}")
     print(f"是否已设置账号：{_yes_no(_is_username_set(username))}")
     print(f"是否已设置密码：{_yes_no(has_password(config) if config and _is_username_set(username) else False)}")
-    print(f"LaunchAgent 是否可能已安装：{_yes_no(LAUNCHAGENT_PLIST.exists())}")
+    print(f"LaunchAgent 是否可能已安装：{_yes_no(LAUNCHAGENT_PLIST.exists() or bool(launchagents))}")
     print(f"自动登录 LaunchAgent 数量：{len(launchagents)}")
     for plist_path in launchagents:
         print(f"- {plist_path}")
@@ -158,7 +176,14 @@ def diagnose_now() -> int:
 def logout_now() -> int:
     from .dorm_drcom_client import DormDrcomClient
 
-    pause()
+    try:
+        pause()
+    except OSError as exc:
+        print(f"退出前暂停自动登录失败，未发送注销请求：无法写入暂停标记 {PAUSE_FLAG_FILE}：{exc}")
+        return 1
+    if not is_paused():
+        print("退出前暂停自动登录失败，未发送注销请求：暂停标记没有写入。")
+        return 1
     logger = get_logger()
     logger.info("已先暂停自动登录，再尝试退出校园网账号")
     print("已先暂停自动登录，再尝试退出校园网账号")
@@ -184,12 +209,28 @@ def logout_now() -> int:
         return 2
 
     if result.status == "success":
-        print("已退出校园网账号，自动登录保持暂停")
+        if result.reason == "already_logged_out":
+            print("当前没有可退出的校园网会话，自动登录保持暂停")
+            return 0
+
+        if _verify_campus_logged_out(config):
+            print("已退出校园网账号，校园网出口已断开，自动登录保持暂停")
+        else:
+            print("已退出校园网账号，自动登录保持暂停")
         return 0
     if result.status == "failed":
+        if _verify_campus_logged_out(config):
+            print("退出接口返回失败，但校园网出口已经断开；按已退出处理。")
+            print("自动登录仍保持暂停，避免马上重新登录。")
+            return 0
         print(f"退出校园网账号失败：{_logout_failure_reason(result.reason)}")
         print("自动登录仍保持暂停，避免马上重新登录。")
         return 1
+
+    if _verify_campus_logged_out(config):
+        print("退出接口结果不确定，但校园网出口已经断开；按已退出处理。")
+        print("自动登录仍保持暂停，避免马上重新登录。")
+        return 0
 
     print(f"退出校园网账号结果不确定：{_logout_failure_reason(result.reason)}")
     print("自动登录仍保持暂停，避免马上重新登录。")
@@ -315,6 +356,15 @@ def _logout_failure_reason(reason: str) -> str:
     if reason.startswith("http_status_"):
         return f"HTTP 状态码 {reason.removeprefix('http_status_')}。"
     return reason or "未知原因。"
+
+
+def _verify_campus_logged_out(config: dict[str, Any]) -> bool:
+    try:
+        status = probe_network(config)
+    except Exception as exc:
+        get_logger().info("退出后校园网状态确认失败：%s", exc)
+        return False
+    return status.gateway_reachable and not status.campus_internet_ok
 
 
 def _replace_username(text: str, username: str) -> str:

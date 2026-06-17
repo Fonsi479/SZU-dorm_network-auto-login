@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 
 
-STATE_DIR = Path.home() / ".szu-netlogin"
+STATE_DIR_ENV = "SZU_NETLOGIN_STATE_DIR"
+STATE_DIR = Path(os.environ.get(STATE_DIR_ENV, Path.home() / ".szu-netlogin")).expanduser()
 PAUSE_FLAG_FILE = STATE_DIR / "paused"
 
 
 def is_paused() -> bool:
-    return PAUSE_FLAG_FILE.exists()
+    try:
+        return PAUSE_FLAG_FILE.exists()
+    except OSError:
+        return True
 
 
 def pause() -> None:
