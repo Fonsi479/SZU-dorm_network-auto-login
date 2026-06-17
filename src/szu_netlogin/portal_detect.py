@@ -91,27 +91,35 @@ def _probe_campus_internet(
     timeout_seconds: int,
 ) -> InternetProbe:
     urls = _get_test_urls(config)
+    fallback_configured = bool(source_ip and _allow_system_fallback(config))
     campus_probe = _probe_urls(
         _build_session(source_ip, trust_env=False),
         urls,
         timeout_seconds,
         route="campus_source",
         source_ip=source_ip,
+        log_failure=not fallback_configured,
     )
     if campus_probe.ok:
         return campus_probe
 
-    if source_ip and not campus_probe.portal_redirect and _allow_system_fallback(config):
+    if fallback_configured and campus_probe.portal_redirect:
+        _log_probe_failure(campus_probe.route, source_ip, campus_probe.reason)
+        return campus_probe
+
+    if fallback_configured:
         system_probe = _probe_urls(
             _build_session("", trust_env=True),
             urls,
             timeout_seconds,
             route="system_default",
             source_ip="",
+            log_failure=False,
         )
         if system_probe.ok:
-            get_logger().info(
-                "校园网出口检测：系统默认网络可用，校园网源地址检测失败 source_ip=%s reason=%s",
+            get_logger().debug(
+                "校园网源地址直连未通过，已使用系统默认路径 "
+                "source_ip=%s reason=%s",
                 source_ip or "-",
                 campus_probe.reason,
             )
@@ -121,9 +129,11 @@ def _probe_campus_internet(
                 route=system_probe.route,
             )
 
+        reason = f"campus_source={campus_probe.reason}; system_default={system_probe.reason}"
+        _log_probe_failure("campus_source+system_default", source_ip, reason)
         return InternetProbe(
             False,
-            f"campus_source={campus_probe.reason}; system_default={system_probe.reason}",
+            reason,
             portal_redirect=system_probe.portal_redirect,
             route=campus_probe.route,
         )
@@ -137,6 +147,7 @@ def _probe_urls(
     timeout_seconds: int,
     route: str,
     source_ip: str,
+    log_failure: bool = True,
 ) -> InternetProbe:
     logger = get_logger()
     failures: list[str] = []
@@ -175,13 +186,18 @@ def _probe_urls(
         failures.append(f"{_url_label(url)}=http_{response.status_code}")
 
     reason = "; ".join(failures) if failures else "no_test_url"
-    logger.info(
+    if log_failure:
+        _log_probe_failure(route, source_ip, reason)
+    return InternetProbe(False, reason, portal_redirect=portal_redirect, route=route)
+
+
+def _log_probe_failure(route: str, source_ip: str, reason: str) -> None:
+    get_logger().info(
         "校园网出口检测：不可用 route=%s source_ip=%s reason=%s",
         route,
         source_ip or "-",
         reason,
     )
-    return InternetProbe(False, reason, portal_redirect=portal_redirect, route=route)
 
 
 class SourceAddressAdapter(HTTPAdapter):

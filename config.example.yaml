@@ -19,6 +19,8 @@ network:
     - "SZU_CTC&CMCC"
   timeout_seconds: 3
   max_test_urls: 3
+  # 校园网源地址直连失败时，允许按 macOS 系统代理/VPN 路径确认外网可用。
+  allow_system_fallback: true
   test_urls:
     - "http://captive.apple.com/hotspot-detect.html"
     - "http://www.baidu.com/"

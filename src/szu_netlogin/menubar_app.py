@@ -6,12 +6,15 @@ import logging
 import os
 import subprocess
 import sys
+import threading
+import time
 import traceback
+from dataclasses import dataclass
 from datetime import datetime
 from logging.handlers import QueueHandler, QueueListener
 from pathlib import Path
-from queue import Queue
-from typing import Any
+from queue import Empty, Queue
+from typing import Any, Callable
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -53,6 +56,38 @@ CONTROL_DISPATCH_ARG = "--szu-netlogin-control"
 USERNAME_PLACEHOLDER = "你的校园卡号，不要写密码"
 RumpsAppBase = rumps.App if rumps is not None else object
 MENUBAR_LOG_LISTENERS: list[QueueListener] = []
+STATUS_REFRESH_SECONDS = 30
+WATCHDOG_INTERVAL_SECONDS = 5
+AUTO_LOGIN_INTERVAL_SECONDS = 120
+AUTO_LOGIN_INITIAL_DELAY_SECONDS = 5
+
+
+@dataclass(frozen=True)
+class StatusRefreshResult:
+    paused: bool
+    network_status: NetworkStatus
+    config_error: str = ""
+
+
+class PeriodicDeadline:
+    """Wall-clock schedule that becomes due immediately after a long sleep gap."""
+
+    def __init__(
+        self,
+        interval_seconds: float,
+        initial_delay_seconds: float,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.interval_seconds = interval_seconds
+        self._clock = clock
+        self._deadline = clock() + initial_delay_seconds
+
+    def consume_if_due(self) -> bool:
+        now = self._clock()
+        if now < self._deadline:
+            return False
+        self._deadline = now + self.interval_seconds
+        return True
 
 
 def get_menubar_logger() -> logging.Logger:
@@ -114,6 +149,13 @@ class SzuDormMenubarApp(RumpsAppBase):
     def __init__(self) -> None:
         self.logger = get_menubar_logger()
         self._refresh_in_progress = False
+        self._auto_login_in_progress = False
+        self._worker_lock = threading.Lock()
+        self._background_results: Queue[tuple[str, Any]] = Queue()
+        self._auto_login_schedule = PeriodicDeadline(
+            AUTO_LOGIN_INTERVAL_SECONDS,
+            AUTO_LOGIN_INITIAL_DELAY_SECONDS,
+        )
         self._warn_if_config_missing()
         self._warn_if_optional_dependencies_missing()
 
@@ -150,8 +192,11 @@ class SzuDormMenubarApp(RumpsAppBase):
             quit_button=None,
         )
 
-        self.timer = rumps.Timer(self.refresh_status, 30)
+        self.timer = rumps.Timer(self.refresh_status, STATUS_REFRESH_SECONDS)
         self.timer.start()
+        self.watchdog_timer = rumps.Timer(self._watchdog_tick, WATCHDOG_INTERVAL_SECONDS)
+        self.watchdog_timer.start()
+        self.refresh_status(None)
 
     def _warn_if_config_missing(self) -> None:
         if DEFAULT_CONFIG_PATH.exists():
@@ -181,32 +226,104 @@ class SzuDormMenubarApp(RumpsAppBase):
         rumps.alert("SZU Dorm 依赖缺失", message)
 
     def refresh_status(self, _sender: Any) -> None:
-        if self._refresh_in_progress:
-            return
+        with self._worker_lock:
+            if self._refresh_in_progress:
+                return
+            self._refresh_in_progress = True
 
-        self._refresh_in_progress = True
+        threading.Thread(
+            target=self._refresh_status_worker,
+            name="szu-status-refresh",
+            daemon=True,
+        ).start()
+
+    def _refresh_status_worker(self) -> None:
         try:
             config, config_error = self._load_config_for_status()
             paused = is_paused()
             network_status = probe_network(config) if config else NetworkStatus(False, False)
-
-            run_label = "已暂停" if paused else "运行中"
-            campus_label = "外网已连通" if network_status.campus_internet_ok else "外网未连通"
-            gateway_label = "网关可达" if network_status.gateway_reachable else "网关不可达"
-            self.status_item.title = f"状态：{run_label}｜{campus_label}｜{gateway_label}"
-            self.pause_item.title = "恢复自动登录" if paused else "暂停自动登录"
-
-            message = (
-                f"状态刷新：{run_label}，{campus_label}，{gateway_label}，"
-                f"时间={datetime.now().strftime('%H:%M:%S')}"
+            self._background_results.put(
+                ("status", StatusRefreshResult(paused, network_status, config_error))
             )
-            if config_error:
-                message += f"，配置提示={config_error}"
-            self.logger.info(message)
         except Exception as exc:
-            self._handle_exception("刷新状态失败", exc)
+            self._background_results.put(
+                ("background_error", ("刷新状态失败", exc, traceback.format_exc()))
+            )
         finally:
-            self._refresh_in_progress = False
+            with self._worker_lock:
+                self._refresh_in_progress = False
+
+    def _apply_status_result(self, result: StatusRefreshResult) -> None:
+        run_label = "已暂停" if result.paused else "运行中"
+        campus_label = "外网已连通" if result.network_status.campus_internet_ok else "外网未连通"
+        gateway_label = "网关可达" if result.network_status.gateway_reachable else "网关不可达"
+        self.status_item.title = f"状态：{run_label}｜{campus_label}｜{gateway_label}"
+        self.pause_item.title = "恢复自动登录" if result.paused else "暂停自动登录"
+
+        message = (
+            f"状态刷新：{run_label}，{campus_label}，{gateway_label}，"
+            f"时间={datetime.now().strftime('%H:%M:%S')}"
+        )
+        if result.config_error:
+            message += f"，配置提示={result.config_error}"
+        self.logger.info(message)
+
+    def _watchdog_tick(self, _sender: Any) -> None:
+        self._drain_background_results()
+
+        if not self.timer.is_alive():
+            self.logger.warning("状态刷新定时器已停止，正在重新启动。")
+            self.timer.start()
+
+        if self._auto_login_schedule.consume_if_due() and not is_paused():
+            self._start_auto_login_check()
+
+    def _start_auto_login_check(self) -> None:
+        with self._worker_lock:
+            if self._auto_login_in_progress:
+                return
+            self._auto_login_in_progress = True
+
+        threading.Thread(
+            target=self._auto_login_worker,
+            name="szu-auto-login",
+            daemon=True,
+        ).start()
+
+    def _auto_login_worker(self) -> None:
+        try:
+            result = self._run_control_process(["check-and-login"], timeout=80)
+            self._background_results.put(("auto_login", result.returncode))
+        except Exception as exc:
+            self._background_results.put(
+                ("background_error", ("自动登录检查失败", exc, traceback.format_exc()))
+            )
+        finally:
+            with self._worker_lock:
+                self._auto_login_in_progress = False
+
+    def _drain_background_results(self) -> None:
+        while True:
+            try:
+                kind, payload = self._background_results.get_nowait()
+            except Empty:
+                return
+
+            if kind == "status":
+                self._apply_status_result(payload)
+                continue
+
+            if kind == "auto_login":
+                if payload == 0:
+                    self.logger.info("后台自动登录检查完成。")
+                else:
+                    self.logger.warning("后台自动登录检查返回失败：returncode=%s", payload)
+                self.refresh_status(None)
+                continue
+
+            title, exc, formatted_traceback = payload
+            message = str(exc) or type(exc).__name__
+            self.logger.error("%s：%s\n%s", title, message, formatted_traceback)
 
     def login_now(self, _sender: Any) -> None:
         try:
