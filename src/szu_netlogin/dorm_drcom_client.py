@@ -6,8 +6,7 @@ import json
 import re
 import socket
 from dataclasses import dataclass
-from typing import Any
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse, urlunparse
 
 import requests
@@ -15,6 +14,10 @@ import requests
 from .logger import get_logger, redact_sensitive_text
 
 LogoutStatus = Literal["success", "failed", "unknown"]
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+)
 
 
 @dataclass(frozen=True)
@@ -63,7 +66,7 @@ class DormDrcomClient:
                 params=params,
                 timeout=timeout_seconds,
                 headers={
-                    "User-Agent": _user_agent(),
+                    "User-Agent": USER_AGENT,
                     "Referer": "http://172.30.255.42:801/",
                 },
             )
@@ -112,7 +115,7 @@ class DormDrcomClient:
                 params=params,
                 timeout=timeout_seconds,
                 headers={
-                    "User-Agent": _user_agent(),
+                    "User-Agent": USER_AGENT,
                     "Referer": "http://172.30.255.42:801/",
                 },
             )
@@ -322,10 +325,3 @@ def _safe_exception_summary(exc: requests.RequestException, password: str = "") 
     text = re.sub(r"(?i)https?://[^\s)]+", "[url_redacted]", text)
     text = re.sub(r"(?i)(cookie\s*[:=]\s*)[^\s;]+", r"\1***", text)
     return text
-
-
-def _user_agent() -> str:
-    return (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
-    )

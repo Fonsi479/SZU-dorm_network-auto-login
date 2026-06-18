@@ -3,10 +3,41 @@ from __future__ import annotations
 import unittest
 from unittest.mock import Mock, patch
 
-from src.szu_netlogin.portal_detect import InternetProbe, _probe_campus_internet
+from src.szu_netlogin.portal_detect import (
+    GatewayProbe,
+    InternetProbe,
+    NetworkStatus,
+    _probe_campus_internet,
+    check_gateway_reachable,
+    check_internet,
+)
 
 
 class CampusInternetProbeTests(unittest.TestCase):
+    @patch("src.szu_netlogin.portal_detect.probe_network")
+    def test_check_internet_defers_timeout_to_probe_network(
+        self,
+        probe_network: Mock,
+    ) -> None:
+        config = {"network": {"timeout_seconds": 9}}
+        probe_network.return_value = NetworkStatus(True, True)
+
+        self.assertTrue(check_internet(config))
+
+        probe_network.assert_called_once_with(config, timeout_seconds=None)
+
+    @patch("src.szu_netlogin.portal_detect._probe_gateway")
+    def test_check_gateway_reachable_uses_configured_timeout(
+        self,
+        probe_gateway: Mock,
+    ) -> None:
+        config = {"network": {"timeout_seconds": 9}}
+        probe_gateway.return_value = GatewayProbe(True)
+
+        self.assertTrue(check_gateway_reachable(config))
+
+        probe_gateway.assert_called_once_with(config, 9)
+
     @patch("src.szu_netlogin.portal_detect.get_logger")
     @patch("src.szu_netlogin.portal_detect._build_session")
     @patch("src.szu_netlogin.portal_detect._probe_urls")

@@ -12,6 +12,21 @@ LOG_FILE = LOG_DIR / "netlogin.log"
 FALLBACK_LOG_FILE = Path(__file__).resolve().parents[2] / "logs" / "netlogin.log"
 
 LOGGER_NAME = "szu_netlogin"
+LOGIN_URL_PATTERNS = (
+    re.compile(r"(?i)https?://[^\s)]*/eportal/portal/login\?[^\s)]+"),
+    re.compile(r"(?i)/eportal/portal/login\?[^\s)]+"),
+)
+SENSITIVE_PATTERNS = (
+    (re.compile(r"(?i)(user_password\s*=\s*)[^&\s)]+"), r"\1***"),
+    (re.compile(r"(?i)(password\s*=\s*)[^&\s)]+"), r"\1***"),
+    (re.compile(r"(?i)(user_account\s*=\s*)[^&\s)]+"), r"\1***"),
+    (re.compile(r'(?i)("user_password"\s*:\s*")[^"]*(")'), r"\1***\2"),
+    (re.compile(r'(?i)("password"\s*:\s*")[^"]*(")'), r"\1***\2"),
+    (re.compile(r'(?i)("user_account"\s*:\s*")[^"]*(")'), r"\1***\2"),
+    (re.compile(r"(?i)('user_password'\s*:\s*')[^']*(')"), r"\1***\2"),
+    (re.compile(r"(?i)('password'\s*:\s*')[^']*(')"), r"\1***\2"),
+    (re.compile(r"(?i)('user_account'\s*:\s*')[^']*(')"), r"\1***\2"),
+)
 
 
 def redact_sensitive_text(text: object, password: str | None = None) -> str:
@@ -21,31 +36,11 @@ def redact_sensitive_text(text: object, password: str | None = None) -> str:
     if password:
         value = value.replace(password, "***")
 
-    value = re.sub(
-        r"(?i)https?://[^\s)]*/eportal/portal/login\?[^\s)]+",
-        "[login_url_redacted]",
-        value,
-    )
-    value = re.sub(
-        r"(?i)/eportal/portal/login\?[^\s)]+",
-        "[login_url_redacted]",
-        value,
-    )
+    for pattern in LOGIN_URL_PATTERNS:
+        value = pattern.sub("[login_url_redacted]", value)
 
-    patterns = (
-        (r"(?i)(user_password\s*=\s*)[^&\s)]+", r"\1***"),
-        (r"(?i)(password\s*=\s*)[^&\s)]+", r"\1***"),
-        (r"(?i)(user_account\s*=\s*)[^&\s)]+", r"\1***"),
-        (r'(?i)("user_password"\s*:\s*")[^"]*(")', r"\1***\2"),
-        (r'(?i)("password"\s*:\s*")[^"]*(")', r"\1***\2"),
-        (r'(?i)("user_account"\s*:\s*")[^"]*(")', r"\1***\2"),
-        (r"(?i)('user_password'\s*:\s*')[^']*(')", r"\1***\2"),
-        (r"(?i)('password'\s*:\s*')[^']*(')", r"\1***\2"),
-        (r"(?i)('user_account'\s*:\s*')[^']*(')", r"\1***\2"),
-    )
-
-    for pattern, replacement in patterns:
-        value = re.sub(pattern, replacement, value)
+    for pattern, replacement in SENSITIVE_PATTERNS:
+        value = pattern.sub(replacement, value)
 
     return value
 

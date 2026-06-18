@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import traceback
+from importlib.util import find_spec
 from dataclasses import dataclass
 from datetime import datetime
 from logging.handlers import QueueHandler, QueueListener
@@ -213,10 +214,8 @@ class SzuDormMenubarApp(RumpsAppBase):
     def _warn_if_optional_dependencies_missing(self) -> None:
         missing_messages: list[str] = []
 
-        try:
-            import keyring  # type: ignore[import-not-found]  # noqa: F401
-        except Exception as exc:
-            missing_messages.append(f"keyring：{exc}")
+        if find_spec("keyring") is None:
+            missing_messages.append("keyring：未安装")
 
         if not missing_messages:
             return

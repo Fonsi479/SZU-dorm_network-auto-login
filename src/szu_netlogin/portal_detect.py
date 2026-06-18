@@ -22,6 +22,10 @@ DEFAULT_TEST_URLS = (
     "http://www.baidu.com/",
     "https://www.baidu.com/",
 )
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+)
 
 
 @dataclass(frozen=True)
@@ -55,7 +59,7 @@ class InternetProbe:
 
 def check_internet(
     config: dict[str, Any] | None = None,
-    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    timeout_seconds: int | None = None,
 ) -> bool:
     """Return True when the dorm gateway path can reach outside URLs."""
     return probe_network(config, timeout_seconds=timeout_seconds).campus_internet_ok
@@ -92,14 +96,18 @@ def _probe_campus_internet(
 ) -> InternetProbe:
     urls = _get_test_urls(config)
     fallback_configured = bool(source_ip and _allow_system_fallback(config))
-    campus_probe = _probe_urls(
-        _build_session(source_ip, trust_env=False),
-        urls,
-        timeout_seconds,
-        route="campus_source",
-        source_ip=source_ip,
-        log_failure=not fallback_configured,
-    )
+    campus_session = _build_session(source_ip, trust_env=False)
+    try:
+        campus_probe = _probe_urls(
+            campus_session,
+            urls,
+            timeout_seconds,
+            route="campus_source",
+            source_ip=source_ip,
+            log_failure=not fallback_configured,
+        )
+    finally:
+        campus_session.close()
     if campus_probe.ok:
         return campus_probe
 
@@ -108,14 +116,18 @@ def _probe_campus_internet(
         return campus_probe
 
     if fallback_configured:
-        system_probe = _probe_urls(
-            _build_session("", trust_env=True),
-            urls,
-            timeout_seconds,
-            route="system_default",
-            source_ip="",
-            log_failure=False,
-        )
+        system_session = _build_session("", trust_env=True)
+        try:
+            system_probe = _probe_urls(
+                system_session,
+                urls,
+                timeout_seconds,
+                route="system_default",
+                source_ip="",
+                log_failure=False,
+            )
+        finally:
+            system_session.close()
         if system_probe.ok:
             get_logger().debug(
                 "校园网源地址直连未通过，已使用系统默认路径 "
@@ -159,7 +171,7 @@ def _probe_urls(
                 url,
                 timeout=timeout_seconds,
                 allow_redirects=False,
-                headers={"User-Agent": _user_agent()},
+                headers={"User-Agent": USER_AGENT},
             )
         except requests.RequestException as exc:
             failures.append(f"{_url_label(url)}={_request_failure_reason(exc)}")
@@ -259,10 +271,11 @@ def _probe_gateway(
 
 def check_gateway_reachable(
     config: dict[str, Any] | None = None,
-    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    timeout_seconds: int | None = None,
 ) -> bool:
     """Return True when one dorm gateway host accepts a TCP connection."""
-    return _probe_gateway(config, timeout_seconds).reachable
+    timeout = timeout_seconds if timeout_seconds is not None else _get_timeout_seconds(config)
+    return _probe_gateway(config, timeout).reachable
 
 
 def maybe_need_login(config: dict[str, Any] | None = None) -> bool:
@@ -350,10 +363,3 @@ def _request_failure_reason(exc: requests.RequestException) -> str:
 def _url_label(url: str) -> str:
     parsed = urlparse(url)
     return parsed.hostname or url[:40]
-
-
-def _user_agent() -> str:
-    return (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
-    )
