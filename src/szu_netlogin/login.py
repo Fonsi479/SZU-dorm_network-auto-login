@@ -47,7 +47,7 @@ def main() -> int:
         lock_handle = acquire_lock(logger)
         if lock_handle is None:
             print("已有一次自动检查正在运行，本次直接退出。")
-            logger.info("登录失败")
+            logger.info("自动检查跳过：已有一次自动检查正在运行")
             return 0
 
     try:
@@ -88,8 +88,8 @@ def main() -> int:
             gateway_label = ", ".join(str(host) for host in gateway_hosts)
             print(f"当前外网不可用，已检查宿舍区网关 {gateway_label}:801...")
             if not network_status.gateway_reachable:
-                print("宿舍区网关不可访问，本次不尝试登录。")
-                logger.info("网关不可达，退出")
+                print("当前不是宿舍区校园网或宿舍区网关不可访问，本轮自动登录已停止。")
+                logger.info("网关不可达，自动登录停止本轮")
                 return 0
 
             print("宿舍区网关可访问，准备尝试宿舍区 Dr.COM 登录。")
@@ -152,7 +152,8 @@ def _print_password_setup_hint(config: dict[str, Any]) -> None:
         print("请先运行：python3 -m src.szu_netlogin.control set-password")
         return
     if password_source == "private_file":
-        print(f"请在私有密码文件中写入密码：{security.get('password_file')}")
+        print("请先运行：python3 -m src.szu_netlogin.control set-password")
+        print(f"或在私有密码文件中写入密码：{security.get('password_file')}")
         return
     print("请检查 config.yaml 的 security.password_source。")
 

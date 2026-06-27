@@ -26,7 +26,7 @@ if __package__ in (None, ""):
         PROJECT_ROOT,
         load_config,
     )
-    from src.szu_netlogin.password_store import set_password
+    from src.szu_netlogin.password_store import describe_password_source, set_password
     from src.szu_netlogin.portal_detect import NetworkStatus, probe_network
     from src.szu_netlogin.state import is_paused
 else:
@@ -37,7 +37,7 @@ else:
         PROJECT_ROOT,
         load_config,
     )
-    from .password_store import set_password
+    from .password_store import describe_password_source, set_password
     from .portal_detect import NetworkStatus, probe_network
     from .state import is_paused
 
@@ -48,6 +48,13 @@ except Exception as exc:  # pragma: no cover - exercised on machines missing GUI
     RUMPS_IMPORT_ERROR: Exception | None = exc
 else:
     RUMPS_IMPORT_ERROR = None
+
+try:
+    from Foundation import NSThread
+    from PyObjCTools import AppHelper
+except Exception:  # pragma: no cover - exercised on machines missing GUI deps
+    NSThread = None  # type: ignore[assignment]
+    AppHelper = None  # type: ignore[assignment]
 
 
 MENUBAR_LOG_FILE = PROJECT_ROOT / "logs" / "menubar.log"
@@ -151,6 +158,7 @@ class SzuDormMenubarApp(RumpsAppBase):
         self.logger = get_menubar_logger()
         self._refresh_in_progress = False
         self._auto_login_in_progress = False
+        self._last_status_result: StatusRefreshResult | None = None
         self._worker_lock = threading.Lock()
         self._background_results: Queue[tuple[str, Any]] = Queue()
         self._auto_login_schedule = PeriodicDeadline(
@@ -253,8 +261,11 @@ class SzuDormMenubarApp(RumpsAppBase):
                 self._refresh_in_progress = False
 
     def _apply_status_result(self, result: StatusRefreshResult) -> None:
-        run_label = "已暂停" if result.paused else "运行中"
-        campus_label = "外网已连通" if result.network_status.campus_internet_ok else "外网未连通"
+        self._last_status_result = result
+        run_label = auto_login_state_label(result.paused, result)
+        campus_label = (
+            "校园网出口已连通" if result.network_status.campus_internet_ok else "校园网出口未连通"
+        )
         gateway_label = "网关可达" if result.network_status.gateway_reachable else "网关不可达"
         self.status_item.title = f"状态：{run_label}｜{campus_label}｜{gateway_label}"
         self.pause_item.title = "恢复自动登录" if result.paused else "暂停自动登录"
@@ -268,14 +279,25 @@ class SzuDormMenubarApp(RumpsAppBase):
         self.logger.info(message)
 
     def _watchdog_tick(self, _sender: Any) -> None:
+        if not is_main_thread():
+            run_on_main_thread(self._watchdog_tick, _sender)
+            return
+
         self._drain_background_results()
 
         if not self.timer.is_alive():
             self.logger.warning("状态刷新定时器已停止，正在重新启动。")
             self.timer.start()
 
-        if self._auto_login_schedule.consume_if_due() and not is_paused():
+        if not self._auto_login_schedule.consume_if_due():
+            return
+
+        if should_start_auto_login(is_paused(), self._last_status_result):
             self._start_auto_login_check()
+            return
+
+        if is_non_campus_status(self._last_status_result):
+            self.logger.info("当前不是宿舍区校园网：网关不可达，本轮自动登录已停止。")
 
     def _start_auto_login_check(self) -> None:
         with self._worker_lock:
@@ -302,6 +324,10 @@ class SzuDormMenubarApp(RumpsAppBase):
                 self._auto_login_in_progress = False
 
     def _drain_background_results(self) -> None:
+        if not is_main_thread():
+            run_on_main_thread(self._drain_background_results)
+            return
+
         while True:
             try:
                 kind, payload = self._background_results.get_nowait()
@@ -372,11 +398,7 @@ class SzuDormMenubarApp(RumpsAppBase):
             self.logger.info("用户点击：%s", "恢复自动登录" if command == "resume" else "暂停自动登录")
             self._run_control([command], timeout=20)
             if command == "resume":
-                result = self._run_control_process(["check-and-login"], timeout=80)
-                if result.returncode == 0:
-                    rumps.notification("SZU Dorm", "已恢复自动登录", "已立即检查网络状态。")
-                else:
-                    rumps.alert("自动登录检查失败", short_output(result) or "详情可查看日志。")
+                rumps.notification("SZU Dorm", "已恢复自动登录", "状态已刷新。")
             else:
                 rumps.notification("SZU Dorm", "已暂停自动登录", "状态已刷新。")
             self.refresh_status(None)
@@ -415,6 +437,15 @@ class SzuDormMenubarApp(RumpsAppBase):
                 rumps.alert("修改密码失败", "请先设置校园网账号。")
                 return
 
+            security = config.get("security") or {}
+            if str(security.get("password_source", "env")) == "env":
+                rumps.alert(
+                    "修改密码失败",
+                    f"当前密码来源是 {describe_password_source(config)}，"
+                    "请在 shell/LaunchAgent 中设置它，或把 security.password_source 改为 keychain/private_file。",
+                )
+                return
+
             response = rumps.Window(
                 message=f"请输入 {mask_username(username)} 的校园网密码：",
                 title="修改密码",
@@ -431,19 +462,17 @@ class SzuDormMenubarApp(RumpsAppBase):
                 rumps.alert("修改密码失败", "密码不能为空，未保存。")
                 return
 
+            password_source_label = describe_password_source(config)
             set_password(config, password)
-            self.logger.info("密码已保存到 macOS Keychain：username=%s", mask_username(username))
-            security = config.get("security") or {}
-            if str(security.get("password_source", "env")) != "keychain":
-                source = str(security.get("password_source", "env"))
-                rumps.alert(
-                    "密码已保存，但当前不会读取",
-                    f"密码已保存到 macOS Keychain，但 config.yaml 当前 password_source 是 {source}。"
-                    "请改为 keychain，或改用对应的密码来源。",
-                )
-            else:
-                rumps.notification("SZU Dorm", "密码已保存", "已保存到 macOS Keychain。")
+            self.logger.info(
+                "密码已保存：source=%s username=%s",
+                password_source_label,
+                mask_username(username),
+            )
+            rumps.notification("SZU Dorm", "密码已保存", f"已保存到 {password_source_label}。")
             self.refresh_status(None)
+        except ValueError as exc:
+            rumps.alert("修改密码失败", str(exc))
         except Exception as exc:
             self._handle_exception("修改密码失败", exc)
 
@@ -564,6 +593,44 @@ def get_username(config: dict[str, Any]) -> str:
 
 def is_username_set(username: str) -> bool:
     return bool(username and username != USERNAME_PLACEHOLDER)
+
+
+def is_non_campus_status(result: StatusRefreshResult | None) -> bool:
+    if result is None or result.config_error:
+        return False
+    return not result.network_status.gateway_reachable
+
+
+def should_start_auto_login(paused: bool, result: StatusRefreshResult | None) -> bool:
+    if paused:
+        return False
+    if result is None or result.config_error:
+        return False
+    return result.network_status.maybe_need_login
+
+
+def auto_login_state_label(paused: bool, result: StatusRefreshResult) -> str:
+    if paused:
+        return "已暂停"
+    if is_non_campus_status(result):
+        return "非校园网，自动登录停用"
+    return "运行中"
+
+
+def is_main_thread() -> bool:
+    if NSThread is not None:
+        try:
+            return bool(NSThread.isMainThread())
+        except Exception:
+            pass
+    return threading.current_thread() is threading.main_thread()
+
+
+def run_on_main_thread(callback: Callable[..., None], *args: Any) -> None:
+    if is_main_thread() or AppHelper is None:
+        callback(*args)
+        return
+    AppHelper.callAfter(callback, *args)
 
 
 def mask_username(username: str) -> str:

@@ -37,7 +37,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     username_parser = subparsers.add_parser("set-username", help="修改 config.yaml 里的学号")
     username_parser.add_argument("username", help="校园卡号/学号")
 
-    subparsers.add_parser("set-password", help="保存密码到 macOS Keychain")
+    subparsers.add_parser("set-password", help="按 config.yaml 的密码来源保存密码")
     subparsers.add_parser("open-config", help="打开 config.yaml")
     subparsers.add_parser("open-log", help="打开日志文件")
     subparsers.add_parser("open-project", help="打开项目目录")
@@ -266,21 +266,30 @@ def set_password_interactive() -> int:
         print("请先设置账号：python3 -m src.szu_netlogin.control set-username 学号")
         return 2
 
+    security = config.get("security") or {}
+    if str(security.get("password_source", "env")) == "env":
+        print(
+            f"保存密码失败：当前密码来源是 {describe_password_source(config)}，"
+            "请在 shell/LaunchAgent 中设置它，或把 security.password_source 改为 keychain/private_file。"
+        )
+        return 2
+
     password = getpass.getpass("请输入校园网密码（不会显示）：")
     if not password:
         print("密码不能为空，未保存。")
         return 2
 
+    password_source_label = describe_password_source(config)
     try:
         set_password(config, password)
+    except ValueError as exc:
+        print(f"保存密码失败：{exc}")
+        return 2
     except Exception as exc:
-        print(f"保存到 macOS Keychain 失败：{exc}")
+        print(f"保存密码失败：{exc}")
         return 1
 
-    print("密码已保存到 macOS Keychain。")
-    security = config.get("security") or {}
-    if str(security.get("password_source", "env")) != "keychain":
-        print(f"提醒：当前配置的密码来源是 {describe_password_source(config)}，登录时不会读取刚保存的 Keychain 密码。")
+    print(f"密码已保存到 {password_source_label}。")
     return 0
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 from dataclasses import dataclass
+from ipaddress import ip_address, ip_network
 from typing import Any
 from urllib.parse import urlparse
 
@@ -22,6 +23,7 @@ DEFAULT_TEST_URLS = (
     "http://www.baidu.com/",
     "https://www.baidu.com/",
 )
+DEFAULT_CAMPUS_SOURCE_CIDRS = ("172.16.0.0/12",)
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
@@ -254,6 +256,15 @@ def _probe_gateway(
         try:
             with socket.create_connection((host, 801), timeout=timeout_seconds) as sock:
                 source_ip = str(sock.getsockname()[0])
+                if not is_allowed_campus_source_ip(config, source_ip):
+                    failures.append(f"{host}=source_ip_not_allowed:{source_ip}")
+                    logger.info(
+                        "宿舍区网关检测：忽略非校园网源地址 host=%s port=801 source_ip=%s",
+                        host,
+                        source_ip,
+                    )
+                    continue
+
                 logger.info(
                     "宿舍区网关检测：可连接 host=%s port=801 source_ip=%s",
                     host,
@@ -325,6 +336,32 @@ def _get_max_test_urls(config: dict[str, Any] | None) -> int:
 def _allow_system_fallback(config: dict[str, Any] | None) -> bool:
     network = (config or {}).get("network") or {}
     return bool(network.get("allow_system_fallback", True))
+
+
+def is_allowed_campus_source_ip(config: dict[str, Any] | None, source_ip: str) -> bool:
+    try:
+        address = ip_address(source_ip)
+    except ValueError:
+        return False
+
+    networks = _get_campus_source_networks(config)
+    if not networks:
+        return True
+    return any(address in network for network in networks)
+
+
+def _get_campus_source_networks(config: dict[str, Any] | None):
+    network_config = (config or {}).get("network") or {}
+    configured_cidrs = network_config.get("campus_source_cidrs")
+    cidrs = configured_cidrs if isinstance(configured_cidrs, list) else DEFAULT_CAMPUS_SOURCE_CIDRS
+
+    networks = []
+    for cidr in cidrs:
+        try:
+            networks.append(ip_network(str(cidr), strict=False))
+        except ValueError:
+            continue
+    return networks
 
 
 def _looks_like_portal(text: str) -> bool:

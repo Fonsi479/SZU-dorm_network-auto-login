@@ -8,8 +8,10 @@ from src.szu_netlogin.portal_detect import (
     InternetProbe,
     NetworkStatus,
     _probe_campus_internet,
+    _probe_gateway,
     check_gateway_reachable,
     check_internet,
+    is_allowed_campus_source_ip,
 )
 
 
@@ -84,6 +86,26 @@ class CampusInternetProbeTests(unittest.TestCase):
             call for call in logger.info.call_args_list if "检测：不可用" in str(call.args[0])
         ]
         self.assertEqual(len(unavailable_calls), 1)
+
+    def test_default_campus_source_cidr_rejects_tun_address(self) -> None:
+        self.assertTrue(is_allowed_campus_source_ip({}, "172.24.182.13"))
+        self.assertFalse(is_allowed_campus_source_ip({}, "198.18.0.1"))
+
+    @patch("src.szu_netlogin.portal_detect.get_logger")
+    @patch("src.szu_netlogin.portal_detect.socket.create_connection")
+    def test_gateway_probe_ignores_non_campus_source_ip(
+        self,
+        create_connection: Mock,
+        _get_logger: Mock,
+    ) -> None:
+        sock = Mock()
+        sock.getsockname.return_value = ("198.18.0.1", 54321)
+        create_connection.return_value.__enter__.return_value = sock
+
+        result = _probe_gateway({"network": {"dorm_gateway_hosts": ["172.30.255.42"]}}, 3)
+
+        self.assertFalse(result.reachable)
+        self.assertIn("source_ip_not_allowed", result.reason)
 
 
 if __name__ == "__main__":

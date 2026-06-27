@@ -12,6 +12,7 @@ from urllib.parse import urlparse, urlunparse
 import requests
 
 from .logger import get_logger, redact_sensitive_text
+from .portal_detect import SourceAddressAdapter, is_allowed_campus_source_ip
 
 LogoutStatus = Literal["success", "failed", "unknown"]
 USER_AGENT = (
@@ -52,13 +53,23 @@ class DormDrcomClient:
         }
 
         source_ip = _get_source_ip(str(self.auth["login_url"]), int(self.auth["timeout_seconds"]))
-        if source_ip:
+        if source_ip and is_allowed_campus_source_ip(self.config, source_ip):
             params["wlan_user_ip"] = source_ip
+        elif source_ip:
+            self.logger.info("宿舍区 Dr.COM 退出参数跳过非校园网源地址：source_ip=%s", source_ip)
         return params
 
     def login(self, username: str, password: str) -> bool | None:
         params = self.build_login_params(username, password)
         timeout_seconds = int(self.auth["timeout_seconds"])
+        source_ip = _get_source_ip(str(self.auth["login_url"]), timeout_seconds)
+        if source_ip and not is_allowed_campus_source_ip(self.config, source_ip):
+            self.logger.info("宿舍区 Dr.COM 登录跳过：源地址不是校园网地址 source_ip=%s", source_ip)
+            return False
+        if source_ip:
+            adapter = SourceAddressAdapter(source_ip)
+            self.session.mount("http://", adapter)
+            self.session.mount("https://", adapter)
 
         try:
             response = self.session.get(
@@ -194,22 +205,17 @@ class DormDrcomClient:
             }
             message = " ".join(str(value) for value in values.values())
 
+            for key in ("success", "result", "ret_code", "code"):
+                if key not in values:
+                    continue
+                result = _parse_result_value(values[key])
+                if result is not None:
+                    return result
+
             if _contains_failure(message):
                 return False
             if _contains_success(message):
                 return True
-
-            for key in ("success", "result", "ret_code", "code"):
-                if key not in values:
-                    continue
-                value = values[key]
-                if isinstance(value, bool):
-                    return value
-                normalized = str(value).strip().lower()
-                if normalized in ("1", "true", "ok", "success"):
-                    return True
-                if normalized in ("0", "false", "fail", "failed", "error", "-1"):
-                    return False
 
             return None
 
@@ -227,9 +233,24 @@ class DormDrcomClient:
             }
             message = " ".join(str(value) for value in values.values())
             result_value = values.get("result", values.get("ret_code", values.get("code")))
-            return _is_negative_result(result_value) and _contains_inactive_logout_message(message)
+            result = _parse_result_value(result_value)
+            return result is not True and _contains_inactive_logout_message(message)
 
         return _contains_inactive_logout_message(str(parsed_or_text))
+
+
+def _parse_result_value(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+
+    normalized = str(value).strip().lower()
+    if normalized in ("1", "true", "ok", "success"):
+        return True
+    if _is_negative_result(value):
+        return False
+    return None
 
 
 def _contains_success(text: str) -> bool:
@@ -246,6 +267,9 @@ def _contains_success(text: str) -> bool:
         "退出成功",
         "已经在线",
         "已在线",
+        "已登录",
+        "已登陆",
+        "logged in",
         "online",
     )
     return any(word in lowered for word in success_words)
@@ -263,8 +287,9 @@ def _contains_failure(text: str) -> bool:
         "注销失败",
         "下线失败",
         "不在线",
+        "not online",
+        "not logged in",
         "页面已过期",
-        "密码",
         "欠费",
         "不存在",
         "错误",
@@ -294,7 +319,22 @@ def _is_negative_result(value: Any) -> bool:
     if isinstance(value, bool):
         return not value
     normalized = str(value).strip().lower()
-    return normalized in ("0", "false", "fail", "failed", "error", "-1")
+    return normalized in (
+        "0",
+        "false",
+        "fail",
+        "failed",
+        "error",
+        "-1",
+        "offline",
+        "inactive",
+        "not_online",
+        "not online",
+        "not_logged_in",
+        "not logged in",
+        "already_logged_out",
+        "already logged out",
+    )
 
 
 def _get_source_ip(url: str, timeout_seconds: int) -> str:

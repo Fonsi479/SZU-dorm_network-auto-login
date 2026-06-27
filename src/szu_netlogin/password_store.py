@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+from pathlib import Path
 from typing import Any
 
 from .config import (
@@ -18,10 +20,7 @@ PASSWORD_ENV_NAME = "SZU_NET_PASSWORD"
 
 def get_password(config_or_username: dict[str, Any] | str) -> str:
     if isinstance(config_or_username, dict):
-        password = _get_config_password(config_or_username)
-        if not password:
-            print(f"没有检测到校园网密码。请检查：{describe_password_source(config_or_username)}。")
-        return password
+        return _get_config_password(config_or_username)
 
     username = config_or_username
     password = _get_keyring_password(SERVICE_NAME, username)
@@ -32,14 +31,34 @@ def get_password(config_or_username: dict[str, Any] | str) -> str:
     if password:
         return password
 
-    print("没有检测到校园网密码。请先运行 set-password 保存到 macOS Keychain，或设置环境变量 SZU_NET_PASSWORD。")
     return ""
 
 
 def set_password(config_or_username: dict[str, Any] | str, password: str) -> None:
+    if isinstance(config_or_username, dict):
+        security = config_or_username.get("security") or {}
+        password_source = str(security.get("password_source", "env"))
+
+        if password_source == "keychain":
+            service, account = _get_keychain_target(config_or_username)
+            _set_keychain_password(service, account, password)
+            return
+
+        if password_source == "private_file":
+            _set_private_file_password(config_or_username, password)
+            return
+
+        if password_source == "env":
+            env_name = str(security.get("password_env_name") or PASSWORD_ENV_NAME)
+            raise ValueError(
+                f"当前密码来源是环境变量 {env_name}，本程序不能替父进程持久设置环境变量。"
+                "请在 shell/LaunchAgent 中设置它，或把 security.password_source 改为 keychain/private_file。"
+            )
+
+        raise ValueError("security.password_source 只支持 env、keychain、private_file。")
+
     service, account = _get_keychain_target(config_or_username)
-    keyring = _load_keyring()
-    keyring.set_password(service, account, password)
+    _set_keychain_password(service, account, password)
 
 
 def has_password(config_or_username: dict[str, Any] | str) -> bool:
@@ -66,6 +85,29 @@ def _get_keychain_target(config_or_username: dict[str, Any] | str) -> tuple[str,
     service = str(security.get("keychain_service") or SERVICE_NAME)
     account = str(security.get("keychain_account") or user.get("username") or "")
     return service, account
+
+
+def _set_keychain_password(service: str, account: str, password: str) -> None:
+    keyring = _load_keyring()
+    keyring.set_password(service, account, password)
+
+
+def _set_private_file_password(config: dict[str, Any], password: str) -> None:
+    security = config.get("security") or {}
+    password_file_value = str(security.get("password_file") or "").strip()
+    if not password_file_value:
+        raise ValueError("security.password_file 不能为空。")
+
+    password_file = Path(password_file_value).expanduser()
+    password_file.parent.mkdir(parents=True, exist_ok=True)
+    password_file.write_text(
+        f"password: {json.dumps(password, ensure_ascii=False)}\n",
+        encoding="utf-8",
+    )
+    try:
+        os.chmod(password_file, 0o600)
+    except OSError:
+        pass
 
 
 def _get_keyring_password(service: str, username: str) -> str:

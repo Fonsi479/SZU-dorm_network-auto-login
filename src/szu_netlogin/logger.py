@@ -4,14 +4,20 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timedelta
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
 LOG_DIR = Path.home() / "Library" / "Logs" / "szu-netlogin"
 LOG_FILE = LOG_DIR / "netlogin.log"
 FALLBACK_LOG_FILE = Path(__file__).resolve().parents[2] / "logs" / "netlogin.log"
+LOG_MAX_BYTES = 1_000_000
+LOG_BACKUP_COUNT = 7
+LOG_RETENTION_DAYS = 7
 
 LOGGER_NAME = "szu_netlogin"
+LOG_DATE_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2}) ")
 LOGIN_URL_PATTERNS = (
     re.compile(r"(?i)https?://[^\s)]*/eportal/portal/login\?[^\s)]+"),
     re.compile(r"(?i)/eportal/portal/login\?[^\s)]+"),
@@ -46,7 +52,7 @@ def redact_sensitive_text(text: object, password: str | None = None) -> str:
 
 
 def get_logger() -> logging.Logger:
-    """Create the project logger once and write to logs/netlogin.log."""
+    """Create the project logger once and write to the user log file."""
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -69,7 +75,16 @@ def get_logger() -> logging.Logger:
 def _add_file_handler(logger: logging.Logger, log_file: Path) -> bool:
     try:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        _trim_old_log_records(log_file)
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+            encoding="utf-8",
+            delay=True,
+        )
+        if log_file.exists() and log_file.stat().st_size >= LOG_MAX_BYTES:
+            file_handler.doRollover()
     except OSError:
         return False
 
@@ -78,3 +93,45 @@ def _add_file_handler(logger: logging.Logger, log_file: Path) -> bool:
     )
     logger.addHandler(file_handler)
     return True
+
+
+def _trim_old_log_records(log_file: Path) -> None:
+    if not log_file.exists():
+        return
+
+    cutoff_date = (datetime.now() - timedelta(days=LOG_RETENTION_DAYS)).date()
+    keep_record = False
+    changed = False
+    kept_lines: list[str] = []
+
+    try:
+        with log_file.open("r", encoding="utf-8", errors="replace") as source:
+            for line in source:
+                match = LOG_DATE_PATTERN.match(line)
+                if match:
+                    try:
+                        record_date = datetime.strptime(
+                            match.group(1),
+                            "%Y-%m-%d",
+                        ).date()
+                    except ValueError:
+                        record_date = None
+
+                    if record_date is not None:
+                        keep_record = record_date >= cutoff_date
+
+                if keep_record:
+                    kept_lines.append(line)
+                else:
+                    changed = True
+    except OSError:
+        return
+
+    if not changed:
+        return
+
+    try:
+        with log_file.open("w", encoding="utf-8") as target:
+            target.writelines(kept_lines)
+    except OSError:
+        return

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 
 SOURCE_PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -196,7 +197,10 @@ def _get_private_file_password(config: dict[str, Any]) -> str:
 
 def _strip_quotes(value: str) -> str:
     if len(value) >= 2 and value[0] in ("'", '"') and value[-1] == value[0]:
-        return value[1:-1]
+        try:
+            return ast.literal_eval(value)
+        except Exception:
+            return value[1:-1]
     return value
 
 
@@ -212,64 +216,295 @@ def _parse_yaml(text: str) -> dict[str, Any]:
     return loaded
 
 
+class _YamlLine(NamedTuple):
+    line_number: int
+    indent: int
+    text: str
+
+
 def _parse_simple_yaml(text: str) -> dict[str, Any]:
+    lines = _prepare_yaml_lines(text)
     data: dict[str, Any] = {}
-    current_section: str | None = None
-    current_list_key: str | None = None
+    stack: list[tuple[int, Any]] = [(-1, data)]
 
-    for line_number, raw_line in enumerate(text.splitlines(), start=1):
-        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
-            continue
+    for index, line in enumerate(lines):
+        while len(stack) > 1 and line.indent <= stack[-1][0]:
+            stack.pop()
 
-        indent = len(raw_line) - len(raw_line.lstrip(" "))
-        stripped = raw_line.strip()
+        parent = stack[-1][1]
+        if line.text.startswith("- "):
+            if not isinstance(parent, list):
+                raise ConfigError(f"config.yaml 第 {line.line_number} 行列表格式不正确。")
 
-        if indent == 0 and stripped.endswith(":"):
-            current_section = stripped[:-1].strip()
-            data[current_section] = {}
-            current_list_key = None
-            continue
-
-        if current_section is None:
-            raise ConfigError(f"config.yaml 第 {line_number} 行格式不正确。")
-
-        section = data[current_section]
-        if not isinstance(section, dict):
-            raise ConfigError(f"config.yaml 第 {line_number} 行格式不正确。")
-
-        if indent == 2:
-            if stripped.endswith(":"):
-                current_list_key = stripped[:-1].strip()
-                section[current_list_key] = []
+            item_text = line.text[2:].strip()
+            if not item_text:
+                child = _new_nested_container(lines, index, line.indent)
+                parent.append(child)
+                if isinstance(child, (dict, list)):
+                    stack.append((line.indent, child))
                 continue
 
-            key, value = _split_key_value(stripped, line_number)
-            section[key] = _parse_scalar(value)
-            current_list_key = None
+            mapping = _try_split_key_value(item_text, line.line_number)
+            if mapping is None:
+                parent.append(_parse_scalar(item_text))
+                continue
+
+            key, value = mapping
+            item: dict[str, Any] = {}
+            parent.append(item)
+            if value:
+                item[key] = _parse_scalar(value)
+                stack.append((line.indent, item))
+                continue
+
+            child = _new_nested_container(lines, index, line.indent)
+            item[key] = child
+            stack.append((line.indent, item))
+            if isinstance(child, (dict, list)):
+                stack.append((line.indent + 1, child))
             continue
 
-        if indent == 4 and stripped.startswith("- ") and current_list_key:
-            current_list = section.get(current_list_key)
-            if not isinstance(current_list, list):
-                raise ConfigError(f"config.yaml 第 {line_number} 行列表格式不正确。")
-            current_list.append(_parse_scalar(stripped[2:].strip()))
+        if not isinstance(parent, dict):
+            raise ConfigError(f"config.yaml 第 {line.line_number} 行格式不正确。")
+
+        key, value = _split_key_value(line.text, line.line_number)
+        if not key:
+            raise ConfigError(f"config.yaml 第 {line.line_number} 行缺少配置键。")
+
+        if value:
+            parent[key] = _parse_scalar(value)
             continue
 
-        raise ConfigError(f"config.yaml 第 {line_number} 行格式不正确。")
+        child = _new_nested_container(lines, index, line.indent)
+        parent[key] = child
+        if isinstance(child, (dict, list)):
+            stack.append((line.indent, child))
 
     return data
 
 
+def _prepare_yaml_lines(text: str) -> list[_YamlLine]:
+    lines: list[_YamlLine] = []
+    raw_lines = text.splitlines()
+    index = 0
+    while index < len(raw_lines):
+        line_number = index + 1
+        raw_line = raw_lines[index]
+        leading = raw_line[: len(raw_line) - len(raw_line.lstrip(" \t"))]
+        if "\t" in leading:
+            raise ConfigError(f"config.yaml 第 {line_number} 行缩进不能使用 Tab。")
+
+        without_comment = _strip_inline_comment(raw_line)
+        if not without_comment.strip():
+            index += 1
+            continue
+
+        indent = len(without_comment) - len(without_comment.lstrip(" "))
+        stripped = without_comment.strip()
+        block_marker = _block_scalar_marker(stripped)
+        if block_marker:
+            value, index = _consume_block_scalar(raw_lines, index, indent, block_marker)
+            split_at = _find_mapping_colon(stripped)
+            key = stripped[:split_at].strip()
+            encoded_value = json.dumps(value, ensure_ascii=False)
+            lines.append(_YamlLine(line_number, indent, f"{key}: {encoded_value}"))
+            continue
+
+        lines.append(_YamlLine(line_number, indent, stripped))
+        index += 1
+    return lines
+
+
+def _block_scalar_marker(line: str) -> str:
+    split_at = _find_mapping_colon(line)
+    if split_at < 0:
+        return ""
+
+    value = line[split_at + 1 :].strip()
+    if not value or value[0] not in ("|", ">"):
+        return ""
+    if any(char not in "+-0123456789" for char in value[1:]):
+        return ""
+    return value[0]
+
+
+def _consume_block_scalar(
+    raw_lines: list[str],
+    current_index: int,
+    current_indent: int,
+    marker: str,
+) -> tuple[str, int]:
+    content: list[str] = []
+    block_indent: int | None = None
+    index = current_index + 1
+
+    while index < len(raw_lines):
+        raw_line = raw_lines[index]
+        leading = raw_line[: len(raw_line) - len(raw_line.lstrip(" \t"))]
+        if "\t" in leading:
+            raise ConfigError(f"config.yaml 第 {index + 1} 行缩进不能使用 Tab。")
+
+        if not raw_line.strip():
+            if block_indent is not None:
+                content.append("")
+            index += 1
+            continue
+
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if indent <= current_indent:
+            break
+
+        if block_indent is None:
+            block_indent = indent
+        content.append(raw_line[block_indent:].rstrip())
+        index += 1
+
+    if marker == "|":
+        return "\n".join(content), index
+    return _fold_block_scalar(content), index
+
+
+def _fold_block_scalar(lines: list[str]) -> str:
+    paragraphs: list[str] = []
+    current: list[str] = []
+
+    for line in lines:
+        if line:
+            current.append(line.strip())
+            continue
+
+        if current:
+            paragraphs.append(" ".join(current))
+            current = []
+        paragraphs.append("")
+
+    if current:
+        paragraphs.append(" ".join(current))
+    return "\n".join(paragraphs)
+
+
+def _strip_inline_comment(line: str) -> str:
+    quote: str | None = None
+    escaped = False
+
+    for index, char in enumerate(line):
+        if quote:
+            if quote == '"' and char == "\\" and not escaped:
+                escaped = True
+                continue
+            if char == quote and not escaped:
+                quote = None
+            escaped = False
+            continue
+
+        if char in ("'", '"'):
+            quote = char
+            continue
+
+        if char == "#" and (index == 0 or line[index - 1].isspace()):
+            return line[:index].rstrip()
+
+    return line.rstrip()
+
+
+def _new_nested_container(
+    lines: list[_YamlLine],
+    current_index: int,
+    current_indent: int,
+) -> Any:
+    if current_index + 1 >= len(lines):
+        return None
+
+    next_line = lines[current_index + 1]
+    if next_line.indent <= current_indent:
+        return None
+    if next_line.text.startswith("- "):
+        return []
+    return {}
+
+
 def _split_key_value(line: str, line_number: int) -> tuple[str, str]:
-    if ":" not in line:
+    split_at = _find_mapping_colon(line)
+    if split_at < 0:
         raise ConfigError(f"config.yaml 第 {line_number} 行缺少冒号。")
-    key, value = line.split(":", 1)
+    key, value = line[:split_at], line[split_at + 1 :]
+    if key.strip() == "<<":
+        raise ConfigError(_unsupported_yaml_feature_message())
     return key.strip(), value.strip()
+
+
+def _try_split_key_value(line: str, line_number: int) -> tuple[str, str] | None:
+    split_at = _find_mapping_colon(line)
+    if split_at < 0:
+        return None
+    key, value = line[:split_at].strip(), line[split_at + 1 :].strip()
+    if not key:
+        raise ConfigError(f"config.yaml 第 {line_number} 行缺少配置键。")
+    if key == "<<":
+        raise ConfigError(_unsupported_yaml_feature_message())
+    return key, value
+
+
+def _find_mapping_colon(line: str) -> int:
+    quote: str | None = None
+    escaped = False
+    bracket_depth = 0
+    brace_depth = 0
+
+    for index, char in enumerate(line):
+        if quote:
+            if quote == '"' and char == "\\" and not escaped:
+                escaped = True
+                continue
+            if char == quote and not escaped:
+                quote = None
+            escaped = False
+            continue
+
+        if char in ("'", '"'):
+            quote = char
+            continue
+        if char == "[":
+            bracket_depth += 1
+            continue
+        if char == "]" and bracket_depth:
+            bracket_depth -= 1
+            continue
+        if char == "{":
+            brace_depth += 1
+            continue
+        if char == "}" and brace_depth:
+            brace_depth -= 1
+            continue
+        if char == ":" and bracket_depth == 0 and brace_depth == 0:
+            if index + 1 == len(line) or line[index + 1].isspace():
+                return index
+
+    return -1
 
 
 def _parse_scalar(value: str) -> Any:
     if not value:
         return ""
+
+    if value.startswith(("&", "*")):
+        raise ConfigError(_unsupported_yaml_feature_message())
+
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [_parse_scalar(item.strip()) for item in _split_inline_items(inner)]
+
+    if value.startswith("{") and value.endswith("}"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return {}
+        parsed: dict[Any, Any] = {}
+        for item in _split_inline_items(inner):
+            key, item_value = _split_key_value(item.strip(), 0)
+            parsed[_parse_inline_key(key)] = _parse_scalar(item_value)
+        return parsed
 
     if value[0] in ("'", '"') and value[-1:] == value[0]:
         try:
@@ -288,4 +523,61 @@ def _parse_scalar(value: str) -> Any:
     try:
         return int(value)
     except ValueError:
-        return value
+        try:
+            return float(value)
+        except ValueError:
+            return value
+
+
+def _split_inline_items(value: str) -> list[str]:
+    items: list[str] = []
+    start = 0
+    quote: str | None = None
+    escaped = False
+    bracket_depth = 0
+    brace_depth = 0
+
+    for index, char in enumerate(value):
+        if quote:
+            if quote == '"' and char == "\\" and not escaped:
+                escaped = True
+                continue
+            if char == quote and not escaped:
+                quote = None
+            escaped = False
+            continue
+
+        if char in ("'", '"'):
+            quote = char
+            continue
+        if char == "[":
+            bracket_depth += 1
+            continue
+        if char == "]" and bracket_depth:
+            bracket_depth -= 1
+            continue
+        if char == "{":
+            brace_depth += 1
+            continue
+        if char == "}" and brace_depth:
+            brace_depth -= 1
+            continue
+        if char == "," and bracket_depth == 0 and brace_depth == 0:
+            items.append(value[start:index].strip())
+            start = index + 1
+
+    items.append(value[start:].strip())
+    return [item for item in items if item]
+
+
+def _parse_inline_key(value: str) -> Any:
+    stripped = value.strip()
+    if stripped == "<<":
+        raise ConfigError(_unsupported_yaml_feature_message())
+    if stripped and stripped[0] in ("'", '"') and stripped[-1:] == stripped[0]:
+        return _parse_scalar(stripped)
+    return stripped
+
+
+def _unsupported_yaml_feature_message() -> str:
+    return "内置 YAML 解析器不支持 YAML 锚点、别名或 merge key；请安装 PyYAML，或改用简单配置。"

@@ -19,6 +19,9 @@ network:
     - "SZU_CTC&CMCC"
   timeout_seconds: 3
   max_test_urls: 3
+  # 宿舍区 Wi-Fi 本机地址通常在 172.16.0.0/12；若探测到 198.18.x.x 这类代理/TUN 地址，会跳过自动登录。
+  campus_source_cidrs:
+    - "172.16.0.0/12"
   # 校园网源地址直连失败时，允许按 macOS 系统代理/VPN 路径确认外网可用。
   allow_system_fallback: true
   test_urls:

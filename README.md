@@ -67,7 +67,7 @@ python3 -m src.szu_netlogin.control set-username 校园卡号
 python3 -m src.szu_netlogin.control set-password
 ```
 
-密码会交互式输入，不会在终端回显。默认配置会把密码保存到 macOS Keychain，服务名为 `szu-netlogin`。
+密码会交互式输入，不会在终端回显。默认配置会把密码保存到 macOS Keychain，服务名为 `szu-netlogin`；如果 `config.yaml` 改成 `private_file`，则会写入配置的私有密码文件。`env` 模式需要手动设置环境变量，程序不会替父进程持久写入。
 
 检查配置：
 
@@ -174,7 +174,7 @@ security:
 python3 -m src.szu_netlogin.menubar_app
 ```
 
-状态栏会显示 `SZU Dorm`，菜单里可以立即登录、退出账号、暂停或恢复自动登录、修改账号、修改密码、打开配置和日志、安装或卸载开机自启。只要状态栏客户端正在运行，它每 2 分钟会在后台检查一次，长时间睡眠后也会在唤醒时尽快补检；安装 LaunchAgent 后，即使没有打开状态栏客户端也能自动检查。
+状态栏会显示 `SZU Dorm`，菜单里可以立即登录、退出账号、暂停或恢复自动登录、修改账号、修改密码、打开配置和日志、安装或卸载开机自启。只要状态栏客户端正在运行，它会持续刷新状态，并且只在“宿舍区网关可达且校园网出口不可用”时启动后台自动登录；长时间睡眠后也会在唤醒时尽快补检。安装 LaunchAgent 后，即使没有打开状态栏客户端也能自动检查；网关不可达时只会检测后退出，不会发送登录请求。
 
 状态栏客户端日志：
 
@@ -295,4 +295,4 @@ diagnose.py              兼容诊断入口
 
 ## 注意
 
-校园网接口可能会调整。如果登录或退出失败，先运行诊断命令并查看脱敏日志，再根据新的门户接口更新 `config.example.yaml` 或自己的 `config.yaml`。默认会先检查宿舍区网关对应的源地址；如果该路径直连超时，还会按 macOS 的系统代理/VPN 路径复核，避免把浏览器实际可上网的情况误报为不可用。若只想检测校园网直连路径，可把 `network.allow_system_fallback` 设为 `false`。
+校园网接口可能会调整。如果登录或退出失败，先运行诊断命令并查看脱敏日志，再根据新的门户接口更新 `config.example.yaml` 或自己的 `config.yaml`。默认会先检查宿舍区网关对应的源地址，并要求源地址落在 `network.campus_source_cidrs` 里；这样可以避开 `198.18.x.x` 等代理/VPN/TUN 虚拟网卡误判。若校园网源地址直连超时，还会按 macOS 的系统代理/VPN 路径复核，避免把浏览器实际可上网的情况误报为不可用。若只想检测校园网直连路径，可把 `network.allow_system_fallback` 设为 `false`。
