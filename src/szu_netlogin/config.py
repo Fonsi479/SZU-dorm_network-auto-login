@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from ipaddress import ip_network
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -86,11 +87,21 @@ def validate_config(config: dict[str, Any]) -> None:
     if logout_url and not logout_url.startswith(("http://", "https://")):
         raise ConfigError("auth.logout_url 应该填写 HTTP/HTTPS 退出接口地址，或留空。")
 
+    logout_page_url = str(auth.get("logout_page_url") or "").strip()
+    if logout_page_url and not logout_page_url.startswith(("http://", "https://")):
+        raise ConfigError("auth.logout_page_url 应该填写 HTTP/HTTPS 门户退出页地址，或留空。")
+
+    unbind_url = str(auth.get("unbind_url") or "").strip()
+    if unbind_url and not unbind_url.startswith(("http://", "https://")):
+        raise ConfigError("auth.unbind_url 应该填写 HTTP/HTTPS MAC 解绑接口地址，或留空。")
+
     if user.get("username") in (None, "", "你的校园卡号，不要写密码"):
         raise ConfigError("请在 config.yaml 的 user.username 填写校园卡号。")
 
     if not isinstance(network.get("test_urls"), list) or not network["test_urls"]:
         raise ConfigError("network.test_urls 至少需要填写一个检测网址。")
+
+    _validate_campus_source_cidrs(network)
 
     password_source = str(security.get("password_source", "env"))
     if password_source not in ("env", "keychain", "private_file"):
@@ -143,6 +154,21 @@ def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
     if not isinstance(section, dict):
         raise ConfigError(f"config.yaml 缺少 {name} 配置段。")
     return section
+
+
+def _validate_campus_source_cidrs(network: dict[str, Any]) -> None:
+    if "campus_source_cidrs" not in network:
+        return
+
+    cidrs = network.get("campus_source_cidrs")
+    if not isinstance(cidrs, list) or not cidrs:
+        raise ConfigError("network.campus_source_cidrs 必须是至少包含一个 CIDR 的列表。")
+
+    for cidr in cidrs:
+        try:
+            ip_network(str(cidr), strict=False)
+        except ValueError as exc:
+            raise ConfigError(f"network.campus_source_cidrs 包含无效 CIDR：{cidr}") from exc
 
 
 def _get_keychain_password(config: dict[str, Any]) -> str:

@@ -91,6 +91,17 @@ class CampusInternetProbeTests(unittest.TestCase):
         self.assertTrue(is_allowed_campus_source_ip({}, "172.24.182.13"))
         self.assertFalse(is_allowed_campus_source_ip({}, "198.18.0.1"))
 
+    def test_invalid_configured_cidr_fails_closed(self) -> None:
+        config = {"network": {"campus_source_cidrs": ["bad-cidr"]}}
+
+        self.assertFalse(is_allowed_campus_source_ip(config, "198.18.0.1"))
+        self.assertFalse(is_allowed_campus_source_ip(config, "172.24.182.13"))
+
+    def test_partly_invalid_configured_cidr_fails_closed(self) -> None:
+        config = {"network": {"campus_source_cidrs": ["172.16.0.0/12", "bad-cidr"]}}
+
+        self.assertFalse(is_allowed_campus_source_ip(config, "172.24.182.13"))
+
     @patch("src.szu_netlogin.portal_detect.get_logger")
     @patch("src.szu_netlogin.portal_detect.socket.create_connection")
     def test_gateway_probe_ignores_non_campus_source_ip(

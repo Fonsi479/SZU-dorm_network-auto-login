@@ -16,6 +16,12 @@ if [[ -z "${PYTHON_BIN}" ]]; then
   exit 1
 fi
 
+if ! "${PYTHON_BIN}" -c 'import requests' >/dev/null 2>&1; then
+  echo "当前 Python 缺少依赖 requests：${PYTHON_BIN}" >&2
+  echo "请先运行：${PYTHON_BIN} -m pip install -r requirements.txt" >&2
+  exit 1
+fi
+
 mkdir -p "${TARGET_DIR}"
 mkdir -p "${LOG_DIR}"
 

@@ -92,6 +92,11 @@ def main() -> int:
                 logger.info("网关不可达，自动登录停止本轮")
                 return 0
 
+            if is_paused():
+                print("当前已暂停，跳过自动登录")
+                logger.info("自动登录执行前检测到已暂停，跳过自动登录")
+                return 0
+
             print("宿舍区网关可访问，准备尝试宿舍区 Dr.COM 登录。")
             logger.info("需要登录，尝试登录")
         else:

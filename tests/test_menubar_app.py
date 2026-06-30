@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import unittest
+import threading
+from queue import Queue
+from unittest.mock import Mock, patch
 
 from src.szu_netlogin.menubar_app import (
     PeriodicDeadline,
+    SzuDormMenubarApp,
     StatusRefreshResult,
     auto_login_state_label,
     should_start_auto_login,
@@ -56,6 +60,22 @@ class AutoLoginGateTests(unittest.TestCase):
 
         self.assertFalse(should_start_auto_login(True, result))
         self.assertEqual(auto_login_state_label(True, result), "已暂停")
+
+    def test_auto_login_worker_skips_control_process_when_paused(self) -> None:
+        app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
+        app.logger = Mock()
+        app._background_results = Queue()
+        app._worker_lock = threading.Lock()
+        app._auto_login_in_progress = True
+        app._run_control_process = Mock()
+
+        with patch("src.szu_netlogin.menubar_app.is_paused", return_value=True):
+            app._auto_login_worker()
+
+        app._run_control_process.assert_not_called()
+        self.assertFalse(app._auto_login_in_progress)
+        self.assertEqual(app._background_results.get_nowait(), ("auto_login", 0))
+        app.logger.info.assert_any_call("自动登录检查启动前检测到已暂停，跳过本轮。")
 
 
 if __name__ == "__main__":

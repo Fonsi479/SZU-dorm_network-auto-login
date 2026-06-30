@@ -3,8 +3,13 @@ auth:
   login_url: "http://172.30.255.42:801/eportal/portal/login"
   # 留空时会默认把 login_url 末尾的 /login 推导为 /logout；如果学校接口变了，再抓包后填写真实地址。
   logout_url: ""
+  # 留空时会从 login_url 主机推导为 http://网关/a79.htm；也可填写浏览器门户注销页完整地址。
+  logout_page_url: ""
+  # 留空时会从 logout_url 推导为 /mac/unbind。
+  unbind_url: ""
   callback: "dr1003"
   logout_callback: "dr1004"
+  logout_js_version: "4.1.3"
   login_method: "1"
   account_prefix: ",1,"
   timeout_seconds: 8

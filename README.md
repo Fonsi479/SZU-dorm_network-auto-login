@@ -28,23 +28,18 @@
 
 - macOS
 - Python 3.10+
-- Python 依赖：`requests`
-- 可选依赖：
-  - `PyYAML`：更完整的 YAML 解析
-  - `keyring`：跨平台 Keychain/keyring 访问
-  - `rumps`：运行 macOS 状态栏客户端
-  - `pyinstaller`：打包 `.app`
+- Python 依赖见 `requirements.txt`
 
 安装常用依赖：
 
 ```bash
-python3 -m pip install requests PyYAML keyring rumps
+python3 -m pip install -r requirements.txt
 ```
 
 如需打包 macOS App：
 
 ```bash
-python3 -m pip install pyinstaller
+python3 -m pip install -r requirements-build.txt
 ```
 
 ## 快速开始
@@ -112,6 +107,8 @@ python3 -m src.szu_netlogin.control resume
 ```bash
 python3 -m src.szu_netlogin.control logout
 ```
+
+退出命令会先暂停自动登录，再按门户页面流程发送 MAC 解绑和注销请求。程序会读取当前在线列表校准会话 IP/AC IP，避免浏览器里旧的 `a79.htm?wlanuserip=...` 地址把过期参数带进注销请求。
 
 诊断当前校园网状态：
 

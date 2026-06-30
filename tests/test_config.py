@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.szu_netlogin.config import ConfigError, _parse_simple_yaml
+from src.szu_netlogin.config import ConfigError, _parse_simple_yaml, validate_config
 
 
 class SimpleYamlParserTests(unittest.TestCase):
@@ -93,6 +93,57 @@ network:
   <<: *defaults
 """
             )
+
+
+class ConfigValidationTests(unittest.TestCase):
+    def test_rejects_invalid_campus_source_cidr(self) -> None:
+        config = _valid_config()
+        config["network"]["campus_source_cidrs"] = ["bad-cidr"]
+
+        with self.assertRaisesRegex(ConfigError, "campus_source_cidrs"):
+            validate_config(config)
+
+    def test_rejects_empty_campus_source_cidr_list(self) -> None:
+        config = _valid_config()
+        config["network"]["campus_source_cidrs"] = []
+
+        with self.assertRaisesRegex(ConfigError, "campus_source_cidrs"):
+            validate_config(config)
+
+    def test_rejects_invalid_logout_discovery_urls(self) -> None:
+        config = _valid_config()
+        config["auth"]["logout_page_url"] = "172.30.255.42/a79.htm"
+
+        with self.assertRaisesRegex(ConfigError, "logout_page_url"):
+            validate_config(config)
+
+        config = _valid_config()
+        config["auth"]["unbind_url"] = "172.30.255.42/unbind"
+
+        with self.assertRaisesRegex(ConfigError, "unbind_url"):
+            validate_config(config)
+
+
+def _valid_config() -> dict:
+    return {
+        "auth": {
+            "type": "dorm_drcom",
+            "login_url": "http://172.30.255.42:801/eportal/portal/login",
+            "callback": "dr1003",
+            "login_method": "1",
+            "account_prefix": ",1,",
+            "timeout_seconds": 8,
+        },
+        "user": {"username": "student-id"},
+        "network": {
+            "test_urls": ["http://captive.apple.com/hotspot-detect.html"],
+            "campus_source_cidrs": ["172.16.0.0/12"],
+        },
+        "security": {
+            "password_source": "env",
+            "password_env_name": "SZU_NET_PASSWORD",
+        },
+    }
 
 
 if __name__ == "__main__":

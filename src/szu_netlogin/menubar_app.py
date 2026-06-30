@@ -12,7 +12,7 @@ import traceback
 from importlib.util import find_spec
 from dataclasses import dataclass
 from datetime import datetime
-from logging.handlers import QueueHandler, QueueListener
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Callable
@@ -68,6 +68,8 @@ STATUS_REFRESH_SECONDS = 30
 WATCHDOG_INTERVAL_SECONDS = 5
 AUTO_LOGIN_INTERVAL_SECONDS = 120
 AUTO_LOGIN_INITIAL_DELAY_SECONDS = 5
+MENUBAR_LOG_MAX_BYTES = 1_000_000
+MENUBAR_LOG_BACKUP_COUNT = 5
 
 
 @dataclass(frozen=True)
@@ -112,11 +114,23 @@ def get_menubar_logger() -> logging.Logger:
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     handlers: list[logging.Handler] = []
 
-    handler = SafeFileHandler(MENUBAR_LOG_FILE, encoding="utf-8", delay=True)
+    handler = SafeRotatingFileHandler(
+        MENUBAR_LOG_FILE,
+        maxBytes=MENUBAR_LOG_MAX_BYTES,
+        backupCount=MENUBAR_LOG_BACKUP_COUNT,
+        encoding="utf-8",
+        delay=True,
+    )
     handler.setFormatter(formatter)
     handlers.append(handler)
 
-    error_handler = SafeFileHandler(MENUBAR_ERR_LOG_FILE, encoding="utf-8", delay=True)
+    error_handler = SafeRotatingFileHandler(
+        MENUBAR_ERR_LOG_FILE,
+        maxBytes=MENUBAR_LOG_MAX_BYTES,
+        backupCount=MENUBAR_LOG_BACKUP_COUNT,
+        encoding="utf-8",
+        delay=True,
+    )
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(formatter)
     handlers.append(error_handler)
@@ -130,7 +144,7 @@ def get_menubar_logger() -> logging.Logger:
     return logger
 
 
-class SafeFileHandler(logging.FileHandler):
+class SafeRotatingFileHandler(RotatingFileHandler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             super().emit(record)
@@ -313,6 +327,11 @@ class SzuDormMenubarApp(RumpsAppBase):
 
     def _auto_login_worker(self) -> None:
         try:
+            if is_paused():
+                self.logger.info("自动登录检查启动前检测到已暂停，跳过本轮。")
+                self._background_results.put(("auto_login", 0))
+                return
+
             result = self._run_control_process(["check-and-login"], timeout=80)
             self._background_results.put(("auto_login", result.returncode))
         except Exception as exc:

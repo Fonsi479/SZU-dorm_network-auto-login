@@ -358,6 +358,8 @@ def _logout_failure_reason(reason: str) -> str:
         return "auth.logout_url 不是有效的 HTTP 地址。"
     if reason == "request_exception":
         return "请求退出接口时发生网络异常。"
+    if reason == "terminal_ip_not_found":
+        return "无法从门户页或在线列表确定当前终端 IP。"
     if reason == "server_failed":
         return "退出接口返回失败。"
     if reason == "server_unknown":

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import socket
 from dataclasses import dataclass
-from ipaddress import ip_address, ip_network
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from typing import Any
 from urllib.parse import urlparse
 
@@ -345,22 +345,25 @@ def is_allowed_campus_source_ip(config: dict[str, Any] | None, source_ip: str) -
         return False
 
     networks = _get_campus_source_networks(config)
-    if not networks:
-        return True
     return any(address in network for network in networks)
 
 
-def _get_campus_source_networks(config: dict[str, Any] | None):
+def _get_campus_source_networks(config: dict[str, Any] | None) -> list[IPv4Network | IPv6Network]:
     network_config = (config or {}).get("network") or {}
-    configured_cidrs = network_config.get("campus_source_cidrs")
-    cidrs = configured_cidrs if isinstance(configured_cidrs, list) else DEFAULT_CAMPUS_SOURCE_CIDRS
+    if "campus_source_cidrs" not in network_config:
+        cidrs = list(DEFAULT_CAMPUS_SOURCE_CIDRS)
+    else:
+        configured_cidrs = network_config.get("campus_source_cidrs")
+        if not isinstance(configured_cidrs, list) or not configured_cidrs:
+            return []
+        cidrs = configured_cidrs
 
-    networks = []
+    networks: list[IPv4Network | IPv6Network] = []
     for cidr in cidrs:
         try:
             networks.append(ip_network(str(cidr), strict=False))
         except ValueError:
-            continue
+            return []
     return networks
 
 
