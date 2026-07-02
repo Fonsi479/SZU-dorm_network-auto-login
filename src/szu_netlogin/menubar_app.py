@@ -77,6 +77,7 @@ class StatusRefreshResult:
     paused: bool
     network_status: NetworkStatus
     config_error: str = ""
+    network_probe_enabled: bool = True
 
 
 class PeriodicDeadline:
@@ -172,6 +173,7 @@ class SzuDormMenubarApp(RumpsAppBase):
         self.logger = get_menubar_logger()
         self._refresh_in_progress = False
         self._auto_login_in_progress = False
+        self._network_probe_enabled = True
         self._last_status_result: StatusRefreshResult | None = None
         self._worker_lock = threading.Lock()
         self._background_results: Queue[tuple[str, Any]] = Queue()
@@ -187,6 +189,10 @@ class SzuDormMenubarApp(RumpsAppBase):
         self.logout_item = rumps.MenuItem("退出校园网账号", callback=self.logout_now)
         self.logout_hint_item = rumps.MenuItem("退出账号会自动暂停自动登录，避免马上重新登录")
         self.pause_item = rumps.MenuItem("暂停自动登录", callback=self.toggle_pause)
+        self.network_probe_item = rumps.MenuItem(
+            "关闭联网状态探测",
+            callback=self.toggle_network_probe,
+        )
         self.username_item = rumps.MenuItem("修改账号", callback=self.change_username)
         self.password_item = rumps.MenuItem("修改密码", callback=self.change_password)
         self.open_config_item = rumps.MenuItem("打开配置文件", callback=self.open_config)
@@ -204,6 +210,7 @@ class SzuDormMenubarApp(RumpsAppBase):
                 self.logout_item,
                 self.logout_hint_item,
                 self.pause_item,
+                self.network_probe_item,
                 self.username_item,
                 self.password_item,
                 self.open_config_item,
@@ -260,8 +267,21 @@ class SzuDormMenubarApp(RumpsAppBase):
 
     def _refresh_status_worker(self) -> None:
         try:
-            config, config_error = self._load_config_for_status()
             paused = is_paused()
+            if not self._network_probe_enabled:
+                self._background_results.put(
+                    (
+                        "status",
+                        StatusRefreshResult(
+                            paused,
+                            NetworkStatus(False, False),
+                            network_probe_enabled=False,
+                        ),
+                    )
+                )
+                return
+
+            config, config_error = self._load_config_for_status()
             network_status = probe_network(config) if config else NetworkStatus(False, False)
             self._background_results.put(
                 ("status", StatusRefreshResult(paused, network_status, config_error))
@@ -277,13 +297,22 @@ class SzuDormMenubarApp(RumpsAppBase):
     def _apply_status_result(self, result: StatusRefreshResult) -> None:
         self._last_status_result = result
         run_label = auto_login_state_label(result.paused, result)
+        self._update_network_probe_item_title()
+        self.pause_item.title = "恢复自动登录" if result.paused else "暂停自动登录"
+
+        if not result.network_probe_enabled:
+            self.status_item.title = f"状态：{run_label}"
+            self.logger.info(
+                "状态刷新：联网状态探测已关闭，时间=%s",
+                datetime.now().strftime("%H:%M:%S"),
+            )
+            return
+
         campus_label = (
             "校园网出口已连通" if result.network_status.campus_internet_ok else "校园网出口未连通"
         )
         gateway_label = "网关可达" if result.network_status.gateway_reachable else "网关不可达"
         self.status_item.title = f"状态：{run_label}｜{campus_label}｜{gateway_label}"
-        self.pause_item.title = "恢复自动登录" if result.paused else "暂停自动登录"
-
         message = (
             f"状态刷新：{run_label}，{campus_label}，{gateway_label}，"
             f"时间={datetime.now().strftime('%H:%M:%S')}"
@@ -299,9 +328,12 @@ class SzuDormMenubarApp(RumpsAppBase):
 
         self._drain_background_results()
 
-        if not self.timer.is_alive():
+        if self._network_probe_enabled and not self.timer.is_alive():
             self.logger.warning("状态刷新定时器已停止，正在重新启动。")
             self.timer.start()
+
+        if not self._network_probe_enabled:
+            return
 
         if not self._auto_login_schedule.consume_if_due():
             return
@@ -354,6 +386,9 @@ class SzuDormMenubarApp(RumpsAppBase):
                 return
 
             if kind == "status":
+                if not self._network_probe_enabled and payload.network_probe_enabled:
+                    self.logger.info("忽略已关闭探测后的旧状态刷新结果。")
+                    continue
                 self._apply_status_result(payload)
                 continue
 
@@ -423,6 +458,18 @@ class SzuDormMenubarApp(RumpsAppBase):
             self.refresh_status(None)
         except Exception as exc:
             self._handle_exception("切换暂停状态失败", exc)
+
+    def toggle_network_probe(self, _sender: Any) -> None:
+        try:
+            enable = not self._network_probe_enabled
+            self.logger.info("用户点击：%s", "开启联网状态探测" if enable else "关闭联网状态探测")
+            self._set_network_probe_enabled(enable)
+            if enable:
+                rumps.notification("SZU Dorm", "已开启联网状态探测", "将每 30 秒刷新状态。")
+            else:
+                rumps.notification("SZU Dorm", "已关闭联网状态探测", "已停止周期性网关和外网检测。")
+        except Exception as exc:
+            self._handle_exception("切换联网状态探测失败", exc)
 
     def change_username(self, _sender: Any) -> None:
         try:
@@ -517,7 +564,42 @@ class SzuDormMenubarApp(RumpsAppBase):
 
     def quit_app(self, _sender: Any) -> None:
         self.logger.info("用户退出状态栏客户端。")
+        self._set_network_probe_enabled(False, refresh=False)
+        self._stop_timer(self.watchdog_timer, "watchdog 定时器")
         rumps.quit_application()
+
+    def _set_network_probe_enabled(self, enabled: bool, refresh: bool = True) -> None:
+        self._network_probe_enabled = enabled
+        self._update_network_probe_item_title()
+
+        if enabled:
+            if not self.timer.is_alive():
+                self.timer.start()
+            if refresh:
+                self.refresh_status(None)
+            return
+
+        self._stop_timer(self.timer, "状态刷新定时器")
+        if refresh:
+            self._apply_status_result(
+                StatusRefreshResult(
+                    is_paused(),
+                    NetworkStatus(False, False),
+                    network_probe_enabled=False,
+                )
+            )
+
+    def _stop_timer(self, timer: Any, label: str) -> None:
+        try:
+            if timer.is_alive():
+                timer.stop()
+        except Exception as exc:
+            self.logger.warning("%s停止失败：%s", label, exc)
+
+    def _update_network_probe_item_title(self) -> None:
+        self.network_probe_item.title = (
+            "关闭联网状态探测" if self._network_probe_enabled else "开启联网状态探测"
+        )
 
     def _run_simple_control_action(self, command: str, error_title: str) -> None:
         try:
@@ -617,18 +699,22 @@ def is_username_set(username: str) -> bool:
 def is_non_campus_status(result: StatusRefreshResult | None) -> bool:
     if result is None or result.config_error:
         return False
+    if not result.network_probe_enabled:
+        return False
     return not result.network_status.gateway_reachable
 
 
 def should_start_auto_login(paused: bool, result: StatusRefreshResult | None) -> bool:
     if paused:
         return False
-    if result is None or result.config_error:
+    if result is None or result.config_error or not result.network_probe_enabled:
         return False
     return result.network_status.maybe_need_login
 
 
 def auto_login_state_label(paused: bool, result: StatusRefreshResult) -> str:
+    if not result.network_probe_enabled:
+        return "联网状态探测已关闭"
     if paused:
         return "已暂停"
     if is_non_campus_status(result):

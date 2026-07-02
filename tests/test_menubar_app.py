@@ -15,6 +15,24 @@ from src.szu_netlogin.menubar_app import (
 from src.szu_netlogin.portal_detect import NetworkStatus
 
 
+class FakeTimer:
+    def __init__(self) -> None:
+        self.started = False
+        self.stopped = False
+        self._alive = True
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def start(self) -> None:
+        self.started = True
+        self._alive = True
+
+    def stop(self) -> None:
+        self.stopped = True
+        self._alive = False
+
+
 class PeriodicDeadlineTests(unittest.TestCase):
     def test_becomes_due_immediately_after_long_sleep_gap(self) -> None:
         now = [100.0]
@@ -61,6 +79,16 @@ class AutoLoginGateTests(unittest.TestCase):
         self.assertFalse(should_start_auto_login(True, result))
         self.assertEqual(auto_login_state_label(True, result), "已暂停")
 
+    def test_disabled_network_probe_stops_auto_login(self) -> None:
+        result = StatusRefreshResult(
+            False,
+            NetworkStatus(True, False),
+            network_probe_enabled=False,
+        )
+
+        self.assertFalse(should_start_auto_login(False, result))
+        self.assertEqual(auto_login_state_label(False, result), "联网状态探测已关闭")
+
     def test_auto_login_worker_skips_control_process_when_paused(self) -> None:
         app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
         app.logger = Mock()
@@ -76,6 +104,48 @@ class AutoLoginGateTests(unittest.TestCase):
         self.assertFalse(app._auto_login_in_progress)
         self.assertEqual(app._background_results.get_nowait(), ("auto_login", 0))
         app.logger.info.assert_any_call("自动登录检查启动前检测到已暂停，跳过本轮。")
+
+
+class NetworkProbeToggleTests(unittest.TestCase):
+    def test_refresh_status_worker_does_not_probe_when_disabled(self) -> None:
+        app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
+        app.logger = Mock()
+        app._background_results = Queue()
+        app._worker_lock = threading.Lock()
+        app._refresh_in_progress = True
+        app._network_probe_enabled = False
+
+        with (
+            patch("src.szu_netlogin.menubar_app.is_paused", return_value=True),
+            patch("src.szu_netlogin.menubar_app.load_config") as load_config,
+            patch("src.szu_netlogin.menubar_app.probe_network") as probe_network,
+        ):
+            app._refresh_status_worker()
+
+        load_config.assert_not_called()
+        probe_network.assert_not_called()
+        self.assertFalse(app._refresh_in_progress)
+        kind, payload = app._background_results.get_nowait()
+        self.assertEqual(kind, "status")
+        self.assertFalse(payload.network_probe_enabled)
+        self.assertTrue(payload.paused)
+
+    def test_quit_app_disables_network_probe_and_stops_timers(self) -> None:
+        app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
+        app.logger = Mock()
+        app._network_probe_enabled = True
+        app.timer = FakeTimer()
+        app.watchdog_timer = FakeTimer()
+        app.network_probe_item = Mock(title="")
+
+        with patch("src.szu_netlogin.menubar_app.rumps") as rumps:
+            app.quit_app(None)
+
+        self.assertFalse(app._network_probe_enabled)
+        self.assertTrue(app.timer.stopped)
+        self.assertTrue(app.watchdog_timer.stopped)
+        self.assertEqual(app.network_probe_item.title, "开启联网状态探测")
+        rumps.quit_application.assert_called_once_with()
 
 
 if __name__ == "__main__":
