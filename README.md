@@ -1,8 +1,6 @@
 # SZU Dorm NetLogin
 
-深圳大学宿舍区 Dr.COM / ePortal 自动登录工具。`main` 分支面向 macOS 本地使用，包含共享登录核心、命令行控制、macOS 状态栏客户端和 LaunchAgent 自动检查脚本。
-
-Windows 版不放入 `main` 分支源码包，会通过独立 GitHub Release 发布搬运包。
+深圳大学宿舍区 Dr.COM / ePortal 自动登录工具。这个发布标签包含共享登录核心、命令行控制、macOS 状态栏客户端、LaunchAgent 自动检查脚本，以及 Windows 桌面客户端搬运包源码。
 
 ## 功能
 
@@ -11,6 +9,7 @@ Windows 版不放入 `main` 分支源码包，会通过独立 GitHub Release 发
 - 支持系统凭据库、环境变量或私有文件读取密码
 - 提供命令行控制：登录、退出、暂停、恢复、诊断
 - 提供 macOS 状态栏客户端，支持手动登录、退出账号、暂停恢复、诊断报告和日志入口
+- 提供 Windows 桌面客户端，支持首次安装、桌面快捷方式、图形化登录、退出、暂停、诊断和后台检查
 - 支持用户级 LaunchAgent，登录 macOS 后自动检查
 - 登录失败会显示分级原因，后台自动登录连续失败时会按 2/5/10/15 分钟退避重试
 - 日志默认脱敏，不打印密码或完整登录 URL
@@ -160,6 +159,28 @@ tail -n 80 logs/menubar.log
 tail -n 80 ~/Library/Logs/szu-netlogin/netlogin.log
 ```
 
+## Windows 桌面客户端
+
+Windows 搬运包只保留一个首次安装入口：
+
+```bat
+one_click_install_and_run.bat
+```
+
+使用方式：
+
+1. 解压 Windows release 的 zip。
+2. 双击 `one_click_install_and_run.bat`。
+3. 以后直接双击桌面上的 `SZU Dorm Login`。
+
+首次安装脚本会优先从清华镜像安装 Python 3.12.10，使用清华 PyPI 镜像安装依赖，创建本地运行环境 `.venv-szu-dorm-login`，并创建桌面快捷方式。桌面快捷方式使用 `pythonw.exe` 启动，不会常驻黑色命令行窗口。
+
+Windows 桌面客户端源码位于：
+
+```text
+apps/windows_desktop/
+```
+
 ## 开机自启
 
 安装用户级 LaunchAgent：
@@ -239,6 +260,7 @@ xattr -dr com.apple.quarantine "dist/SZU Dorm Login.app"
 
 ```text
 src/szu_netlogin/        核心登录、检测、控制和 macOS 状态栏代码
+apps/windows_desktop/    Windows 桌面客户端
 scripts/                 本地运行、打包、LaunchAgent 安装脚本
 launchd/                 LaunchAgent 模板
 packaging/               PyInstaller 配置
