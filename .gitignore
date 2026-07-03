@@ -3,6 +3,7 @@ __pycache__/
 .DS_Store
 .env
 .venv/
+.venv-windows-build-*/
 venv/
 
 build/
@@ -10,9 +11,15 @@ dist/
 *.zip
 *.tar.gz
 
-logs/*.log
+logs/*
 !logs/.gitkeep
 
 config.yaml
 *.local.yaml
 *.private.yaml
+
+# Windows desktop release files are published from a separate release tag,
+# not tracked on the macOS-focused main branch.
+apps/windows_desktop/
+one_click_install_and_run.bat
+start_szu_dorm_login.bat

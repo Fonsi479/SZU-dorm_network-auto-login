@@ -1,17 +1,18 @@
 # SZU Dorm NetLogin
 
-深圳大学宿舍区 Dr.COM / ePortal 自动登录工具，适用于 macOS 本地使用。它可以在断网时自动检测宿舍区网关并尝试登录，也提供一个状态栏客户端用于手动登录、暂停、退出账号和查看日志。
+深圳大学宿舍区 Dr.COM / ePortal 自动登录工具。`main` 分支面向 macOS 本地使用，包含共享登录核心、命令行控制、macOS 状态栏客户端和 LaunchAgent 自动检查脚本。
 
-这完全是vibe coding产物并借鉴了github上的一些开源项目（致谢名单附后），我自己debug了几轮，用起来几乎没什么问题了，有任何bug就自己修复吧，因为我也不懂代码哈哈哈
+Windows 版不放入 `main` 分支源码包，会通过独立 GitHub Release 发布搬运包。
 
 ## 功能
 
-- 自动检测校园网出口连通性，校园网已登录时不会重复登录
-- 只在宿舍区网关可达时尝试 Dr.COM / ePortal 登录
-- 支持 macOS Keychain、环境变量或私有文件读取密码
+- 自动检测校园网出口连通性，已登录时不会重复登录
+- 只在宿舍区网关可达且源 IP 符合校园网网段时尝试登录
+- 支持系统凭据库、环境变量或私有文件读取密码
 - 提供命令行控制：登录、退出、暂停、恢复、诊断
-- 提供 macOS 状态栏客户端；运行时会在后台自动检查，并在睡眠唤醒后补检
-- 支持安装用户级 LaunchAgent，实现登录后自动检查
+- 提供 macOS 状态栏客户端，支持手动登录、退出账号、暂停恢复、诊断报告和日志入口
+- 支持用户级 LaunchAgent，登录 macOS 后自动检查
+- 登录失败会显示分级原因，后台自动登录连续失败时会按 2/5/10/15 分钟退避重试
 - 日志默认脱敏，不打印密码或完整登录 URL
 
 ## 适用范围
@@ -24,13 +25,7 @@
 
 公开仓库只应提交源码、脚本、示例配置和文档。请不要提交 `config.yaml`、`logs/`、`build/`、`dist/`、私有密码文件、账号密码、Token 或本机绝对路径；这些本地文件已由默认 `.gitignore` 排除。
 
-## 环境要求
-
-- macOS
-- Python 3.10+
-- Python 依赖见 `requirements.txt`
-
-安装常用依赖：
+## 安装依赖
 
 ```bash
 python3 -m pip install -r requirements.txt
@@ -62,7 +57,7 @@ python3 -m src.szu_netlogin.control set-username 校园卡号
 python3 -m src.szu_netlogin.control set-password
 ```
 
-密码会交互式输入，不会在终端回显。默认配置会把密码保存到 macOS Keychain，服务名为 `szu-netlogin`；如果 `config.yaml` 改成 `private_file`，则会写入配置的私有密码文件。`env` 模式需要手动设置环境变量，程序不会替父进程持久写入。
+默认配置会把密码保存到系统凭据库，服务名为 `szu-netlogin`。macOS 对应 Keychain；如果 `config.yaml` 改成 `private_file`，则会写入配置的私有密码文件；`env` 模式需要手动设置环境变量。
 
 检查配置：
 
@@ -90,30 +85,43 @@ python3 -m src.szu_netlogin.login --check-and-login
 python3 -m src.szu_netlogin.control status
 ```
 
-暂停自动登录：
+暂停或恢复自动登录：
 
 ```bash
 python3 -m src.szu_netlogin.control pause
-```
-
-恢复自动登录：
-
-```bash
 python3 -m src.szu_netlogin.control resume
 ```
 
-退出校园网账号：
+退出校园网账号，并暂停自动登录直到手动恢复：
 
 ```bash
 python3 -m src.szu_netlogin.control logout
 ```
 
-退出命令会先暂停自动登录，再按门户页面流程发送 MAC 解绑和注销请求。程序会读取当前在线列表校准会话 IP/AC IP，避免浏览器里旧的 `a79.htm?wlanuserip=...` 地址把过期参数带进注销请求。
-
-诊断当前校园网状态：
+退出后只暂停 30 分钟：
 
 ```bash
-python3 -m src.szu_netlogin.control diagnose
+python3 -m src.szu_netlogin.control logout --pause-for 30m
+```
+
+退出后暂停到下次开机：
+
+```bash
+python3 -m src.szu_netlogin.control logout --pause-for next-boot
+```
+
+生成一键诊断报告：
+
+```bash
+python3 -m src.szu_netlogin.control generate-diagnostic-report
+```
+
+常见修复入口：
+
+```bash
+python3 -m src.szu_netlogin.control reset-pause
+python3 -m src.szu_netlogin.control check-dependencies
+python3 -m src.szu_netlogin.control set-project-home-env
 ```
 
 打开配置、日志或项目目录：
@@ -124,40 +132,7 @@ python3 -m src.szu_netlogin.control open-log
 python3 -m src.szu_netlogin.control open-project
 ```
 
-## 密码来源
-
-`config.example.yaml` 默认使用 Keychain：
-
-```yaml
-security:
-  password_source: "keychain"
-  keychain_service: "szu-netlogin"
-```
-
-也可以改用环境变量：
-
-```yaml
-security:
-  password_source: "env"
-  password_env_name: "SZU_NET_PASSWORD"
-```
-
-然后在当前终端设置：
-
-```bash
-export SZU_NET_PASSWORD='你的校园网密码'
-```
-
-还可以改用私有密码文件：
-
-```yaml
-security:
-  password_source: "private_file"
-  password_file: "~/.szu-netlogin/password.yaml"
-```
-
-
-## 状态栏客户端
+## macOS 状态栏客户端
 
 启动状态栏客户端：
 
@@ -171,7 +146,7 @@ security:
 python3 -m src.szu_netlogin.menubar_app
 ```
 
-状态栏会显示 `SZU Dorm`，菜单里可以立即登录、退出账号、暂停或恢复自动登录、开启或关闭联网状态探测、修改账号、修改密码、打开配置和日志、安装或卸载开机自启。只要状态栏客户端正在运行且联网状态探测已开启，它会每 30 秒刷新状态，并且只在“宿舍区网关可达且校园网出口不可用”时启动后台自动登录；长时间睡眠后也会在唤醒时尽快补检。安装 LaunchAgent 后，即使没有打开状态栏客户端也能自动检查；网关不可达时只会检测后退出，不会发送登录请求。
+状态栏会显示 `SZU Dorm`。只要状态栏客户端正在运行且联网状态探测已开启，它会每 30 秒刷新状态，并且只在“宿舍区网关可达且校园网出口不可用”时启动后台自动登录；长时间睡眠后也会在唤醒时尽快补检。
 
 状态栏客户端日志：
 
@@ -191,12 +166,6 @@ tail -n 80 ~/Library/Logs/szu-netlogin/netlogin.log
 
 ```bash
 ./scripts/install_launchagent.sh
-```
-
-安装后会在 macOS 登录后运行一次，之后每 2 分钟检查一次：
-
-```bash
-python3 -m src.szu_netlogin.login --check-and-login
 ```
 
 卸载：
@@ -232,6 +201,12 @@ bash scripts/build_app.sh
 dist/SZU Dorm Login.app
 ```
 
+验证 App：
+
+```bash
+bash scripts/verify_app.sh
+```
+
 打开 App：
 
 ```bash
@@ -255,6 +230,22 @@ launchctl setenv SZU_NETLOGIN_HOME "/path/to/szu-netlogin"
 xattr -dr com.apple.quarantine "dist/SZU Dorm Login.app"
 ```
 
+## GitHub Releases
+
+- macOS release：包含 `SZU Dorm Login.app` 压缩包和对应源码包，不包含 Windows 桌面客户端。
+- Windows release：单独发布 Windows 搬运包，和 macOS release 分开管理。
+
+## 项目结构
+
+```text
+src/szu_netlogin/        核心登录、检测、控制和 macOS 状态栏代码
+scripts/                 本地运行、打包、LaunchAgent 安装脚本
+launchd/                 LaunchAgent 模板
+packaging/               PyInstaller 配置
+config.example.yaml      可公开的示例配置
+diagnose.py              兼容诊断入口
+```
+
 ## 致谢 / Acknowledgements
 
 本项目在实现过程中参考和借鉴了以下开源项目与工具，在此表示感谢：
@@ -275,21 +266,10 @@ xattr -dr com.apple.quarantine "dist/SZU Dorm Login.app"
   提供了深大校园网实用脚本集合方面的参考。
 
 * [jaredks/rumps](https://github.com/jaredks/rumps)
-  本项目的 macOS 状态栏客户端如使用 Python 实现，可基于 rumps 构建菜单栏应用。
+  本项目的 macOS 状态栏客户端基于 rumps 构建。
 
 本项目主要面向个人学习与自用场景。若项目中存在直接引用、修改或复用上述项目代码的部分，请遵循对应项目的开源许可证要求，并在相关文件中保留原作者版权与许可证声明。
 
-## 项目结构
-
-```text
-src/szu_netlogin/        核心登录、检测、控制和状态栏代码
-scripts/                 本地运行、打包、LaunchAgent 安装脚本
-launchd/                 LaunchAgent 模板
-packaging/               PyInstaller 配置
-config.example.yaml      可公开的示例配置
-diagnose.py              兼容诊断入口
-```
-
 ## 注意
 
-校园网接口可能会调整。如果登录或退出失败，先运行诊断命令并查看脱敏日志，再根据新的门户接口更新 `config.example.yaml` 或自己的 `config.yaml`。默认会先检查宿舍区网关对应的源地址，并要求源地址落在 `network.campus_source_cidrs` 里；这样可以避开 `198.18.x.x` 等代理/VPN/TUN 虚拟网卡误判。若校园网源地址直连超时，还会按 macOS 的系统代理/VPN 路径复核，避免把浏览器实际可上网的情况误报为不可用。若只想检测校园网直连路径，可把 `network.allow_system_fallback` 设为 `false`。
+校园网接口可能会调整。如果登录或退出失败，先运行诊断命令并查看脱敏日志，再根据新的门户接口更新 `config.example.yaml` 或自己的 `config.yaml`。默认会先检查宿舍区网关对应的源地址，并要求源地址落在 `network.campus_source_cidrs` 里；这样可以避开 `198.18.x.x` 等代理/VPN/TUN 虚拟网卡误判。若校园网源地址直连超时，还会按系统代理/VPN 路径复核，避免把浏览器实际可上网的情况误报为不可用。若只想检测校园网直连路径，可把 `network.allow_system_fallback` 设为 `false`。

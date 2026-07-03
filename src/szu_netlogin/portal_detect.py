@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import socket
+import subprocess
 from dataclasses import dataclass
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from typing import Any
@@ -13,6 +15,7 @@ import urllib3
 from requests.adapters import HTTPAdapter
 
 from .logger import get_logger
+from .platform_paths import run_subprocess_hidden
 
 
 DEFAULT_TIMEOUT_SECONDS = 3
@@ -36,11 +39,29 @@ class NetworkStatus:
     campus_internet_ok: bool
     gateway_host: str = ""
     source_ip: str = ""
+    gateway_reason: str = ""
     internet_reason: str = ""
+    internet_route: str = ""
 
     @property
     def maybe_need_login(self) -> bool:
         return self.gateway_reachable and not self.campus_internet_ok
+
+    @property
+    def used_system_fallback(self) -> bool:
+        return self.internet_route == "system_default" or self.internet_reason.startswith(
+            "system_default_ok"
+        )
+
+
+@dataclass(frozen=True)
+class NetworkEnvironment:
+    label: str
+    is_dorm_network: bool
+    auto_login_available: bool
+    wifi_ssid: str = ""
+    source_ip: str = ""
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -78,6 +99,8 @@ def probe_network(
         return NetworkStatus(
             gateway_reachable=False,
             campus_internet_ok=False,
+            source_ip=gateway.source_ip,
+            gateway_reason=gateway.reason,
             internet_reason="gateway_unreachable",
         )
 
@@ -87,8 +110,116 @@ def probe_network(
         campus_internet_ok=internet.ok,
         gateway_host=gateway.host,
         source_ip=gateway.source_ip,
+        gateway_reason=gateway.reason,
         internet_reason=internet.reason,
+        internet_route=internet.route,
     )
+
+
+def classify_network_environment(
+    config: dict[str, Any] | None,
+    status: NetworkStatus,
+) -> NetworkEnvironment:
+    """Classify whether the current network is safe for dorm auto-login."""
+    wifi_ssid = get_current_wifi_ssid()
+    campus_wifi_names = _get_campus_wifi_names(config)
+    on_configured_wifi = bool(wifi_ssid and wifi_ssid in campus_wifi_names)
+    source_allowed = bool(
+        status.source_ip and is_allowed_campus_source_ip(config, status.source_ip)
+    )
+    suspected_proxy = _looks_like_proxy_interference(status)
+
+    if status.gateway_reachable and (source_allowed or on_configured_wifi or not status.source_ip):
+        return NetworkEnvironment(
+            "宿舍网络",
+            is_dorm_network=True,
+            auto_login_available=True,
+            wifi_ssid=wifi_ssid,
+            source_ip=status.source_ip,
+            reason="gateway_reachable",
+        )
+
+    if on_configured_wifi:
+        return NetworkEnvironment(
+            "宿舍 Wi-Fi，网关不可达",
+            is_dorm_network=True,
+            auto_login_available=False,
+            wifi_ssid=wifi_ssid,
+            source_ip=status.source_ip,
+            reason=status.gateway_reason or "gateway_unreachable",
+        )
+
+    if suspected_proxy:
+        return NetworkEnvironment(
+            "非宿舍网络（疑似代理/VPN）",
+            is_dorm_network=False,
+            auto_login_available=False,
+            wifi_ssid=wifi_ssid,
+            source_ip=status.source_ip,
+            reason=status.gateway_reason or "source_ip_not_allowed",
+        )
+
+    return NetworkEnvironment(
+        "非宿舍网络",
+        is_dorm_network=False,
+        auto_login_available=False,
+        wifi_ssid=wifi_ssid,
+        source_ip=status.source_ip,
+        reason=status.gateway_reason or "gateway_unreachable",
+    )
+
+
+def get_current_wifi_ssid() -> str:
+    if os.name == "nt":
+        return _get_windows_wifi_ssid()
+
+    device = _get_wifi_device()
+    if not device:
+        return ""
+
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/networksetup", "-getairportnetwork", device],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+    if result.returncode != 0:
+        return ""
+
+    text = result.stdout.strip()
+    if ":" not in text or "not associated" in text.lower():
+        return ""
+    return text.split(":", 1)[1].strip()
+
+
+def _get_windows_wifi_ssid() -> str:
+    try:
+        result = run_subprocess_hidden(
+            ["netsh", "wlan", "show", "interfaces"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+    if result.returncode != 0:
+        return ""
+
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped.lower().startswith("ssid") or stripped.lower().startswith("bssid"):
+            continue
+        if ":" not in stripped:
+            continue
+        return stripped.split(":", 1)[1].strip()
+    return ""
 
 
 def _probe_campus_internet(
@@ -251,11 +382,13 @@ def _probe_gateway(
 ) -> GatewayProbe:
     logger = get_logger()
     failures: list[str] = []
+    last_source_ip = ""
 
     for host in _get_gateway_hosts(config):
         try:
             with socket.create_connection((host, 801), timeout=timeout_seconds) as sock:
                 source_ip = str(sock.getsockname()[0])
+                last_source_ip = source_ip
                 if not is_allowed_campus_source_ip(config, source_ip):
                     failures.append(f"{host}=source_ip_not_allowed:{source_ip}")
                     logger.info(
@@ -277,7 +410,7 @@ def _probe_gateway(
 
     reason = "; ".join(failures) if failures else "no_gateway_host"
     logger.info("宿舍区网关检测：不可连接 reason=%s", reason)
-    return GatewayProbe(False, reason=reason)
+    return GatewayProbe(False, source_ip=last_source_ip, reason=reason)
 
 
 def check_gateway_reachable(
@@ -311,6 +444,11 @@ def _get_test_urls(config: dict[str, Any] | None) -> list[str]:
 def _get_gateway_hosts(config: dict[str, Any] | None) -> list[str]:
     hosts = ((config or {}).get("network") or {}).get("dorm_gateway_hosts") or []
     return [str(host) for host in hosts] or ["172.30.255.42"]
+
+
+def _get_campus_wifi_names(config: dict[str, Any] | None) -> set[str]:
+    names = ((config or {}).get("network") or {}).get("campus_wifi_names") or []
+    return {str(name).strip() for name in names if str(name).strip()}
 
 
 def _get_timeout_seconds(config: dict[str, Any] | None) -> int:
@@ -403,3 +541,49 @@ def _request_failure_reason(exc: requests.RequestException) -> str:
 def _url_label(url: str) -> str:
     parsed = urlparse(url)
     return parsed.hostname or url[:40]
+
+
+def _looks_like_proxy_interference(status: NetworkStatus) -> bool:
+    if "source_ip_not_allowed" in status.gateway_reason:
+        return True
+
+    if not status.source_ip:
+        return False
+
+    try:
+        address = ip_address(status.source_ip)
+    except ValueError:
+        return False
+
+    proxy_ranges = (
+        ip_network("198.18.0.0/15"),
+        ip_network("100.64.0.0/10"),
+    )
+    return any(address in network for network in proxy_ranges)
+
+
+def _get_wifi_device() -> str:
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/networksetup", "-listallhardwareports"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "en0"
+
+    if result.returncode != 0:
+        return "en0"
+
+    lines = result.stdout.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "Hardware Port: Wi-Fi":
+            continue
+        for candidate in lines[index + 1 : index + 4]:
+            stripped = candidate.strip()
+            if stripped.startswith("Device:"):
+                return stripped.split(":", 1)[1].strip()
+
+    return "en0"

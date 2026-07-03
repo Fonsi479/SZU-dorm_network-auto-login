@@ -1,5 +1,5 @@
 requests>=2.31
 PyYAML>=6.0
 keyring>=25.0
-rumps>=0.4.0
+rumps>=0.4.0; sys_platform == "darwin"
 pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"

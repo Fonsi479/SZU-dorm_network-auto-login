@@ -8,8 +8,10 @@ from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from .platform_paths import get_user_log_dir
 
-LOG_DIR = Path.home() / "Library" / "Logs" / "szu-netlogin"
+
+LOG_DIR = get_user_log_dir()
 LOG_FILE = LOG_DIR / "netlogin.log"
 FALLBACK_LOG_FILE = Path(__file__).resolve().parents[2] / "logs" / "netlogin.log"
 LOG_MAX_BYTES = 1_000_000

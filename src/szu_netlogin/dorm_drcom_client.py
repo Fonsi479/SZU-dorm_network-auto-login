@@ -16,11 +16,24 @@ import requests
 from .logger import get_logger, redact_sensitive_text
 from .portal_detect import SourceAddressAdapter, is_allowed_campus_source_ip
 
+LoginStatus = Literal["success", "failed", "unknown"]
 LogoutStatus = Literal["success", "failed", "unknown"]
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
 )
+
+
+@dataclass(frozen=True)
+class LoginResult:
+    status: LoginStatus
+    reason: str = ""
+    http_status: int = 0
+    source_ip: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "success"
 
 
 @dataclass(frozen=True)
@@ -95,12 +108,20 @@ class DormDrcomClient:
         }
 
     def login(self, username: str, password: str) -> bool | None:
+        result = self.login_with_result(username, password)
+        if result.status == "success":
+            return True
+        if result.status == "failed":
+            return False
+        return None
+
+    def login_with_result(self, username: str, password: str) -> LoginResult:
         params = self.build_login_params(username, password)
         timeout_seconds = int(self.auth["timeout_seconds"])
         source_ip = _get_source_ip(str(self.auth["login_url"]), timeout_seconds)
         if source_ip and not is_allowed_campus_source_ip(self.config, source_ip):
             self.logger.info("宿舍区 Dr.COM 登录跳过：源地址不是校园网地址 source_ip=%s", source_ip)
-            return False
+            return LoginResult("failed", "suspected_proxy_interference", source_ip=source_ip)
         if source_ip:
             params["wlan_user_ip"] = source_ip
             _add_terminal_mac_param(params, source_ip, self.logger)
@@ -124,7 +145,11 @@ class DormDrcomClient:
                 type(exc).__name__,
                 redact_sensitive_text(str(exc).replace("\n", " ")[:160], password),
             )
-            return False
+            return LoginResult(
+                "failed",
+                _login_request_exception_reason(exc),
+                source_ip=source_ip,
+            )
 
         preview = redact_sensitive_text(response.text[:200], password)
         self.logger.info("宿舍区 Dr.COM 登录请求完成：请求成功=True")
@@ -133,16 +158,45 @@ class DormDrcomClient:
 
         if response.status_code >= 500:
             self.logger.info("宿舍区 Dr.COM 登录判断结果：不确定")
-            return None
+            return LoginResult(
+                "unknown",
+                "server_response_uncertain",
+                http_status=response.status_code,
+                source_ip=source_ip,
+            )
 
         if not 200 <= response.status_code < 300:
             self.logger.info("宿舍区 Dr.COM 登录判断结果：失败")
-            return False
+            return LoginResult(
+                "failed",
+                "portal_interface_changed",
+                http_status=response.status_code,
+                source_ip=source_ip,
+            )
 
         parsed = self.parse_jsonp_response(response.text)
         result = self.is_success_response(parsed)
         self.logger.info("宿舍区 Dr.COM 登录判断结果：%s", _result_label(result))
-        return result
+        if result is True:
+            return LoginResult(
+                "success",
+                "server_success",
+                http_status=response.status_code,
+                source_ip=source_ip,
+            )
+        if result is False:
+            return LoginResult(
+                "failed",
+                _classify_failed_login_response(parsed),
+                http_status=response.status_code,
+                source_ip=source_ip,
+            )
+        return LoginResult(
+            "unknown",
+            "portal_interface_changed",
+            http_status=response.status_code,
+            source_ip=source_ip,
+        )
 
     def logout(self, username: str) -> LogoutResult:
         logout_url = self._get_logout_url()
@@ -692,6 +746,29 @@ def _contains_failure(text: str) -> bool:
     return any(word in lowered for word in failure_words)
 
 
+def _contains_password_error(text: str) -> bool:
+    lowered = text.lower()
+    password_words = (
+        "password",
+        "passwd",
+        "密码",
+        "口令",
+    )
+    error_words = (
+        "wrong",
+        "incorrect",
+        "invalid",
+        "error",
+        "错误",
+        "不正确",
+        "不匹配",
+        "失败",
+    )
+    return any(word in lowered for word in password_words) and any(
+        word in lowered for word in error_words
+    )
+
+
 def _contains_inactive_logout_message(text: str) -> bool:
     lowered = text.lower()
     inactive_words = (
@@ -730,6 +807,25 @@ def _is_negative_result(value: Any) -> bool:
         "already_logged_out",
         "already logged out",
     )
+
+
+def _classify_failed_login_response(parsed_or_text: Any) -> str:
+    text = _response_text_for_classification(parsed_or_text)
+    if _contains_password_error(text):
+        return "password_error"
+    return "server_failed"
+
+
+def _response_text_for_classification(parsed_or_text: Any) -> str:
+    if isinstance(parsed_or_text, dict):
+        return " ".join(str(value) for value in parsed_or_text.values())
+    return str(parsed_or_text)
+
+
+def _login_request_exception_reason(exc: requests.RequestException) -> str:
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return "gateway_unreachable"
+    return "request_exception"
 
 
 def _get_source_ip(url: str, timeout_seconds: int) -> str:

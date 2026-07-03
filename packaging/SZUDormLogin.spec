@@ -19,6 +19,7 @@ a = Analysis(
         "AppKit",
         "keyring",
         "src.szu_netlogin.control",
+        "src.szu_netlogin.diagnostic_report",
         "src.szu_netlogin.login",
         "src.szu_netlogin.diagnose",
         "src.szu_netlogin.dorm_drcom_client",
@@ -66,8 +67,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "SZU Dorm Login",
         "CFBundleDisplayName": "SZU Dorm Login",
-        "CFBundleShortVersionString": "1.0.0",
-        "CFBundleVersion": "1",
+        "CFBundleShortVersionString": "1.1.0",
+        "CFBundleVersion": "2",
         "LSUIElement": True,
     },
 )

@@ -8,14 +8,16 @@ import json
 import plistlib
 import subprocess
 import sys
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
-from .config import ConfigError, DEFAULT_CONFIG_PATH, PROJECT_ROOT, load_config
+from .config import ConfigError, DEFAULT_CONFIG_PATH, PROJECT_HOME_ENV, PROJECT_ROOT, load_config
 from .logger import LOG_FILE, get_logger
 from .password_store import describe_password_source, has_password, set_password
-from .portal_detect import NetworkStatus, probe_network
-from .state import PAUSE_FLAG_FILE, is_paused, pause, resume
+from .platform_paths import open_path_with_default_app
+from .portal_detect import NetworkStatus, classify_network_environment, probe_network
+from .state import PAUSE_FLAG_FILE, describe_pause_state, is_paused, pause, resume
 
 
 LAUNCHAGENT_PLIST = Path.home() / "Library" / "LaunchAgents" / "com.szu-netlogin.dorm-drcom.plist"
@@ -32,12 +34,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers.add_parser("login-now", help="立即登录")
     subparsers.add_parser("check-and-login", help="检查校园网出口，不通时自动登录")
     subparsers.add_parser("diagnose", help="诊断当前网络状态")
-    subparsers.add_parser("logout", help="退出校园网账号并暂停自动登录")
+    subparsers.add_parser("generate-diagnostic-report", help="生成一键诊断报告")
+
+    logout_parser = subparsers.add_parser("logout", help="退出校园网账号并暂停自动登录")
+    logout_parser.add_argument(
+        "--pause-for",
+        choices=("manual", "30m", "next-boot"),
+        default="manual",
+        help="退出后自动登录保持暂停的时长",
+    )
 
     username_parser = subparsers.add_parser("set-username", help="修改 config.yaml 里的学号")
     username_parser.add_argument("username", help="校园卡号/学号")
 
     subparsers.add_parser("set-password", help="按 config.yaml 的密码来源保存密码")
+    subparsers.add_parser("reset-pause", help="重置暂停状态")
+    subparsers.add_parser("check-dependencies", help="检查常见依赖是否可用")
+    subparsers.add_parser("set-project-home-env", help="写入 launchctl SZU_NETLOGIN_HOME")
     subparsers.add_parser("open-config", help="打开 config.yaml")
     subparsers.add_parser("open-log", help="打开日志文件")
     subparsers.add_parser("open-project", help="打开项目目录")
@@ -87,14 +100,26 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "diagnose":
         return diagnose_now()
 
+    if args.command == "generate-diagnostic-report":
+        return generate_diagnostic_report()
+
     if args.command == "logout":
-        return logout_now()
+        return logout_now(args.pause_for)
 
     if args.command == "set-username":
         return set_username(args.username)
 
     if args.command == "set-password":
         return set_password_interactive()
+
+    if args.command == "reset-pause":
+        return reset_pause()
+
+    if args.command == "check-dependencies":
+        return check_dependencies()
+
+    if args.command == "set-project-home-env":
+        return set_project_home_env()
 
     if args.command == "open-config":
         return open_path(DEFAULT_CONFIG_PATH, must_exist=True)
@@ -113,22 +138,28 @@ def print_status() -> int:
     config_exists = DEFAULT_CONFIG_PATH.exists()
     config, config_error = _load_config_for_status()
     username = _get_username(config)
-    launchagents = find_auto_login_launchagents()
+    launchagents = find_auto_login_launchagents() if sys.platform == "darwin" else []
     network_status = probe_network(config) if config else NetworkStatus(False, False)
 
     print("SZU Netlogin 状态")
-    print(f"当前是否暂停：{_yes_no(is_paused())}")
+    print(f"当前暂停状态：{describe_pause_state()}")
     print(f"外网是否可用：{_yes_no(network_status.campus_internet_ok)}")
     print(f"宿舍区网关是否可达：{_yes_no(network_status.gateway_reachable)}")
+    print(f"当前网络环境：{classify_network_environment(config, network_status).label}")
+    print(f"源 IP：{network_status.source_ip or '-'}")
+    print(f"是否走系统代理/VPN fallback：{_yes_no(network_status.used_system_fallback)}")
     print(f"config.yaml 是否存在：{_yes_no(config_exists)}")
     print(f"是否已设置账号：{_yes_no(_is_username_set(username))}")
     print(f"是否已设置密码：{_yes_no(has_password(config) if config and _is_username_set(username) else False)}")
-    print(f"LaunchAgent 是否可能已安装：{_yes_no(LAUNCHAGENT_PLIST.exists() or bool(launchagents))}")
-    print(f"自动登录 LaunchAgent 数量：{len(launchagents)}")
-    for plist_path in launchagents:
-        print(f"- {plist_path}")
-    if len(launchagents) > 1:
-        print("提醒：检测到多个后台自动登录 LaunchAgent，请只保留一个。不会自动删除任何 plist。")
+    if sys.platform == "darwin":
+        print(f"LaunchAgent 是否可能已安装：{_yes_no(LAUNCHAGENT_PLIST.exists() or bool(launchagents))}")
+        print(f"自动登录 LaunchAgent 数量：{len(launchagents)}")
+        for plist_path in launchagents:
+            print(f"- {plist_path}")
+        if len(launchagents) > 1:
+            print("提醒：检测到多个后台自动登录 LaunchAgent，请只保留一个。不会自动删除任何 plist。")
+    else:
+        print("后台自动检查：Windows 桌面客户端打开时运行")
 
     if config_error:
         print(f"配置提示：{config_error}")
@@ -173,11 +204,19 @@ def diagnose_now() -> int:
     return diagnose.main()
 
 
-def logout_now() -> int:
+def generate_diagnostic_report() -> int:
+    from .diagnostic_report import create_diagnostic_report
+
+    report_path = create_diagnostic_report()
+    print(f"诊断报告已生成：{report_path}")
+    return 0
+
+
+def logout_now(pause_for: str = "manual") -> int:
     from .dorm_drcom_client import DormDrcomClient
 
     try:
-        pause()
+        _pause_for_logout(pause_for)
     except OSError as exc:
         print(f"退出前暂停自动登录失败，未发送注销请求：无法写入暂停标记 {PAUSE_FLAG_FILE}：{exc}")
         return 1
@@ -187,6 +226,7 @@ def logout_now() -> int:
     logger = get_logger()
     logger.info("已先暂停自动登录，再尝试退出校园网账号")
     print("已先暂停自动登录，再尝试退出校园网账号")
+    print(f"暂停策略：{describe_pause_state()}")
     print(f"暂停标记：{PAUSE_FLAG_FILE}")
 
     try:
@@ -210,30 +250,34 @@ def logout_now() -> int:
 
     if result.status == "success":
         if result.reason == "already_logged_out":
-            print("当前没有可退出的校园网会话，自动登录保持暂停")
+            print("退出结果：当前没有可退出的校园网会话。")
+            print(f"自动登录：{describe_pause_state()}")
             return 0
 
         if _verify_campus_logged_out(config):
-            print("已退出校园网账号，校园网出口已断开，自动登录保持暂停")
-        else:
-            print("已退出校园网账号，自动登录保持暂停")
-        return 0
+            print("退出结果：已确认断开。")
+            print(f"自动登录：{describe_pause_state()}")
+            return 0
+
+        print("退出结果：接口返回成功但仍可上网。")
+        print(f"自动登录：{describe_pause_state()}")
+        return 1
     if result.status == "failed":
         if _verify_campus_logged_out(config):
-            print("退出接口返回失败，但校园网出口已经断开；按已退出处理。")
-            print("自动登录仍保持暂停，避免马上重新登录。")
+            print("退出结果：接口返回失败，但已确认断开。")
+            print(f"自动登录：{describe_pause_state()}")
             return 0
         print(f"退出校园网账号失败：{_logout_failure_reason(result.reason)}")
-        print("自动登录仍保持暂停，避免马上重新登录。")
+        print(f"自动登录：{describe_pause_state()}")
         return 1
 
     if _verify_campus_logged_out(config):
-        print("退出接口结果不确定，但校园网出口已经断开；按已退出处理。")
-        print("自动登录仍保持暂停，避免马上重新登录。")
+        print("退出结果：结果不确定，但已确认断开。")
+        print(f"自动登录：{describe_pause_state()}")
         return 0
 
-    print(f"退出校园网账号结果不确定：{_logout_failure_reason(result.reason)}")
-    print("自动登录仍保持暂停，避免马上重新登录。")
+    print(f"退出结果：结果不确定。{_logout_failure_reason(result.reason)}")
+    print(f"自动登录：{describe_pause_state()}")
     return 1
 
 
@@ -293,13 +337,89 @@ def set_password_interactive() -> int:
     return 0
 
 
+def reset_pause() -> int:
+    try:
+        resume()
+    except OSError as exc:
+        print(f"重置暂停状态失败：{exc}")
+        return 1
+
+    if is_paused():
+        print("重置暂停状态失败：暂停标记仍然存在。")
+        return 1
+
+    print("已重置暂停状态，自动登录已恢复。")
+    return 0
+
+
+def check_dependencies() -> int:
+    checks = [
+        ("requests", "必要依赖"),
+        ("urllib3", "必要依赖"),
+        ("keyring", "系统凭据库密码依赖"),
+    ]
+    required_modules = {"requests", "urllib3"}
+    if sys.platform == "darwin":
+        checks.extend(
+            [
+                ("rumps", "状态栏依赖"),
+                ("objc", "状态栏依赖"),
+                ("Foundation", "状态栏依赖"),
+                ("AppKit", "状态栏依赖"),
+            ]
+        )
+        required_modules.update(("rumps", "objc", "Foundation", "AppKit"))
+
+    missing: list[str] = []
+
+    print("依赖检查")
+    for module_name, label in checks:
+        available = find_spec(module_name) is not None
+        print(f"- {module_name}（{label}）：{'可用' if available else '缺失'}")
+        if not available and module_name in required_modules:
+            missing.append(module_name)
+
+    if missing:
+        print("依赖检查失败：" + ", ".join(missing))
+        return 1
+
+    print("依赖检查通过。")
+    return 0
+
+
+def set_project_home_env() -> int:
+    if sys.platform != "darwin":
+        print(f"{PROJECT_HOME_ENV} 的 launchctl 写入仅用于 macOS LaunchAgent。")
+        return 2
+
+    try:
+        result = subprocess.run(
+            ["launchctl", "setenv", PROJECT_HOME_ENV, str(PROJECT_ROOT)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except OSError as exc:
+        print(f"写入 {PROJECT_HOME_ENV} 失败：{exc}")
+        return 1
+
+    if result.returncode != 0:
+        output = (result.stderr or result.stdout).strip()
+        print(f"写入 {PROJECT_HOME_ENV} 失败：{output or result.returncode}")
+        return 1
+
+    print(f"已写入 {PROJECT_HOME_ENV}={PROJECT_ROOT}")
+    return 0
+
+
 def open_path(path: Path, must_exist: bool) -> int:
     if must_exist and not path.exists():
         print(f"路径不存在：{path}")
         return 2
 
     try:
-        subprocess.run(["open", str(path)], check=False)
+        open_path_with_default_app(path)
     except OSError as exc:
         print(f"打开失败：{exc}")
         return 1
@@ -351,6 +471,16 @@ def _get_username(config: dict[str, Any] | None) -> str:
 
 def _is_username_set(username: str) -> bool:
     return bool(username and username != USERNAME_PLACEHOLDER)
+
+
+def _pause_for_logout(pause_for: str) -> None:
+    if pause_for == "30m":
+        pause(minutes=30)
+        return
+    if pause_for == "next-boot":
+        pause(until_next_boot=True)
+        return
+    pause()
 
 
 def _logout_failure_reason(reason: str) -> str:

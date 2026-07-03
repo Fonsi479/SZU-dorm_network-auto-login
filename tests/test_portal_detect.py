@@ -9,6 +9,7 @@ from src.szu_netlogin.portal_detect import (
     NetworkStatus,
     _probe_campus_internet,
     _probe_gateway,
+    classify_network_environment,
     check_gateway_reachable,
     check_internet,
     is_allowed_campus_source_ip,
@@ -116,7 +117,37 @@ class CampusInternetProbeTests(unittest.TestCase):
         result = _probe_gateway({"network": {"dorm_gateway_hosts": ["172.30.255.42"]}}, 3)
 
         self.assertFalse(result.reachable)
+        self.assertEqual(result.source_ip, "198.18.0.1")
         self.assertIn("source_ip_not_allowed", result.reason)
+
+    @patch("src.szu_netlogin.portal_detect.get_current_wifi_ssid", return_value="SZU_CTC&CMCC")
+    def test_environment_allows_configured_dorm_wifi(self, _ssid: Mock) -> None:
+        config = {
+            "network": {
+                "campus_wifi_names": ["SZU_CTC&CMCC"],
+                "campus_source_cidrs": ["172.16.0.0/12"],
+            }
+        }
+        status = NetworkStatus(True, False, source_ip="172.24.182.13")
+
+        environment = classify_network_environment(config, status)
+
+        self.assertEqual(environment.label, "宿舍网络")
+        self.assertTrue(environment.auto_login_available)
+
+    @patch("src.szu_netlogin.portal_detect.get_current_wifi_ssid", return_value="")
+    def test_environment_marks_proxy_source_as_non_dorm(self, _ssid: Mock) -> None:
+        status = NetworkStatus(
+            False,
+            False,
+            source_ip="198.18.0.1",
+            gateway_reason="172.30.255.42=source_ip_not_allowed:198.18.0.1",
+        )
+
+        environment = classify_network_environment({}, status)
+
+        self.assertEqual(environment.label, "非宿舍网络（疑似代理/VPN）")
+        self.assertFalse(environment.auto_login_available)
 
 
 if __name__ == "__main__":

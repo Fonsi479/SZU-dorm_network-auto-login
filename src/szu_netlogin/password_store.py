@@ -73,7 +73,7 @@ def describe_password_source(config_or_username: dict[str, Any] | str) -> str:
     if isinstance(config_or_username, dict):
         return _describe_config_password_source(config_or_username)
 
-    return f"macOS Keychain 服务 {SERVICE_NAME} 或环境变量 {PASSWORD_ENV_NAME}"
+    return f"系统凭据库服务 {SERVICE_NAME} 或环境变量 {PASSWORD_ENV_NAME}"
 
 
 def _get_keychain_target(config_or_username: dict[str, Any] | str) -> tuple[str, str]:

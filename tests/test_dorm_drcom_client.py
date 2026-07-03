@@ -210,12 +210,35 @@ vlanid="0"   ;ss4="000000000000";ss5="172.24.182.13"  ;
         self.assertEqual(params["wlan_user_ip"], "172.24.182.13")
         self.assertEqual(params["wlan_user_mac"], "9eb56a2011e4")
 
+    @patch("src.szu_netlogin.dorm_drcom_client._get_terminal_mac_for_ip", return_value="")
+    @patch("src.szu_netlogin.dorm_drcom_client._get_source_ip", return_value="172.24.182.13")
+    def test_login_with_result_classifies_password_error(self, _get_source_ip, _get_mac) -> None:
+        client = DormDrcomClient(_test_config())
+        response = _Response('dr1003({"result":0,"msg":"密码错误"});')
+
+        with patch.object(client.session, "get", return_value=response):
+            result = client.login_with_result("student-id", "password")
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.reason, "password_error")
+
+    @patch("src.szu_netlogin.dorm_drcom_client._get_terminal_mac_for_ip", return_value="")
+    @patch("src.szu_netlogin.dorm_drcom_client._get_source_ip", return_value="172.24.182.13")
+    def test_login_with_result_classifies_server_uncertain(self, _get_source_ip, _get_mac) -> None:
+        client = DormDrcomClient(_test_config())
+        response = _Response("temporary unavailable", status_code=503)
+
+        with patch.object(client.session, "get", return_value=response):
+            result = client.login_with_result("student-id", "password")
+
+        self.assertEqual(result.status, "unknown")
+        self.assertEqual(result.reason, "server_response_uncertain")
+
 
 class _Response:
-    status_code = 200
-
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, status_code: int = 200) -> None:
         self.text = text
+        self.status_code = status_code
 
 
 def _test_config() -> dict:

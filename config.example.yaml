@@ -20,6 +20,7 @@ user:
 network:
   dorm_gateway_hosts:
     - "172.30.255.42"
+  # 状态栏会结合 Wi-Fi 名称和校园网源 IP 判断是否处于宿舍网络。
   campus_wifi_names:
     - "SZU_CTC&CMCC"
   timeout_seconds: 3
@@ -27,7 +28,7 @@ network:
   # 宿舍区 Wi-Fi 本机地址通常在 172.16.0.0/12；若探测到 198.18.x.x 这类代理/TUN 地址，会跳过自动登录。
   campus_source_cidrs:
     - "172.16.0.0/12"
-  # 校园网源地址直连失败时，允许按 macOS 系统代理/VPN 路径确认外网可用。
+  # 校园网源地址直连失败时，允许按系统代理/VPN 路径确认外网可用。
   allow_system_fallback: true
   test_urls:
     - "http://captive.apple.com/hotspot-detect.html"
@@ -38,7 +39,7 @@ security:
   # 可选值：env、keychain、private_file
   password_source: "keychain"
   password_env_name: "SZU_NET_PASSWORD"
-  # 当 password_source: "keychain" 时使用。
+  # 当 password_source: "keychain" 时使用；macOS 对应 Keychain，Windows 对应系统凭据库/keyring 后端。
   keychain_service: "szu-netlogin"
   # 可选；不填则使用 user.username。
   keychain_account: ""

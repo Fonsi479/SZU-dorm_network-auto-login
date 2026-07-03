@@ -59,6 +59,14 @@ class LoginLockTests(unittest.TestCase):
         client_class.assert_not_called()
         lock_handle.close.assert_called_once()
 
+    def test_login_failure_reason_labels_are_user_facing(self) -> None:
+        self.assertEqual(login.login_failure_reason_label("password_missing"), "密码缺失")
+        self.assertEqual(login.login_failure_reason_label("password_error"), "密码错误")
+        self.assertEqual(
+            login.login_failure_reason_label("suspected_proxy_interference"),
+            "疑似代理/VPN 干扰",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

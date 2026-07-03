@@ -11,9 +11,11 @@ from ipaddress import ip_network
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from .platform_paths import get_default_app_project_root
+
 
 SOURCE_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_APP_PROJECT_ROOT = Path.home() / "Projects" / "szu-netlogin"
+DEFAULT_APP_PROJECT_ROOT = get_default_app_project_root()
 PROJECT_HOME_ENV = "SZU_NETLOGIN_HOME"
 
 
@@ -143,7 +145,7 @@ def describe_password_source(config: dict[str, Any]) -> str:
     if password_source == "env":
         return f"环境变量 {get_password_env_name(config)}"
     if password_source == "keychain":
-        return f"macOS Keychain 服务 {security.get('keychain_service')}"
+        return f"系统凭据库服务 {security.get('keychain_service')}"
     if password_source == "private_file":
         return f"私有密码文件 {security.get('password_file')}"
     return password_source
@@ -172,10 +174,17 @@ def _validate_campus_source_cidrs(network: dict[str, Any]) -> None:
 
 
 def _get_keychain_password(config: dict[str, Any]) -> str:
-    security = config["security"]
-    user = config["user"]
-    service = str(security["keychain_service"])
-    account = str(security.get("keychain_account") or user["username"])
+    service, account = _get_keychain_target(config)
+
+    try:
+        password = _load_keyring().get_password(service, account) or ""
+    except Exception:
+        password = ""
+    if password:
+        return password
+
+    if sys.platform != "darwin":
+        return ""
 
     try:
         result = subprocess.run(
@@ -199,6 +208,20 @@ def _get_keychain_password(config: dict[str, Any]) -> str:
     if result.returncode != 0:
         return ""
     return result.stdout.strip()
+
+
+def _get_keychain_target(config: dict[str, Any]) -> tuple[str, str]:
+    security = config["security"]
+    user = config["user"]
+    service = str(security["keychain_service"])
+    account = str(security.get("keychain_account") or user["username"])
+    return service, account
+
+
+def _load_keyring():
+    import keyring  # type: ignore[import-not-found]
+
+    return keyring
 
 
 def _get_private_file_password(config: dict[str, Any]) -> str:
