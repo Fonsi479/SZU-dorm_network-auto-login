@@ -21,7 +21,7 @@ class DiagnosticReportTests(unittest.TestCase):
                 campus_internet_ok=False,
                 gateway_host="172.30.255.42",
                 source_ip="172.24.182.13",
-                internet_route="campus_source",
+                internet_route="default",
             )
             environment = NetworkEnvironment("宿舍网络", True, True, "SZU_CTC&CMCC", "172.24.182.13")
 

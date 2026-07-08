@@ -5,6 +5,8 @@ APP_NAME="SZU Dorm Login"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 APP_PATH="${PROJECT_ROOT}/dist/${APP_NAME}.app"
+DEFAULT_APP_HOME="${HOME}/Library/Application Support/szu-netlogin"
+APP_HOME="${SZU_NETLOGIN_HOME:-${DEFAULT_APP_HOME}}"
 LOG_DIR="${PROJECT_ROOT}/logs"
 LOG_FILE="${LOG_DIR}/menubar-open.log"
 MENUBAR_LOG_FILE="${LOG_DIR}/menubar.log"
@@ -13,6 +15,7 @@ MENUBAR_ERR_LOG_FILE="${USER_LOG_DIR}/menubar-err.log"
 
 mkdir -p "${LOG_DIR}"
 mkdir -p "${USER_LOG_DIR}"
+mkdir -p "${APP_HOME}"
 
 log() {
   local message="$1"
@@ -24,9 +27,16 @@ log() {
 
 log "准备打开 SZU Dorm 状态栏 App。"
 log "项目目录：${PROJECT_ROOT}"
+log "App 配置目录：${APP_HOME}"
 
-export SZU_NETLOGIN_HOME="${SZU_NETLOGIN_HOME:-${PROJECT_ROOT}}"
-log "使用项目目录环境变量：SZU_NETLOGIN_HOME=${SZU_NETLOGIN_HOME}"
+if [[ ! -f "${APP_HOME}/config.yaml" && -f "${PROJECT_ROOT}/config.yaml" ]]; then
+  cp -p "${PROJECT_ROOT}/config.yaml" "${APP_HOME}/config.yaml"
+  chmod 600 "${APP_HOME}/config.yaml" 2>/dev/null || true
+  log "已把当前 config.yaml 复制到 App 配置目录。"
+fi
+
+export SZU_NETLOGIN_HOME="${APP_HOME}"
+log "使用配置目录环境变量：SZU_NETLOGIN_HOME=${SZU_NETLOGIN_HOME}"
 
 if command -v launchctl >/dev/null 2>&1; then
   if launchctl setenv SZU_NETLOGIN_HOME "${SZU_NETLOGIN_HOME}" >> "${LOG_FILE}" 2>&1; then

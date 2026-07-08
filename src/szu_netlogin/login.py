@@ -202,7 +202,6 @@ def login_failure_reason_label(reason: str) -> str:
         "password_error": "密码错误",
         "gateway_unreachable": "网关不可达",
         "internet_already_ok": "外网已通",
-        "suspected_proxy_interference": "疑似代理/VPN 干扰",
         "portal_interface_changed": "门户接口变化",
         "server_response_uncertain": "服务器响应不确定",
         "server_failed": "门户返回失败",
@@ -214,8 +213,6 @@ def login_failure_reason_label(reason: str) -> str:
 
 
 def _network_login_skip_reason(gateway_reason: str) -> str:
-    if "source_ip_not_allowed" in gateway_reason:
-        return "suspected_proxy_interference"
     return "gateway_unreachable"
 
 

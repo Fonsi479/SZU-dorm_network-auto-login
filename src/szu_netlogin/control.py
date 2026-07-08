@@ -147,7 +147,6 @@ def print_status() -> int:
     print(f"宿舍区网关是否可达：{_yes_no(network_status.gateway_reachable)}")
     print(f"当前网络环境：{classify_network_environment(config, network_status).label}")
     print(f"源 IP：{network_status.source_ip or '-'}")
-    print(f"是否走系统代理/VPN fallback：{_yes_no(network_status.used_system_fallback)}")
     print(f"config.yaml 是否存在：{_yes_no(config_exists)}")
     print(f"是否已设置账号：{_yes_no(_is_username_set(username))}")
     print(f"是否已设置密码：{_yes_no(has_password(config) if config and _is_username_set(username) else False)}")

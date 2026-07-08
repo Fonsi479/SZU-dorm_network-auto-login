@@ -14,7 +14,7 @@ APP_DIR_NAME = "SZU Dorm NetLogin"
 
 def get_default_app_project_root() -> Path:
     """Return a writable default home for packaged apps."""
-    if os.name == "nt":
+    if os.name == "nt" or sys.platform == "darwin":
         return get_user_data_dir()
     return Path.home() / "Projects" / "szu-netlogin"
 

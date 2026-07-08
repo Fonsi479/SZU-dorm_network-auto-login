@@ -8,6 +8,7 @@ APP_PATH="${PROJECT_ROOT}/dist/${APP_NAME}.app"
 EXEC_PATH="${APP_PATH}/Contents/MacOS/${APP_NAME}"
 INFO_PLIST="${APP_PATH}/Contents/Info.plist"
 MENUBAR_LOG="${PROJECT_ROOT}/logs/menubar.log"
+APP_HOME="${HOME}/Library/Application Support/szu-netlogin"
 
 fail() {
   echo "验证失败：$1" >&2
@@ -41,7 +42,13 @@ else
 fi
 
 if [[ "${1:-}" == "--launch" ]]; then
-  launchctl setenv SZU_NETLOGIN_HOME "${PROJECT_ROOT}"
+  mkdir -p "${APP_HOME}"
+  if [[ ! -f "${APP_HOME}/config.yaml" && -f "${PROJECT_ROOT}/config.yaml" ]]; then
+    cp -p "${PROJECT_ROOT}/config.yaml" "${APP_HOME}/config.yaml"
+    chmod 600 "${APP_HOME}/config.yaml" 2>/dev/null || true
+    echo "已把当前 config.yaml 复制到 App 配置目录：${APP_HOME}"
+  fi
+  launchctl setenv SZU_NETLOGIN_HOME "${APP_HOME}"
   open "${APP_PATH}"
   echo
   echo "已请求打开 App。它是菜单栏 App，请看屏幕顶部的 SZU Dorm。"

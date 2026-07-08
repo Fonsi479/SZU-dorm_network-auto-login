@@ -12,7 +12,6 @@ from src.szu_netlogin.portal_detect import (
     classify_network_environment,
     check_gateway_reachable,
     check_internet,
-    is_allowed_campus_source_ip,
 )
 
 
@@ -41,71 +40,40 @@ class CampusInternetProbeTests(unittest.TestCase):
 
         probe_gateway.assert_called_once_with(config, 9)
 
-    @patch("src.szu_netlogin.portal_detect.get_logger")
     @patch("src.szu_netlogin.portal_detect._build_session")
     @patch("src.szu_netlogin.portal_detect._probe_urls")
-    def test_system_fallback_success_does_not_log_overall_unavailable(
+    def test_internet_probe_uses_default_network_path(
         self,
         probe_urls: Mock,
-        _build_session: Mock,
-        get_logger: Mock,
+        build_session: Mock,
     ) -> None:
-        probe_urls.side_effect = [
-            InternetProbe(False, "www.baidu.com=timeout", route="campus_source"),
-            InternetProbe(True, "ok", route="system_default"),
-        ]
-        logger = get_logger.return_value
+        probe_urls.return_value = InternetProbe(True, "ok", route="default")
 
         result = _probe_campus_internet({}, "172.24.9.84", 3)
 
         self.assertTrue(result.ok)
-        messages = [str(call.args[0]) for call in logger.info.call_args_list]
-        self.assertFalse(any("检测：不可用" in message for message in messages))
-        logger.debug.assert_called_once()
-        self.assertFalse(probe_urls.call_args_list[0].kwargs["log_failure"])
-        self.assertFalse(probe_urls.call_args_list[1].kwargs["log_failure"])
+        self.assertEqual(result.route, "default")
+        build_session.assert_called_once_with("", trust_env=True)
+        self.assertEqual(probe_urls.call_args.kwargs["route"], "default")
 
-    @patch("src.szu_netlogin.portal_detect.get_logger")
     @patch("src.szu_netlogin.portal_detect._build_session")
     @patch("src.szu_netlogin.portal_detect._probe_urls")
-    def test_both_routes_failing_logs_one_overall_failure(
+    def test_default_path_failure_logs_once(
         self,
         probe_urls: Mock,
         _build_session: Mock,
-        get_logger: Mock,
     ) -> None:
-        probe_urls.side_effect = [
-            InternetProbe(False, "baidu=timeout", route="campus_source"),
-            InternetProbe(False, "baidu=connection_failed", route="system_default"),
-        ]
-        logger = get_logger.return_value
+        probe_urls.return_value = InternetProbe(False, "baidu=timeout", route="default")
 
         result = _probe_campus_internet({}, "172.24.9.84", 3)
 
         self.assertFalse(result.ok)
-        unavailable_calls = [
-            call for call in logger.info.call_args_list if "检测：不可用" in str(call.args[0])
-        ]
-        self.assertEqual(len(unavailable_calls), 1)
-
-    def test_default_campus_source_cidr_rejects_tun_address(self) -> None:
-        self.assertTrue(is_allowed_campus_source_ip({}, "172.24.182.13"))
-        self.assertFalse(is_allowed_campus_source_ip({}, "198.18.0.1"))
-
-    def test_invalid_configured_cidr_fails_closed(self) -> None:
-        config = {"network": {"campus_source_cidrs": ["bad-cidr"]}}
-
-        self.assertFalse(is_allowed_campus_source_ip(config, "198.18.0.1"))
-        self.assertFalse(is_allowed_campus_source_ip(config, "172.24.182.13"))
-
-    def test_partly_invalid_configured_cidr_fails_closed(self) -> None:
-        config = {"network": {"campus_source_cidrs": ["172.16.0.0/12", "bad-cidr"]}}
-
-        self.assertFalse(is_allowed_campus_source_ip(config, "172.24.182.13"))
+        self.assertEqual(result.route, "default")
+        probe_urls.assert_called_once()
 
     @patch("src.szu_netlogin.portal_detect.get_logger")
     @patch("src.szu_netlogin.portal_detect.socket.create_connection")
-    def test_gateway_probe_ignores_non_campus_source_ip(
+    def test_gateway_probe_accepts_any_source_ip(
         self,
         create_connection: Mock,
         _get_logger: Mock,
@@ -116,16 +84,14 @@ class CampusInternetProbeTests(unittest.TestCase):
 
         result = _probe_gateway({"network": {"dorm_gateway_hosts": ["172.30.255.42"]}}, 3)
 
-        self.assertFalse(result.reachable)
+        self.assertTrue(result.reachable)
         self.assertEqual(result.source_ip, "198.18.0.1")
-        self.assertIn("source_ip_not_allowed", result.reason)
 
     @patch("src.szu_netlogin.portal_detect.get_current_wifi_ssid", return_value="SZU_CTC&CMCC")
     def test_environment_allows_configured_dorm_wifi(self, _ssid: Mock) -> None:
         config = {
             "network": {
                 "campus_wifi_names": ["SZU_CTC&CMCC"],
-                "campus_source_cidrs": ["172.16.0.0/12"],
             }
         }
         status = NetworkStatus(True, False, source_ip="172.24.182.13")
@@ -136,18 +102,17 @@ class CampusInternetProbeTests(unittest.TestCase):
         self.assertTrue(environment.auto_login_available)
 
     @patch("src.szu_netlogin.portal_detect.get_current_wifi_ssid", return_value="")
-    def test_environment_marks_proxy_source_as_non_dorm(self, _ssid: Mock) -> None:
+    def test_environment_uses_gateway_reachability_without_source_ip_filter(self, _ssid: Mock) -> None:
         status = NetworkStatus(
-            False,
+            True,
             False,
             source_ip="198.18.0.1",
-            gateway_reason="172.30.255.42=source_ip_not_allowed:198.18.0.1",
         )
 
         environment = classify_network_environment({}, status)
 
-        self.assertEqual(environment.label, "非宿舍网络（疑似代理/VPN）")
-        self.assertFalse(environment.auto_login_available)
+        self.assertEqual(environment.label, "宿舍网络")
+        self.assertTrue(environment.auto_login_available)
 
 
 if __name__ == "__main__":

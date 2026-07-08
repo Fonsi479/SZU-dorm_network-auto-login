@@ -7,7 +7,6 @@ import json
 import os
 import subprocess
 import sys
-from ipaddress import ip_network
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -25,9 +24,6 @@ def get_project_root() -> Path:
         return Path(configured_home).expanduser().resolve()
 
     if getattr(sys, "frozen", False):
-        bundled_project_root = _find_project_root_from_executable()
-        if bundled_project_root is not None:
-            return bundled_project_root
         return DEFAULT_APP_PROJECT_ROOT
 
     return SOURCE_PROJECT_ROOT
@@ -103,8 +99,6 @@ def validate_config(config: dict[str, Any]) -> None:
     if not isinstance(network.get("test_urls"), list) or not network["test_urls"]:
         raise ConfigError("network.test_urls 至少需要填写一个检测网址。")
 
-    _validate_campus_source_cidrs(network)
-
     password_source = str(security.get("password_source", "env"))
     if password_source not in ("env", "keychain", "private_file"):
         raise ConfigError("security.password_source 只支持 env、keychain、private_file。")
@@ -158,34 +152,20 @@ def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
     return section
 
 
-def _validate_campus_source_cidrs(network: dict[str, Any]) -> None:
-    if "campus_source_cidrs" not in network:
-        return
-
-    cidrs = network.get("campus_source_cidrs")
-    if not isinstance(cidrs, list) or not cidrs:
-        raise ConfigError("network.campus_source_cidrs 必须是至少包含一个 CIDR 的列表。")
-
-    for cidr in cidrs:
-        try:
-            ip_network(str(cidr), strict=False)
-        except ValueError as exc:
-            raise ConfigError(f"network.campus_source_cidrs 包含无效 CIDR：{cidr}") from exc
-
-
 def _get_keychain_password(config: dict[str, Any]) -> str:
     service, account = _get_keychain_target(config)
+
+    if sys.platform == "darwin":
+        return _get_macos_keychain_password(service, account)
 
     try:
         password = _load_keyring().get_password(service, account) or ""
     except Exception:
         password = ""
-    if password:
-        return password
+    return password
 
-    if sys.platform != "darwin":
-        return ""
 
+def _get_macos_keychain_password(service: str, account: str) -> str:
     try:
         result = subprocess.run(
             [

@@ -380,7 +380,6 @@ class SzuDormMenubarApp(RumpsAppBase):
         message = (
             f"状态刷新：{run_label}，{environment_label}，{campus_label}，{gateway_label}，"
             f"source_ip={result.network_status.source_ip or '-'}，"
-            f"fallback={'yes' if result.network_status.used_system_fallback else 'no'}，"
             f"时间={datetime.now().strftime('%H:%M:%S')}"
         )
         if result.config_error:
@@ -401,6 +400,9 @@ class SzuDormMenubarApp(RumpsAppBase):
             self.timer.start()
 
         if not self._network_probe_enabled:
+            return
+
+        if self._last_status_result is None:
             return
 
         if not self._auto_login_schedule.consume_if_due():
@@ -911,7 +913,6 @@ def extract_login_reason(output: str) -> str:
         "密码错误",
         "网关不可达",
         "外网已通",
-        "疑似代理/VPN 干扰",
         "门户接口变化",
         "服务器响应不确定",
         "门户返回失败",
