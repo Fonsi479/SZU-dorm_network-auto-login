@@ -95,6 +95,8 @@ def main() -> int:
                 return 0
 
             gateway_hosts = ((config.get("network") or {}).get("dorm_gateway_hosts") or ["172.30.255.42"])
+            if isinstance(gateway_hosts, str):
+                gateway_hosts = [gateway_hosts]
             gateway_label = ", ".join(str(host) for host in gateway_hosts)
             print(f"当前外网不可用，已检查宿舍区网关 {gateway_label}:801...")
             if not network_status.gateway_reachable:
@@ -105,6 +107,16 @@ def main() -> int:
                 print(f"当前网络环境：{environment.label}")
                 print(f"登录跳过原因：{reason_label}。")
                 logger.info("自动登录停止本轮：%s", reason_label)
+                return 0
+
+            environment = classify_network_environment(config, network_status)
+            if not environment.auto_login_available:
+                print(f"当前网络环境：{environment.label}")
+                print("登录跳过原因：网关可达但源 IP 不在已配置校园网段，拒绝发送账号密码。")
+                logger.warning(
+                    "自动登录停止本轮：gateway reachable but source IP is unverified (%s)",
+                    network_status.source_ip or "-",
+                )
                 return 0
 
             if is_paused():

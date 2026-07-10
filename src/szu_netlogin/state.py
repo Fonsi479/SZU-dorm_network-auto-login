@@ -5,16 +5,24 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 from datetime import datetime, timedelta
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from .platform_paths import run_subprocess_hidden
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+
 
 STATE_DIR_ENV = "SZU_NETLOGIN_STATE_DIR"
 STATE_DIR = Path(os.environ.get(STATE_DIR_ENV, Path.home() / ".szu-netlogin")).expanduser()
 PAUSE_FLAG_FILE = STATE_DIR / "paused"
+_PAUSE_THREAD_LOCK = threading.RLock()
 
 
 def is_paused() -> bool:
@@ -22,7 +30,7 @@ def is_paused() -> bool:
 
 
 def pause(minutes: int | None = None, until_next_boot: bool = False) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    PAUSE_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now().astimezone()
     payload: dict[str, Any] = {
         "paused_at": now.isoformat(),
@@ -33,13 +41,14 @@ def pause(minutes: int | None = None, until_next_boot: bool = False) -> None:
         payload["mode"] = "until"
         payload["resume_after"] = (now + timedelta(minutes=max(1, minutes))).isoformat()
     elif until_next_boot:
+        boot_marker = _current_boot_marker()
+        if not boot_marker:
+            raise OSError("无法读取当前启动标记，拒绝创建“下次开机恢复”暂停状态。")
         payload["mode"] = "until_next_boot"
-        payload["boot_marker"] = _current_boot_marker()
+        payload["boot_marker"] = boot_marker
 
-    PAUSE_FLAG_FILE.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    with _pause_file_lock():
+        _write_pause_payload(payload)
 
 
 def describe_pause_state() -> str:
@@ -57,29 +66,28 @@ def describe_pause_state() -> str:
 
 
 def resume() -> None:
-    try:
-        PAUSE_FLAG_FILE.unlink()
-    except FileNotFoundError:
-        return
+    with _pause_file_lock():
+        _remove_pause_flag()
 
 
 def _active_pause_payload() -> dict[str, Any] | None:
-    try:
-        if not PAUSE_FLAG_FILE.exists():
+    with _pause_file_lock():
+        try:
+            if not PAUSE_FLAG_FILE.exists():
+                return None
+            payload = _read_pause_payload()
+        except OSError:
+            return {"mode": "manual"}
+
+        mode = str(payload.get("mode") or "manual")
+        if mode == "until" and _is_timed_pause_expired(payload):
+            _remove_pause_flag()
             return None
-        payload = _read_pause_payload()
-    except OSError:
-        return {"mode": "manual"}
+        if mode == "until_next_boot" and _is_next_boot_pause_expired(payload):
+            _remove_pause_flag()
+            return None
 
-    mode = str(payload.get("mode") or "manual")
-    if mode == "until" and _is_timed_pause_expired(payload):
-        resume()
-        return None
-    if mode == "until_next_boot" and _is_next_boot_pause_expired(payload):
-        resume()
-        return None
-
-    return payload
+        return payload
 
 
 def _read_pause_payload() -> dict[str, Any]:
@@ -110,7 +118,10 @@ def _is_timed_pause_expired(payload: dict[str, Any]) -> bool:
         deadline = datetime.fromisoformat(resume_after)
     except ValueError:
         return False
-    return datetime.now().astimezone() >= deadline
+    now = datetime.now().astimezone()
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=now.tzinfo)
+    return now >= deadline
 
 
 def _is_next_boot_pause_expired(payload: dict[str, Any]) -> bool:
@@ -160,3 +171,38 @@ def _windows_boot_marker() -> str:
     if result.returncode != 0:
         return ""
     return result.stdout.strip()
+
+
+@contextmanager
+def _pause_file_lock():
+    """Serialize pause reads and updates so an expired reader cannot erase a new pause."""
+    with _PAUSE_THREAD_LOCK:
+        PAUSE_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = PAUSE_FLAG_FILE.with_name(f"{PAUSE_FLAG_FILE.name}.lock")
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _write_pause_payload(payload: dict[str, Any]) -> None:
+    temporary_path = PAUSE_FLAG_FILE.with_name(f".{PAUSE_FLAG_FILE.name}.{os.getpid()}.tmp")
+    try:
+        temporary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary_path, PAUSE_FLAG_FILE)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _remove_pause_flag() -> None:
+    try:
+        PAUSE_FLAG_FILE.unlink()
+    except FileNotFoundError:
+        return

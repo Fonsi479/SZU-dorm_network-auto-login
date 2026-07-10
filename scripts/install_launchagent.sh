@@ -10,13 +10,15 @@ TARGET_DIR="${HOME}/Library/LaunchAgents"
 TARGET_PLIST="${TARGET_DIR}/${LABEL}.plist"
 LOG_DIR="${HOME}/Library/Logs/szu-netlogin"
 PYTHON_BIN="${PYTHON_BIN:-$(python3 -c 'import sys; print(sys.executable)' 2>/dev/null || command -v python3 || true)}"
+APP_EXECUTABLE="${SZU_NETLOGIN_APP_EXECUTABLE:-}"
+CONFIG_HOME="${SZU_NETLOGIN_HOME:-${PROJECT_ROOT}}"
 
 if [[ -z "${PYTHON_BIN}" ]]; then
   echo "未找到 python3。请先安装 Python，或用 PYTHON_BIN=/path/to/python3 指定。"
   exit 1
 fi
 
-if ! "${PYTHON_BIN}" -c 'import requests' >/dev/null 2>&1; then
+if [[ -z "${APP_EXECUTABLE}" ]] && ! "${PYTHON_BIN}" -c 'import requests' >/dev/null 2>&1; then
   echo "当前 Python 缺少依赖 requests：${PYTHON_BIN}" >&2
   echo "请先运行：${PYTHON_BIN} -m pip install -r requirements.txt" >&2
   exit 1
@@ -25,7 +27,7 @@ fi
 mkdir -p "${TARGET_DIR}"
 mkdir -p "${LOG_DIR}"
 
-export SOURCE_PLIST TARGET_PLIST PROJECT_ROOT LOG_DIR PYTHON_BIN
+export SOURCE_PLIST TARGET_PLIST PROJECT_ROOT LOG_DIR PYTHON_BIN APP_EXECUTABLE CONFIG_HOME
 "${PYTHON_BIN}" -c '
 import os
 import plistlib
@@ -36,33 +38,39 @@ target_plist = Path(os.environ["TARGET_PLIST"])
 project_root = os.environ["PROJECT_ROOT"]
 log_dir = os.environ["LOG_DIR"]
 python_bin = os.environ["PYTHON_BIN"]
+app_executable = os.environ["APP_EXECUTABLE"]
+config_home = os.environ["CONFIG_HOME"]
 
 payload = plistlib.loads(source_plist.read_bytes())
-payload["ProgramArguments"] = [
-    python_bin,
-    "-m",
-    "src.szu_netlogin.login",
-    "--check-and-login",
-]
-payload["WorkingDirectory"] = project_root
+payload["ProgramArguments"] = (
+    [app_executable, "--szu-netlogin-control", "check-and-login"]
+    if app_executable
+    else [python_bin, "-m", "src.szu_netlogin.login", "--check-and-login"]
+)
+payload["WorkingDirectory"] = config_home
 payload["StandardOutPath"] = f"{log_dir}/launchagent.out.log"
 payload["StandardErrorPath"] = f"{log_dir}/launchagent.err.log"
 environment = payload.get("EnvironmentVariables")
 if not isinstance(environment, dict):
     environment = {}
-environment["SZU_NETLOGIN_HOME"] = project_root
+environment["SZU_NETLOGIN_HOME"] = config_home
 payload["EnvironmentVariables"] = environment
 
 target_plist.write_bytes(plistlib.dumps(payload, sort_keys=False))
 '
 chmod 644 "${TARGET_PLIST}"
 
-if [[ -n "${SZU_NET_PASSWORD:-}" ]]; then
-  launchctl setenv SZU_NET_PASSWORD "${SZU_NET_PASSWORD}"
-  echo "已把当前终端里的 SZU_NET_PASSWORD 交给本次用户登录会话。"
+PASSWORD_ENV_NAME="${SZU_NETLOGIN_PASSWORD_ENV_NAME:-$(cd "${CONFIG_HOME}" 2>/dev/null && "${PYTHON_BIN}" -c 'from src.szu_netlogin.config import get_password_env_name, load_config; print(get_password_env_name(load_config()))' 2>/dev/null || true)}"
+PASSWORD_VALUE=""
+if [[ -n "${PASSWORD_ENV_NAME}" ]]; then
+  PASSWORD_VALUE="${(P)PASSWORD_ENV_NAME}"
+fi
+if [[ -n "${PASSWORD_ENV_NAME}" && -n "${PASSWORD_VALUE}" ]]; then
+  launchctl setenv "${PASSWORD_ENV_NAME}" "${PASSWORD_VALUE}"
+  echo "已把当前终端里的 ${PASSWORD_ENV_NAME} 交给本次用户登录会话。"
 else
-  echo "提醒：当前终端没有 SZU_NET_PASSWORD。"
-  echo "只有当 config.yaml 使用 security.password_source: env 且 password_env_name: SZU_NET_PASSWORD 时，才需要设置它。"
+  echo "提醒：当前终端没有配置的密码环境变量 ${PASSWORD_ENV_NAME:-SZU_NET_PASSWORD}。"
+  echo "只有当 config.yaml 使用 security.password_source: env 时，才需要设置它。"
 fi
 
 launchctl bootout "${DOMAIN}" "${TARGET_PLIST}" >/dev/null 2>&1 || true

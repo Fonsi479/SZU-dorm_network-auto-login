@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -56,6 +57,16 @@ class PasswordStoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "环境变量 SZU_NET_PASSWORD"):
             set_password(config, "secret")
+
+    def test_private_file_does_not_replace_destination_when_permissions_cannot_be_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            password_file = Path(temp_dir) / "password.yaml"
+            password_file.write_text("password: old\n", encoding="utf-8")
+            config = {"security": {"password_source": "private_file", "password_file": str(password_file)}}
+            with patch("src.szu_netlogin.password_store.os.chmod", side_effect=OSError("denied")):
+                with self.assertRaises(OSError):
+                    set_password(config, "secret")
+            self.assertEqual(password_file.read_text(encoding="utf-8"), "password: old\n")
 
 
 if __name__ == "__main__":

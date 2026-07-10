@@ -128,6 +128,24 @@ network:
 
 
 class ConfigValidationTests(unittest.TestCase):
+    def test_rejects_non_positive_or_non_numeric_auth_timeout(self) -> None:
+        for value in ("eight", 0, -1):
+            config = _valid_config()
+            config["auth"]["timeout_seconds"] = value
+            with self.assertRaisesRegex(ConfigError, "timeout_seconds"):
+                validate_config(config)
+
+    def test_rejects_scalar_gateway_hosts(self) -> None:
+        config = _valid_config()
+        config["network"]["dorm_gateway_hosts"] = "172.30.255.42"
+        with self.assertRaisesRegex(ConfigError, "dorm_gateway_hosts"):
+            validate_config(config)
+
+    def test_fallback_yaml_decodes_doubled_single_quote(self) -> None:
+        self.assertEqual(
+            _parse_simple_yaml("network:\n  campus_wifi_names: ['John''s WiFi']\n")["network"]["campus_wifi_names"],
+            ["John's WiFi"],
+        )
     def test_rejects_invalid_logout_discovery_urls(self) -> None:
         config = _valid_config()
         config["auth"]["logout_page_url"] = "172.30.255.42/a79.htm"

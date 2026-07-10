@@ -504,7 +504,13 @@ def _verify_campus_logged_out(config: dict[str, Any]) -> bool:
     except Exception as exc:
         get_logger().info("退出后校园网状态确认失败：%s", exc)
         return False
-    return status.gateway_reachable and not status.campus_internet_ok
+    # A timeout/DNS failure is not evidence that the portal session was removed.
+    # Only the captive-portal signature from a successful probe sequence confirms it.
+    return (
+        status.gateway_reachable
+        and not status.campus_internet_ok
+        and status.internet_portal_redirect
+    )
 
 
 def _replace_username(text: str, username: str) -> str:
@@ -531,8 +537,8 @@ def _replace_username(text: str, username: str) -> str:
             return "".join(lines)
 
     if user_section_index is None:
-        ending = "\n" if text.endswith("\n") else ""
-        return f"{text}{ending}user:\n  username: {new_value}\n"
+        separator = "" if not text or text.endswith("\n") else "\n"
+        return f"{text}{separator}user:\n  username: {new_value}\n"
 
     insert_at = user_section_index + 1
     lines.insert(insert_at, f"  username: {new_value}\n")

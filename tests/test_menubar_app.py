@@ -137,6 +137,18 @@ class AutoLoginGateTests(unittest.TestCase):
 
 
 class NetworkProbeToggleTests(unittest.TestCase):
+    def test_cancel_active_process_terminates_running_control_command(self) -> None:
+        app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
+        app.logger = Mock()
+        app._active_process_lock = threading.Lock()
+        app._active_process = Mock()
+        app._active_process.poll.return_value = None
+        app._terminate_process = Mock()
+
+        app._cancel_active_control_process()
+
+        app._terminate_process.assert_called_once_with(app._active_process)
+
     def test_refresh_status_worker_does_not_probe_when_disabled(self) -> None:
         app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
         app.logger = Mock()

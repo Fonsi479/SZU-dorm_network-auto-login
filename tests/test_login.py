@@ -45,7 +45,11 @@ class LoginLockTests(unittest.TestCase):
             patch("src.szu_netlogin.login.describe_password_source", return_value="env"),
             patch(
                 "src.szu_netlogin.login.probe_network",
-                return_value=NetworkStatus(gateway_reachable=True, campus_internet_ok=False),
+                return_value=NetworkStatus(
+                    gateway_reachable=True,
+                    campus_internet_ok=False,
+                    source_ip="172.24.1.2",
+                ),
             ),
             patch("src.szu_netlogin.login.get_password") as get_password,
             patch("src.szu_netlogin.login.DormDrcomClient") as client_class,

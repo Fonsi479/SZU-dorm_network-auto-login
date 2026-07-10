@@ -21,8 +21,14 @@ echo "App 路径：${APP_PATH}"
 [[ -d "${APP_PATH}" ]] || fail "找不到 app，请先运行 bash scripts/build_app.sh"
 [[ -f "${INFO_PLIST}" ]] || fail "找不到 Info.plist"
 [[ -x "${EXEC_PATH}" ]] || fail "主程序不存在或没有执行权限：${EXEC_PATH}"
+[[ -f "${APP_PATH}/Contents/Resources/scripts/install_launchagent.sh" ]] || fail "App 缺少 LaunchAgent 安装脚本"
+[[ -f "${APP_PATH}/Contents/Resources/launchd/com.szu-netlogin.dorm-drcom.plist" ]] || fail "App 缺少 LaunchAgent plist 模板"
 
 plutil -lint "${INFO_PLIST}" >/dev/null || fail "Info.plist 格式不正确"
+
+if ! "${EXEC_PATH}" --szu-netlogin-control check-dependencies >/dev/null 2>&1; then
+  fail "App 控制入口无法启动或依赖缺失"
+fi
 
 echo "App 包检查：通过"
 

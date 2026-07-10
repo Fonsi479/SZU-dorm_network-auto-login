@@ -52,6 +52,24 @@ class PauseStateTests(unittest.TestCase):
                 self.assertFalse(state.is_paused())
                 self.assertFalse(pause_file.exists())
 
+    def test_naive_timed_pause_is_handled_without_datetime_type_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pause_file = Path(temp_dir) / "paused"
+            pause_file.write_text(json.dumps({"mode": "until", "resume_after": "2000-01-01T00:00:00"}), encoding="utf-8")
+            with patch("src.szu_netlogin.state.PAUSE_FLAG_FILE", pause_file):
+                self.assertFalse(state.is_paused())
+
+    def test_next_boot_pause_refuses_unknown_boot_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pause_file = Path(temp_dir) / "paused"
+            with (
+                patch("src.szu_netlogin.state.PAUSE_FLAG_FILE", pause_file),
+                patch("src.szu_netlogin.state._current_boot_marker", return_value=""),
+            ):
+                with self.assertRaises(OSError):
+                    state.pause(until_next_boot=True)
+                self.assertFalse(pause_file.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

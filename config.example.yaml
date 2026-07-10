@@ -23,6 +23,9 @@ network:
   # 状态栏会结合 Wi-Fi 名称和校园网源 IP 判断是否处于宿舍网络。
   campus_wifi_names:
     - "SZU_CTC&CMCC"
+  # 只有网关可达且本机源 IP 落在这些校园网段时，才会自动发送登录请求。
+  campus_source_networks:
+    - "172.16.0.0/12"
   timeout_seconds: 3
   max_test_urls: 3
   test_urls:

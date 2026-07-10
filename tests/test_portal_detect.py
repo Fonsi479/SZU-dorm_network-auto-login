@@ -9,6 +9,7 @@ from src.szu_netlogin.portal_detect import (
     NetworkStatus,
     _probe_campus_internet,
     _probe_gateway,
+    _probe_urls,
     classify_network_environment,
     check_gateway_reachable,
     check_internet,
@@ -16,6 +17,14 @@ from src.szu_netlogin.portal_detect import (
 
 
 class CampusInternetProbeTests(unittest.TestCase):
+    def test_single_generic_http_200_does_not_prove_connectivity(self) -> None:
+        response = Mock(status_code=200, text="<title>上网认证</title>", url="http://example.test/")
+        response.headers = {}
+        session = Mock()
+        session.get.return_value = response
+        result = _probe_urls(session, ["http://example.test/"], 3, "default", "172.24.1.2")
+        self.assertFalse(result.ok)
+        self.assertTrue(result.portal_redirect)
     @patch("src.szu_netlogin.portal_detect.probe_network")
     def test_check_internet_defers_timeout_to_probe_network(
         self,
@@ -102,7 +111,7 @@ class CampusInternetProbeTests(unittest.TestCase):
         self.assertTrue(environment.auto_login_available)
 
     @patch("src.szu_netlogin.portal_detect.get_current_wifi_ssid", return_value="")
-    def test_environment_uses_gateway_reachability_without_source_ip_filter(self, _ssid: Mock) -> None:
+    def test_environment_requires_campus_source_ip(self, _ssid: Mock) -> None:
         status = NetworkStatus(
             True,
             False,
@@ -111,8 +120,8 @@ class CampusInternetProbeTests(unittest.TestCase):
 
         environment = classify_network_environment({}, status)
 
-        self.assertEqual(environment.label, "宿舍网络")
-        self.assertTrue(environment.auto_login_available)
+        self.assertEqual(environment.label, "未验证的网关网络")
+        self.assertFalse(environment.auto_login_available)
 
 
 if __name__ == "__main__":
