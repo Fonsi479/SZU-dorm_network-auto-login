@@ -18,7 +18,9 @@ from src.szu_netlogin.menubar_app import (
     extract_report_path,
     format_interval,
     is_launchagent_installed,
+    requested_switch_state,
     should_start_auto_login,
+    status_presentation,
 )
 from src.szu_netlogin.portal_detect import NetworkStatus
 
@@ -139,6 +141,50 @@ class AutoLoginGateTests(unittest.TestCase):
         app._auto_login_schedule.consume_if_due.assert_not_called()
 
 
+class StatusPresentationTests(unittest.TestCase):
+    def test_uses_green_warning_and_red_tones_for_network_states(self) -> None:
+        online = status_presentation(
+            StatusRefreshResult(
+                False,
+                NetworkStatus(True, True),
+                environment_label="宿舍网络",
+            )
+        )
+        waiting = status_presentation(
+            StatusRefreshResult(
+                False,
+                NetworkStatus(True, False),
+                environment_label="宿舍网络",
+            )
+        )
+        offline = status_presentation(
+            StatusRefreshResult(
+                False,
+                NetworkStatus(False, False),
+                environment_label="宿舍网络",
+            )
+        )
+
+        self.assertEqual((online.title, online.tone), ("●  网络已连接  ·  宿舍网络", "success"))
+        self.assertEqual((waiting.title, waiting.tone), ("●  等待登录  ·  宿舍网络", "warning"))
+        self.assertEqual((offline.title, offline.tone), ("●  网络未连接  ·  宿舍网络", "failure"))
+
+    def test_config_error_is_red_and_disabled_probe_is_neutral(self) -> None:
+        config_error = status_presentation(
+            StatusRefreshResult(False, NetworkStatus(False, False), "config missing")
+        )
+        disabled = status_presentation(
+            StatusRefreshResult(
+                False,
+                NetworkStatus(False, False),
+                network_probe_enabled=False,
+            )
+        )
+
+        self.assertEqual(config_error.tone, "failure")
+        self.assertEqual(disabled.tone, "neutral")
+
+
 class NetworkProbeToggleTests(unittest.TestCase):
     def test_cancel_active_process_terminates_running_control_command(self) -> None:
         app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
@@ -195,6 +241,108 @@ class NetworkProbeToggleTests(unittest.TestCase):
 
 
 class MenubarMenuTests(unittest.TestCase):
+    def test_native_switch_state_is_used_without_waiting_for_persisted_state(self) -> None:
+        sender = Mock()
+        sender.state.return_value = 1
+
+        self.assertTrue(requested_switch_state(sender, False))
+        sender.state.return_value = 0
+        self.assertFalse(requested_switch_state(sender, True))
+        self.assertTrue(requested_switch_state(None, True))
+
+    def test_menu_action_schedules_immediate_ui_drain_without_watchdog_polling(self) -> None:
+        app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
+        app._worker_lock = threading.Lock()
+        app._background_results = Queue()
+        app._shutting_down = False
+        app._drain_background_results = Mock()
+
+        with patch("src.szu_netlogin.menubar_app.AppHelper") as app_helper:
+            app._run_menu_action(lambda: "done", Mock())
+            for _ in range(100):
+                if not app._background_results.empty():
+                    break
+                threading.Event().wait(0.001)
+
+        self.assertEqual(app._background_results.qsize(), 1)
+        app_helper.callAfter.assert_called_once_with(app._drain_background_results)
+
+    def test_process_cancellation_for_switch_action_runs_off_the_gui_thread(self) -> None:
+        app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
+        app._background_results = Queue()
+        app._shutting_down = False
+        app._drain_background_results = Mock()
+        caller_thread = threading.get_ident()
+        cancellation_threads: list[int] = []
+        app._cancel_active_control_process = Mock(
+            side_effect=lambda: cancellation_threads.append(threading.get_ident())
+        )
+
+        with patch("src.szu_netlogin.menubar_app.AppHelper"):
+            app._run_menu_action(
+                lambda: "done",
+                Mock(),
+                cancel_active_process=True,
+            )
+            for _ in range(100):
+                if not app._background_results.empty():
+                    break
+                threading.Event().wait(0.001)
+
+        self.assertEqual(len(cancellation_threads), 1)
+        self.assertNotEqual(cancellation_threads[0], caller_thread)
+
+    def test_control_processes_remain_serialized_after_menu_actions_are_decoupled(self) -> None:
+        app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
+        app._control_process_lock = threading.Lock()
+        counter_lock = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def run_locked(_args, _timeout):
+            nonlocal active, max_active
+            with counter_lock:
+                active += 1
+                max_active = max(max_active, active)
+            threading.Event().wait(0.01)
+            with counter_lock:
+                active -= 1
+            return "done"
+
+        app._run_control_process_locked = run_locked
+        threads = [
+            threading.Thread(target=app._run_control_process, args=(["status"], 1))
+            for _ in range(2)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(max_active, 1)
+
+    def test_stale_status_does_not_reverse_an_optimistic_auto_login_switch(self) -> None:
+        app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
+        app.logger = Mock()
+        app._pending_switch_states = {"auto_login": True}
+        app._switch_controls = {}
+        app._status_controls = None
+        app._network_probe_enabled = True
+        app._auto_login_schedule = Mock()
+        app.pause_item = Mock()
+        app.network_probe_item = Mock()
+        app.status_item = Mock()
+
+        app._apply_status_result(
+            StatusRefreshResult(
+                True,
+                NetworkStatus(False, False),
+                environment_label="宿舍网络",
+            )
+        )
+
+        self.assertEqual(app.pause_item.state, 1)
+
     def test_login_prompts_for_missing_password_then_starts_login(self) -> None:
         app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
         app.logger = Mock()
@@ -310,10 +458,13 @@ class MenubarMenuTests(unittest.TestCase):
             with self.subTest(installed=installed):
                 app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
                 app.logger = Mock()
+                app._pending_switch_states = {}
+                app._switch_controls = {}
+                app.launchagent_item = Mock()
                 app._change_launchagent_installation = Mock(return_value=not installed)
                 app._finish_launchagent_change = Mock()
 
-                def run_now(action, completion) -> None:
+                def run_now(action, completion, _failure=None) -> None:
                     completion(action())
 
                 app._run_menu_action = Mock(side_effect=run_now)

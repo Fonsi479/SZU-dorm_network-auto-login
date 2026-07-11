@@ -57,13 +57,21 @@ else:
     RUMPS_IMPORT_ERROR = None
 
 try:
-    from AppKit import NSControlStateValueOff, NSControlStateValueOn, NSSwitch, NSTextField, NSView
+    from AppKit import (
+        NSColor,
+        NSControlStateValueOff,
+        NSControlStateValueOn,
+        NSSwitch,
+        NSTextField,
+        NSView,
+    )
     from Foundation import NSObject, NSThread
     from PyObjCTools import AppHelper
 except Exception:  # pragma: no cover - exercised on machines missing GUI deps
     NSObject = object  # type: ignore[assignment,misc]
     NSThread = None  # type: ignore[assignment]
     AppHelper = None  # type: ignore[assignment]
+    NSColor = None  # type: ignore[assignment]
     NSView = None  # type: ignore[assignment]
     NSTextField = None  # type: ignore[assignment]
     NSSwitch = None  # type: ignore[assignment]
@@ -120,6 +128,27 @@ class StatusRefreshResult:
     network_probe_enabled: bool = True
     environment_label: str = ""
     auto_login_available: bool = True
+
+
+@dataclass(frozen=True)
+class StatusPresentation:
+    title: str
+    tone: str
+
+
+def status_presentation(result: StatusRefreshResult) -> StatusPresentation:
+    """Turn a network result into a concise, color-coded menu status."""
+    if not result.network_probe_enabled:
+        return StatusPresentation("●  状态探测已关闭", "neutral")
+    if result.config_error:
+        return StatusPresentation("●  配置需要检查", "failure")
+
+    environment_label = result.environment_label or "网络环境未知"
+    if result.network_status.campus_internet_ok:
+        return StatusPresentation(f"●  网络已连接  ·  {environment_label}", "success")
+    if result.network_status.gateway_reachable:
+        return StatusPresentation(f"●  等待登录  ·  {environment_label}", "warning")
+    return StatusPresentation(f"●  网络未连接  ·  {environment_label}", "failure")
 
 
 class PeriodicDeadline:
@@ -249,15 +278,17 @@ class SzuDormMenubarApp(RumpsAppBase):
         self.logger = get_menubar_logger()
         self._refresh_in_progress = False
         self._auto_login_in_progress = False
-        self._menu_action_in_progress = False
         self._network_probe_enabled = True
         self._shutting_down = False
         self._active_process: subprocess.Popen[str] | None = None
         self._active_process_lock = threading.Lock()
+        self._control_process_lock = threading.Lock()
         self._last_status_result: StatusRefreshResult | None = None
         self._worker_lock = threading.Lock()
         self._background_results: Queue[tuple[str, Any]] = Queue()
         self._switch_controls: dict[str, Any] = {}
+        self._pending_switch_states: dict[str, bool] = {}
+        self._status_controls: tuple[Any, Any] | None = None
         self._auto_login_schedule = AutoLoginBackoff(
             AUTO_LOGIN_BACKOFF_SECONDS,
             AUTO_LOGIN_INITIAL_DELAY_SECONDS,
@@ -321,6 +352,8 @@ class SzuDormMenubarApp(RumpsAppBase):
             quit_button=None,
         )
 
+        self._install_status_view()
+        self._set_status_display("●  正在检查网络…", "checking")
         self._install_menu_switch("auto_login", self.pause_item, self.toggle_pause)
         self._install_menu_switch(
             "network_probe",
@@ -381,36 +414,33 @@ class SzuDormMenubarApp(RumpsAppBase):
         try:
             paused = is_paused()
             if not self._network_probe_enabled:
-                self._background_results.put(
-                    (
-                        "status",
-                        StatusRefreshResult(
-                            paused,
-                            NetworkStatus(False, False),
-                            network_probe_enabled=False,
-                        ),
-                    )
+                self._publish_background_result(
+                    "status",
+                    StatusRefreshResult(
+                        paused,
+                        NetworkStatus(False, False),
+                        network_probe_enabled=False,
+                    ),
                 )
                 return
 
             config, config_error = self._load_config_for_status()
             network_status = probe_network(config) if config else NetworkStatus(False, False)
             environment = classify_network_environment(config, network_status)
-            self._background_results.put(
-                (
-                    "status",
-                    StatusRefreshResult(
-                        paused,
-                        network_status,
-                        config_error,
-                        environment_label=environment.label,
-                        auto_login_available=environment.auto_login_available,
-                    ),
-                )
+            self._publish_background_result(
+                "status",
+                StatusRefreshResult(
+                    paused,
+                    network_status,
+                    config_error,
+                    environment_label=environment.label,
+                    auto_login_available=environment.auto_login_available,
+                ),
             )
         except Exception as exc:
-            self._background_results.put(
-                ("background_error", ("刷新状态失败", exc, traceback.format_exc()))
+            self._publish_background_result(
+                "background_error",
+                ("刷新状态失败", exc, traceback.format_exc()),
             )
         finally:
             with self._worker_lock:
@@ -421,11 +451,17 @@ class SzuDormMenubarApp(RumpsAppBase):
         run_label = auto_login_state_label(result.paused, result)
         self._update_network_probe_item_title()
         self.pause_item.title = "自动登录"
-        self.pause_item.state = 0 if result.paused else 1
-        self._set_switch_state("auto_login", not result.paused)
+        auto_login_enabled = getattr(self, "_pending_switch_states", {}).get(
+            "auto_login",
+            not result.paused,
+        )
+        self.pause_item.state = 1 if auto_login_enabled else 0
+        self._set_switch_state("auto_login", auto_login_enabled)
+
+        presentation = status_presentation(result)
+        self._set_status_display(presentation.title, presentation.tone)
 
         if not result.network_probe_enabled:
-            self.status_item.title = run_label
             self.logger.info(
                 "状态刷新：联网状态探测已关闭，时间=%s",
                 datetime.now().strftime("%H:%M:%S"),
@@ -435,14 +471,6 @@ class SzuDormMenubarApp(RumpsAppBase):
         campus_label = "外网已连接" if result.network_status.campus_internet_ok else "外网未连接"
         gateway_label = "网关可达" if result.network_status.gateway_reachable else "网关不可达"
         environment_label = result.environment_label or "网络环境未知"
-        if result.config_error:
-            self.status_item.title = "⚠︎  配置需要检查"
-        elif result.network_status.campus_internet_ok:
-            self.status_item.title = f"●  网络已连接  ·  {environment_label}"
-        elif result.network_status.gateway_reachable:
-            self.status_item.title = f"◐  等待登录  ·  {environment_label}"
-        else:
-            self.status_item.title = f"○  网络未连接  ·  {environment_label}"
         message = (
             f"状态刷新：{run_label}，{environment_label}，{campus_label}，{gateway_label}，"
             f"source_ip={result.network_status.source_ip or '-'}，"
@@ -499,14 +527,15 @@ class SzuDormMenubarApp(RumpsAppBase):
         try:
             if is_paused():
                 self.logger.info("自动登录检查启动前检测到已暂停，跳过本轮。")
-                self._background_results.put(("auto_login", 0))
+                self._publish_background_result("auto_login", 0)
                 return
 
             result = self._run_control_process(["check-and-login"], timeout=80)
-            self._background_results.put(("auto_login", result))
+            self._publish_background_result("auto_login", result)
         except Exception as exc:
-            self._background_results.put(
-                ("background_error", ("自动登录检查失败", exc, traceback.format_exc()))
+            self._publish_background_result(
+                "background_error",
+                ("自动登录检查失败", exc, traceback.format_exc()),
             )
         finally:
             with self._worker_lock:
@@ -555,12 +584,13 @@ class SzuDormMenubarApp(RumpsAppBase):
                 continue
 
             if kind == "menu_action":
-                completion, result, error = payload
-                with self._worker_lock:
-                    self._menu_action_in_progress = False
+                completion, failure, result, error = payload
                 if error is not None:
                     self._set_login_busy(False)
-                    self._handle_exception("菜单操作失败", error)
+                    if failure is not None:
+                        failure(error)
+                    else:
+                        self._handle_exception("菜单操作失败", error)
                     continue
                 completion(result)
                 continue
@@ -584,6 +614,7 @@ class SzuDormMenubarApp(RumpsAppBase):
             self._run_menu_action(
                 lambda: self._run_control_process(["login-now"], timeout=60),
                 self._finish_login_now,
+                cancel_active_process=True,
             )
         except ConfigError as exc:
             rumps.alert("无法登录", str(exc))
@@ -610,10 +641,10 @@ class SzuDormMenubarApp(RumpsAppBase):
     def logout_now(self, _sender: Any) -> None:
         try:
             self.logger.info("用户点击：退出校园网账号")
-            self._cancel_active_control_process()
             self._run_menu_action(
                 lambda: self._run_control_process(["logout", "--pause-for", "manual"], timeout=75),
                 self._finish_logout,
+                cancel_active_process=True,
             )
         except Exception as exc:
             self._handle_exception("退出校园网账号失败", exc)
@@ -641,25 +672,46 @@ class SzuDormMenubarApp(RumpsAppBase):
 
     def toggle_pause(self, _sender: Any) -> None:
         try:
-            command = "resume" if is_paused() else "pause"
+            pending_states = getattr(self, "_pending_switch_states", {})
+            if "auto_login" in pending_states:
+                self._set_switch_state("auto_login", pending_states["auto_login"])
+                return
+
+            currently_enabled = not is_paused()
+            enabled = requested_switch_state(_sender, not currently_enabled)
+            command = "resume" if enabled else "pause"
             self.logger.info("用户点击：%s", "恢复自动登录" if command == "resume" else "暂停自动登录")
-            if command == "pause":
-                self._cancel_active_control_process()
-            self._run_menu_action(
-                lambda: self._run_control([command], timeout=20),
-                lambda _result: self._finish_toggle_pause(command),
-            )
+            self._set_pending_switch_state("auto_login", enabled)
+            self.pause_item.state = 1 if enabled else 0
+            try:
+                self._run_menu_action(
+                    lambda: self._run_control([command], timeout=20),
+                    lambda _result: self._finish_toggle_pause(command),
+                    self._fail_toggle_pause,
+                    cancel_active_process=command == "pause",
+                )
+            except Exception:
+                self._clear_pending_switch_state("auto_login")
+                self._sync_auto_login_switch()
+                raise
         except Exception as exc:
             self._handle_exception("切换暂停状态失败", exc)
 
     def _finish_toggle_pause(self, command: str) -> None:
+        self._clear_pending_switch_state("auto_login")
+        self._sync_auto_login_switch()
         title = "已恢复自动登录" if command == "resume" else "已暂停自动登录"
         rumps.notification("SZU Dorm", title, "状态已刷新。")
         self.refresh_status(None)
 
+    def _fail_toggle_pause(self, exc: Exception) -> None:
+        self._clear_pending_switch_state("auto_login")
+        self._sync_auto_login_switch()
+        self._handle_exception("切换暂停状态失败", exc)
+
     def toggle_network_probe(self, _sender: Any) -> None:
         try:
-            enable = not self._network_probe_enabled
+            enable = requested_switch_state(_sender, not self._network_probe_enabled)
             self.logger.info("用户点击：%s", "开启联网状态探测" if enable else "关闭联网状态探测")
             self._set_network_probe_enabled(enable)
             if enable:
@@ -780,13 +832,27 @@ class SzuDormMenubarApp(RumpsAppBase):
 
     def toggle_launchagent(self, _sender: Any) -> None:
         try:
-            install = not is_launchagent_installed()
+            pending_states = getattr(self, "_pending_switch_states", {})
+            if "launchagent" in pending_states:
+                self._set_switch_state("launchagent", pending_states["launchagent"])
+                return
+
+            installed = is_launchagent_installed()
+            install = requested_switch_state(_sender, not installed)
             operation = "安装" if install else "卸载"
             self.logger.info("用户点击：%s开机自启", operation)
-            self._run_menu_action(
-                lambda: self._change_launchagent_installation(install),
-                self._finish_launchagent_change,
-            )
+            self._set_pending_switch_state("launchagent", install)
+            self.launchagent_item.state = 1 if install else 0
+            try:
+                self._run_menu_action(
+                    lambda: self._change_launchagent_installation(install),
+                    self._finish_launchagent_change,
+                    self._fail_launchagent_change,
+                )
+            except Exception:
+                self._clear_pending_switch_state("launchagent")
+                self._update_launchagent_item_title()
+                raise
         except Exception as exc:
             self._handle_exception("切换开机自启失败", exc)
 
@@ -836,8 +902,37 @@ class SzuDormMenubarApp(RumpsAppBase):
         if item is not None:
             item.title = "开机自动运行"
             installed = is_launchagent_installed()
-            item.state = 1 if installed else 0
-            self._set_switch_state("launchagent", installed)
+            displayed_state = getattr(self, "_pending_switch_states", {}).get(
+                "launchagent",
+                installed,
+            )
+            item.state = 1 if displayed_state else 0
+            self._set_switch_state("launchagent", displayed_state)
+
+    def _install_status_view(self) -> None:
+        """Use a custom label so status colors remain vivid in a non-action menu row."""
+        native_item = getattr(self.status_item, "_menuitem", None)
+        if NSView is None or NSTextField is None or native_item is None:
+            return
+
+        row = NSView.alloc().initWithFrame_(((0, 0), (260, 30)))
+        label = NSTextField.labelWithString_(self.status_item.title)
+        label.setFrame_(((14, 6), (238, 18)))
+        row.addSubview_(label)
+        native_item.setView_(row)
+        self._status_controls = (row, label)
+
+    def _set_status_display(self, title: str, tone: str) -> None:
+        self.status_item.title = title
+        controls = getattr(self, "_status_controls", None)
+        if controls is None:
+            return
+
+        label = controls[1]
+        label.setStringValue_(title)
+        color = native_status_color(tone)
+        if color is not None:
+            label.setTextColor_(color)
 
     def _install_menu_switch(
         self,
@@ -868,6 +963,22 @@ class SzuDormMenubarApp(RumpsAppBase):
         if controls is None:
             return
         controls[2].setState_(NSControlStateValueOn if enabled else NSControlStateValueOff)
+
+    def _set_pending_switch_state(self, key: str, enabled: bool) -> None:
+        pending_states = getattr(self, "_pending_switch_states", None)
+        if pending_states is None:
+            pending_states = {}
+            self._pending_switch_states = pending_states
+        pending_states[key] = enabled
+        self._set_switch_state(key, enabled)
+
+    def _clear_pending_switch_state(self, key: str) -> None:
+        getattr(self, "_pending_switch_states", {}).pop(key, None)
+
+    def _sync_auto_login_switch(self) -> None:
+        enabled = not is_paused()
+        self.pause_item.state = 1 if enabled else 0
+        self._set_switch_state("auto_login", enabled)
 
     def _set_login_busy(self, busy: bool) -> None:
         item = getattr(self, "login_item", None)
@@ -960,11 +1071,17 @@ class SzuDormMenubarApp(RumpsAppBase):
         return install
 
     def _finish_launchagent_change(self, installed: bool) -> None:
+        self._clear_pending_switch_state("launchagent")
         self._update_launchagent_item_title()
         title = "开机自启已安装" if installed else "开机自启已卸载"
         detail = "登录 macOS 后会自动检查网络。" if installed else "不会再随登录自动运行。"
         rumps.notification("SZU Dorm", title, detail)
         self.refresh_status(None)
+
+    def _fail_launchagent_change(self, exc: Exception) -> None:
+        self._clear_pending_switch_state("launchagent")
+        self._update_launchagent_item_title()
+        self._handle_exception("切换开机自启失败", exc)
 
     def _run_control(self, args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
         result = self._run_control_process(args, timeout)
@@ -976,21 +1093,49 @@ class SzuDormMenubarApp(RumpsAppBase):
         self,
         action: Callable[[], Any],
         completion: Callable[[Any], None],
+        failure: Callable[[Exception], None] | None = None,
+        *,
+        cancel_active_process: bool = False,
     ) -> None:
-        with self._worker_lock:
-            if self._menu_action_in_progress:
-                raise RuntimeError("已有菜单操作正在执行，请稍候。")
-            self._menu_action_in_progress = True
-
         def worker() -> None:
+            result: Any = None
+            error: Exception | None = None
             try:
-                self._background_results.put(("menu_action", (completion, action(), None)))
+                if cancel_active_process:
+                    self._cancel_active_control_process()
+                result = action()
             except Exception as exc:
-                self._background_results.put(("menu_action", (completion, None, exc)))
+                error = exc
+            self._publish_background_result(
+                "menu_action",
+                (completion, failure, result, error),
+            )
 
         threading.Thread(target=worker, name="szu-menu-action", daemon=True).start()
 
+    def _publish_background_result(self, kind: str, payload: Any) -> None:
+        """Queue a worker result and wake the Cocoa main loop without watchdog latency."""
+        self._background_results.put((kind, payload))
+        if getattr(self, "_shutting_down", False):
+            return
+        if AppHelper is not None:
+            AppHelper.callAfter(self._drain_background_results)
+        elif is_main_thread():
+            self._drain_background_results()
+
     def _run_control_process(
+        self,
+        args: list[str],
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        process_lock = getattr(self, "_control_process_lock", None)
+        if process_lock is None:
+            process_lock = threading.Lock()
+            self._control_process_lock = process_lock
+        with process_lock:
+            return self._run_control_process_locked(args, timeout)
+
+    def _run_control_process_locked(
         self,
         args: list[str],
         timeout: int,
@@ -1066,7 +1211,10 @@ class SzuDormMenubarApp(RumpsAppBase):
 
     def _handle_exception(self, title: str, exc: Exception) -> None:
         message = str(exc) or type(exc).__name__
-        self.logger.error("%s：%s\n%s", title, message, traceback.format_exc())
+        formatted_traceback = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
+        self.logger.error("%s：%s\n%s", title, message, formatted_traceback)
         rumps.alert(title, message)
 
 
@@ -1077,6 +1225,30 @@ def get_username(config: dict[str, Any]) -> str:
 def is_launchagent_installed(target_dir: Path | None = None) -> bool:
     launchagents_dir = target_dir or (Path.home() / "Library" / "LaunchAgents")
     return any((launchagents_dir / f"{label}.plist").is_file() for label in LAUNCHAGENT_LABELS)
+
+
+def requested_switch_state(sender: Any, fallback: bool) -> bool:
+    """Read the state already chosen by an NSSwitch, with a menu-item fallback."""
+    state_getter = getattr(sender, "state", None)
+    if callable(state_getter):
+        try:
+            return bool(state_getter())
+        except Exception:
+            pass
+    return fallback
+
+
+def native_status_color(tone: str) -> Any | None:
+    if NSColor is None:
+        return None
+    color_getter = {
+        "success": "systemGreenColor",
+        "failure": "systemRedColor",
+        "warning": "systemOrangeColor",
+        "checking": "systemBlueColor",
+        "neutral": "secondaryLabelColor",
+    }.get(tone, "labelColor")
+    return getattr(NSColor, color_getter)()
 
 
 def is_username_set(username: str) -> bool:
@@ -1121,10 +1293,11 @@ def is_main_thread() -> bool:
 
 
 def run_on_main_thread(callback: Callable[..., None], *args: Any) -> None:
-    if is_main_thread() or AppHelper is None:
+    if is_main_thread():
         callback(*args)
         return
-    AppHelper.callAfter(callback, *args)
+    if AppHelper is not None:
+        AppHelper.callAfter(callback, *args)
 
 
 def mask_username(username: str) -> str:
