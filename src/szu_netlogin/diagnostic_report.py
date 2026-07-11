@@ -13,7 +13,6 @@ from .logger import LOG_FILE, redact_sensitive_text
 from .portal_detect import (
     NetworkStatus,
     classify_network_environment,
-    is_allowed_campus_source_ip,
     probe_network,
 )
 from .state import PAUSE_FLAG_FILE, describe_pause_state
@@ -72,10 +71,8 @@ def build_diagnostic_report() -> str:
                 f"网关地址：{status.gateway_host or '-'}",
                 f"网关失败原因：{status.gateway_reason or '-'}",
                 f"源 IP：{status.source_ip or '-'}",
-                f"源 IP 是否允许：{_yes_no(_source_ip_allowed(config, status))}",
                 f"外网是否可用：{_yes_no(status.campus_internet_ok)}",
                 f"外网检测 route：{status.internet_route or '-'}",
-                f"是否走系统代理/VPN fallback：{_yes_no(status.used_system_fallback)}",
                 f"外网检测原因：{status.internet_reason or '-'}",
             ]
         )
@@ -123,10 +120,6 @@ def _probe_network(config: dict[str, Any] | None) -> NetworkStatus | None:
             gateway_reason=f"probe_error:{type(exc).__name__}",
             internet_reason=str(exc).replace("\n", " ")[:160],
         )
-
-
-def _source_ip_allowed(config: dict[str, Any] | None, status: NetworkStatus) -> bool:
-    return bool(status.source_ip and is_allowed_campus_source_ip(config, status.source_ip))
 
 
 def _find_auto_login_launchagents() -> list[Path]:

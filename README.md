@@ -237,9 +237,9 @@ bash scripts/open_menubar_app.sh
 `.app` 运行时会读取项目目录中的 `config.yaml`。项目目录查找顺序：
 
 1. 环境变量 `SZU_NETLOGIN_HOME`
-2. 打包后默认目录 `~/Projects/szu-netlogin`
+2. 打包后默认目录 `~/Library/Application Support/szu-netlogin`
 
-如果项目不在默认目录，可以先设置：
+如果你想指定其他配置目录，可以先设置：
 
 ```bash
 launchctl setenv SZU_NETLOGIN_HOME "/path/to/szu-netlogin"
@@ -294,4 +294,4 @@ diagnose.py              兼容诊断入口
 
 ## 注意
 
-校园网接口可能会调整。如果登录或退出失败，先运行诊断命令并查看脱敏日志，再根据新的门户接口更新 `config.example.yaml` 或自己的 `config.yaml`。默认会先检查宿舍区网关对应的源地址，并要求源地址落在 `network.campus_source_cidrs` 里；这样可以避开 `198.18.x.x` 等代理/VPN/TUN 虚拟网卡误判。若校园网源地址直连超时，还会按系统代理/VPN 路径复核，避免把浏览器实际可上网的情况误报为不可用。若只想检测校园网直连路径，可把 `network.allow_system_fallback` 设为 `false`。
+校园网接口可能会调整。如果登录或退出失败，先运行诊断命令并查看脱敏日志，再根据新的门户接口更新 `config.example.yaml` 或自己的 `config.yaml`。状态栏会检查宿舍区网关是否可达，并按系统默认网络路径检测外网是否可用。

@@ -1,8 +1,40 @@
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
 
-from src.szu_netlogin.config import ConfigError, _parse_simple_yaml, validate_config
+from src.szu_netlogin import config as config_module
+from src.szu_netlogin.config import (
+    PROJECT_HOME_ENV,
+    ConfigError,
+    _parse_simple_yaml,
+    validate_config,
+)
+
+
+class ProjectRootTests(unittest.TestCase):
+    def test_project_home_env_overrides_default_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {PROJECT_HOME_ENV: temp_dir}):
+                self.assertEqual(config_module.get_project_root(), Path(temp_dir).resolve())
+
+    def test_frozen_app_uses_app_home_without_scanning_executable_parents(self) -> None:
+        app_home = Path("/tmp/szu-netlogin-app-home")
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(config_module.sys, "frozen", True, create=True),
+            patch.object(config_module, "DEFAULT_APP_PROJECT_ROOT", app_home),
+            patch.object(
+                config_module,
+                "_find_project_root_from_executable",
+                side_effect=AssertionError("should not scan executable parents"),
+            ),
+        ):
+            self.assertEqual(config_module.get_project_root(), app_home)
 
 
 class SimpleYamlParserTests(unittest.TestCase):
@@ -96,20 +128,24 @@ network:
 
 
 class ConfigValidationTests(unittest.TestCase):
-    def test_rejects_invalid_campus_source_cidr(self) -> None:
-        config = _valid_config()
-        config["network"]["campus_source_cidrs"] = ["bad-cidr"]
+    def test_rejects_non_positive_or_non_numeric_auth_timeout(self) -> None:
+        for value in ("eight", 0, -1):
+            config = _valid_config()
+            config["auth"]["timeout_seconds"] = value
+            with self.assertRaisesRegex(ConfigError, "timeout_seconds"):
+                validate_config(config)
 
-        with self.assertRaisesRegex(ConfigError, "campus_source_cidrs"):
+    def test_rejects_scalar_gateway_hosts(self) -> None:
+        config = _valid_config()
+        config["network"]["dorm_gateway_hosts"] = "172.30.255.42"
+        with self.assertRaisesRegex(ConfigError, "dorm_gateway_hosts"):
             validate_config(config)
 
-    def test_rejects_empty_campus_source_cidr_list(self) -> None:
-        config = _valid_config()
-        config["network"]["campus_source_cidrs"] = []
-
-        with self.assertRaisesRegex(ConfigError, "campus_source_cidrs"):
-            validate_config(config)
-
+    def test_fallback_yaml_decodes_doubled_single_quote(self) -> None:
+        self.assertEqual(
+            _parse_simple_yaml("network:\n  campus_wifi_names: ['John''s WiFi']\n")["network"]["campus_wifi_names"],
+            ["John's WiFi"],
+        )
     def test_rejects_invalid_logout_discovery_urls(self) -> None:
         config = _valid_config()
         config["auth"]["logout_page_url"] = "172.30.255.42/a79.htm"
@@ -122,6 +158,27 @@ class ConfigValidationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ConfigError, "unbind_url"):
             validate_config(config)
+
+
+class PasswordSourceTests(unittest.TestCase):
+    def test_macos_keychain_uses_security_command_without_keyring(self) -> None:
+        config = _valid_config()
+        config["security"] = {
+            "password_source": "keychain",
+            "keychain_service": "szu-netlogin",
+            "keychain_account": "student-id",
+        }
+
+        with (
+            patch.object(config_module.sys, "platform", "darwin"),
+            patch("src.szu_netlogin.config._load_keyring") as load_keyring,
+            patch("src.szu_netlogin.config.subprocess.run") as run,
+        ):
+            run.return_value = Mock(returncode=0, stdout="secret\n")
+
+            self.assertEqual(config_module.get_password(config), "secret")
+
+        load_keyring.assert_not_called()
 
 
 def _valid_config() -> dict:
@@ -137,7 +194,6 @@ def _valid_config() -> dict:
         "user": {"username": "student-id"},
         "network": {
             "test_urls": ["http://captive.apple.com/hotspot-detect.html"],
-            "campus_source_cidrs": ["172.16.0.0/12"],
         },
         "security": {
             "password_source": "env",

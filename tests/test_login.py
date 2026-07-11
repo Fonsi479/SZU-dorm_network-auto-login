@@ -45,7 +45,11 @@ class LoginLockTests(unittest.TestCase):
             patch("src.szu_netlogin.login.describe_password_source", return_value="env"),
             patch(
                 "src.szu_netlogin.login.probe_network",
-                return_value=NetworkStatus(gateway_reachable=True, campus_internet_ok=False),
+                return_value=NetworkStatus(
+                    gateway_reachable=True,
+                    campus_internet_ok=False,
+                    source_ip="172.24.1.2",
+                ),
             ),
             patch("src.szu_netlogin.login.get_password") as get_password,
             patch("src.szu_netlogin.login.DormDrcomClient") as client_class,
@@ -62,10 +66,6 @@ class LoginLockTests(unittest.TestCase):
     def test_login_failure_reason_labels_are_user_facing(self) -> None:
         self.assertEqual(login.login_failure_reason_label("password_missing"), "密码缺失")
         self.assertEqual(login.login_failure_reason_label("password_error"), "密码错误")
-        self.assertEqual(
-            login.login_failure_reason_label("suspected_proxy_interference"),
-            "疑似代理/VPN 干扰",
-        )
 
 
 if __name__ == "__main__":

@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+import ipaddress
 from dataclasses import dataclass
-from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from typing import Any
 from urllib.parse import urlparse
 
@@ -26,7 +26,8 @@ DEFAULT_TEST_URLS = (
     "http://www.baidu.com/",
     "https://www.baidu.com/",
 )
-DEFAULT_CAMPUS_SOURCE_CIDRS = ("172.16.0.0/12",)
+DEFAULT_CAMPUS_SOURCE_NETWORKS = ("172.16.0.0/12",)
+MIN_SUCCESSFUL_PROBES = 2
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
@@ -42,16 +43,11 @@ class NetworkStatus:
     gateway_reason: str = ""
     internet_reason: str = ""
     internet_route: str = ""
+    internet_portal_redirect: bool = False
 
     @property
     def maybe_need_login(self) -> bool:
         return self.gateway_reachable and not self.campus_internet_ok
-
-    @property
-    def used_system_fallback(self) -> bool:
-        return self.internet_route == "system_default" or self.internet_reason.startswith(
-            "system_default_ok"
-        )
 
 
 @dataclass(frozen=True)
@@ -113,6 +109,7 @@ def probe_network(
         gateway_reason=gateway.reason,
         internet_reason=internet.reason,
         internet_route=internet.route,
+        internet_portal_redirect=internet.portal_redirect,
     )
 
 
@@ -124,19 +121,25 @@ def classify_network_environment(
     wifi_ssid = get_current_wifi_ssid()
     campus_wifi_names = _get_campus_wifi_names(config)
     on_configured_wifi = bool(wifi_ssid and wifi_ssid in campus_wifi_names)
-    source_allowed = bool(
-        status.source_ip and is_allowed_campus_source_ip(config, status.source_ip)
-    )
-    suspected_proxy = _looks_like_proxy_interference(status)
 
-    if status.gateway_reachable and (source_allowed or on_configured_wifi or not status.source_ip):
+    if status.gateway_reachable and _is_campus_source_ip(config, status.source_ip):
         return NetworkEnvironment(
             "宿舍网络",
             is_dorm_network=True,
             auto_login_available=True,
             wifi_ssid=wifi_ssid,
             source_ip=status.source_ip,
-            reason="gateway_reachable",
+            reason="gateway_reachable_and_source_ip_verified",
+        )
+
+    if status.gateway_reachable:
+        return NetworkEnvironment(
+            "未验证的网关网络",
+            is_dorm_network=False,
+            auto_login_available=False,
+            wifi_ssid=wifi_ssid,
+            source_ip=status.source_ip,
+            reason="source_ip_not_in_campus_networks",
         )
 
     if on_configured_wifi:
@@ -147,16 +150,6 @@ def classify_network_environment(
             wifi_ssid=wifi_ssid,
             source_ip=status.source_ip,
             reason=status.gateway_reason or "gateway_unreachable",
-        )
-
-    if suspected_proxy:
-        return NetworkEnvironment(
-            "非宿舍网络（疑似代理/VPN）",
-            is_dorm_network=False,
-            auto_login_available=False,
-            wifi_ssid=wifi_ssid,
-            source_ip=status.source_ip,
-            reason=status.gateway_reason or "source_ip_not_allowed",
         )
 
     return NetworkEnvironment(
@@ -228,62 +221,17 @@ def _probe_campus_internet(
     timeout_seconds: int,
 ) -> InternetProbe:
     urls = _get_test_urls(config)
-    fallback_configured = bool(source_ip and _allow_system_fallback(config))
-    campus_session = _build_session(source_ip, trust_env=False)
+    session = _build_session("", trust_env=True)
     try:
-        campus_probe = _probe_urls(
-            campus_session,
+        return _probe_urls(
+            session,
             urls,
             timeout_seconds,
-            route="campus_source",
+            route="default",
             source_ip=source_ip,
-            log_failure=not fallback_configured,
         )
     finally:
-        campus_session.close()
-    if campus_probe.ok:
-        return campus_probe
-
-    if fallback_configured and campus_probe.portal_redirect:
-        _log_probe_failure(campus_probe.route, source_ip, campus_probe.reason)
-        return campus_probe
-
-    if fallback_configured:
-        system_session = _build_session("", trust_env=True)
-        try:
-            system_probe = _probe_urls(
-                system_session,
-                urls,
-                timeout_seconds,
-                route="system_default",
-                source_ip="",
-                log_failure=False,
-            )
-        finally:
-            system_session.close()
-        if system_probe.ok:
-            get_logger().debug(
-                "校园网源地址直连未通过，已使用系统默认路径 "
-                "source_ip=%s reason=%s",
-                source_ip or "-",
-                campus_probe.reason,
-            )
-            return InternetProbe(
-                True,
-                f"system_default_ok; campus_source={campus_probe.reason}",
-                route=system_probe.route,
-            )
-
-        reason = f"campus_source={campus_probe.reason}; system_default={system_probe.reason}"
-        _log_probe_failure("campus_source+system_default", source_ip, reason)
-        return InternetProbe(
-            False,
-            reason,
-            portal_redirect=system_probe.portal_redirect,
-            route=campus_probe.route,
-        )
-
-    return campus_probe
+        session.close()
 
 
 def _probe_urls(
@@ -297,6 +245,7 @@ def _probe_urls(
     logger = get_logger()
     failures: list[str] = []
     portal_redirect = False
+    successful_hosts: set[str] = set()
 
     for url in urls:
         try:
@@ -313,12 +262,13 @@ def _probe_urls(
         location = response.headers.get("Location", "")
         preview = response.text[:120].replace("\n", " ").replace("\r", " ")
 
-        if _looks_like_portal(location) or _looks_like_portal(response.url):
+        if _looks_like_portal(location) or _looks_like_portal(response.url) or _looks_like_portal(preview):
             portal_redirect = True
             failures.append(f"{_url_label(url)}=portal_redirect")
             continue
 
         if _is_successful_connectivity_response(url, response.status_code, preview):
+            successful_hosts.add(_url_label(url))
             logger.info(
                 "校园网出口检测：可用 route=%s source_ip=%s url=%s status=%s",
                 route,
@@ -326,7 +276,10 @@ def _probe_urls(
                 _url_label(url),
                 response.status_code,
             )
-            return InternetProbe(True, "ok", route=route)
+            if len(successful_hosts) >= MIN_SUCCESSFUL_PROBES:
+                return InternetProbe(True, "ok", route=route)
+            failures.append(f"{_url_label(url)}=only_one_success")
+            continue
 
         failures.append(f"{_url_label(url)}=http_{response.status_code}")
 
@@ -389,15 +342,6 @@ def _probe_gateway(
             with socket.create_connection((host, 801), timeout=timeout_seconds) as sock:
                 source_ip = str(sock.getsockname()[0])
                 last_source_ip = source_ip
-                if not is_allowed_campus_source_ip(config, source_ip):
-                    failures.append(f"{host}=source_ip_not_allowed:{source_ip}")
-                    logger.info(
-                        "宿舍区网关检测：忽略非校园网源地址 host=%s port=801 source_ip=%s",
-                        host,
-                        source_ip,
-                    )
-                    continue
-
                 logger.info(
                     "宿舍区网关检测：可连接 host=%s port=801 source_ip=%s",
                     host,
@@ -443,12 +387,30 @@ def _get_test_urls(config: dict[str, Any] | None) -> list[str]:
 
 def _get_gateway_hosts(config: dict[str, Any] | None) -> list[str]:
     hosts = ((config or {}).get("network") or {}).get("dorm_gateway_hosts") or []
+    if isinstance(hosts, str):
+        hosts = [hosts]
     return [str(host) for host in hosts] or ["172.30.255.42"]
 
 
 def _get_campus_wifi_names(config: dict[str, Any] | None) -> set[str]:
     names = ((config or {}).get("network") or {}).get("campus_wifi_names") or []
     return {str(name).strip() for name in names if str(name).strip()}
+
+
+def _is_campus_source_ip(config: dict[str, Any] | None, source_ip: str) -> bool:
+    try:
+        address = ipaddress.ip_address(source_ip)
+    except ValueError:
+        return False
+    configured = ((config or {}).get("network") or {}).get("campus_source_networks")
+    networks = configured if isinstance(configured, list) and configured else DEFAULT_CAMPUS_SOURCE_NETWORKS
+    for value in networks:
+        try:
+            if address in ipaddress.ip_network(str(value), strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def _get_timeout_seconds(config: dict[str, Any] | None) -> int:
@@ -471,43 +433,12 @@ def _get_max_test_urls(config: dict[str, Any] | None) -> int:
     return max(MIN_TEST_URLS, max_urls)
 
 
-def _allow_system_fallback(config: dict[str, Any] | None) -> bool:
-    network = (config or {}).get("network") or {}
-    return bool(network.get("allow_system_fallback", True))
-
-
-def is_allowed_campus_source_ip(config: dict[str, Any] | None, source_ip: str) -> bool:
-    try:
-        address = ip_address(source_ip)
-    except ValueError:
-        return False
-
-    networks = _get_campus_source_networks(config)
-    return any(address in network for network in networks)
-
-
-def _get_campus_source_networks(config: dict[str, Any] | None) -> list[IPv4Network | IPv6Network]:
-    network_config = (config or {}).get("network") or {}
-    if "campus_source_cidrs" not in network_config:
-        cidrs = list(DEFAULT_CAMPUS_SOURCE_CIDRS)
-    else:
-        configured_cidrs = network_config.get("campus_source_cidrs")
-        if not isinstance(configured_cidrs, list) or not configured_cidrs:
-            return []
-        cidrs = configured_cidrs
-
-    networks: list[IPv4Network | IPv6Network] = []
-    for cidr in cidrs:
-        try:
-            networks.append(ip_network(str(cidr), strict=False))
-        except ValueError:
-            return []
-    return networks
-
-
 def _looks_like_portal(text: str) -> bool:
     lowered = text.lower()
-    return any(word in lowered for word in ("portal", "drcom", "eportal", "172.30.255.42"))
+    return any(
+        word in lowered
+        for word in ("portal", "drcom", "eportal", "172.30.255.42", "上网认证", "网络认证")
+    )
 
 
 def _is_successful_connectivity_response(url: str, status_code: int, preview: str) -> bool:
@@ -541,25 +472,6 @@ def _request_failure_reason(exc: requests.RequestException) -> str:
 def _url_label(url: str) -> str:
     parsed = urlparse(url)
     return parsed.hostname or url[:40]
-
-
-def _looks_like_proxy_interference(status: NetworkStatus) -> bool:
-    if "source_ip_not_allowed" in status.gateway_reason:
-        return True
-
-    if not status.source_ip:
-        return False
-
-    try:
-        address = ip_address(status.source_ip)
-    except ValueError:
-        return False
-
-    proxy_ranges = (
-        ip_network("198.18.0.0/15"),
-        ip_network("100.64.0.0/10"),
-    )
-    return any(address in network for network in proxy_ranges)
 
 
 def _get_wifi_device() -> str:

@@ -30,6 +30,13 @@ class DormDrcomResponseTests(unittest.TestCase):
 
         self.assertIs(result, False)
 
+    def test_existing_online_session_counts_as_success(self) -> None:
+        result = self.client.is_success_response(
+            {"result": 0, "msg": "IP: 172.24.59.154 已经在线！", "ret_code": 2}
+        )
+
+        self.assertIs(result, True)
+
     def test_password_error_without_result_is_still_failure(self) -> None:
         result = self.client.is_success_response({"message": "密码错误"})
 
@@ -54,9 +61,8 @@ class DormDrcomResponseTests(unittest.TestCase):
 
         self.assertIs(result, False)
 
-    @patch("src.szu_netlogin.dorm_drcom_client.get_logger")
     @patch("src.szu_netlogin.dorm_drcom_client._get_source_ip", return_value="198.18.0.1")
-    def test_login_skips_non_campus_source_ip(self, _get_source_ip, _get_logger) -> None:
+    def test_login_uses_detected_source_ip_without_filtering(self, _get_source_ip) -> None:
         client = DormDrcomClient(
             {
                 "auth": {
@@ -66,15 +72,18 @@ class DormDrcomResponseTests(unittest.TestCase):
                     "account_prefix": ",1,",
                     "timeout_seconds": 8,
                 },
-                "network": {"campus_source_cidrs": ["172.16.0.0/12"]},
             }
         )
+        response = _Response('dr1003({"result":1,"msg":"Portal协议认证成功！"});')
 
-        with patch.object(client.session, "get") as get:
+        with (
+            patch("src.szu_netlogin.dorm_drcom_client._get_terminal_mac_for_ip", return_value=""),
+            patch.object(client.session, "get", return_value=response) as get,
+        ):
             result = client.login("student-id", "password")
 
-        self.assertIs(result, False)
-        get.assert_not_called()
+        self.assertIs(result, True)
+        self.assertEqual(get.call_args.kwargs["params"]["wlan_user_ip"], "198.18.0.1")
 
     def test_parse_ifconfig_mac_for_source_ip(self) -> None:
         ifconfig_output = """
@@ -251,7 +260,6 @@ def _test_config() -> dict:
             "account_prefix": ",1,",
             "timeout_seconds": 8,
         },
-        "network": {"campus_source_cidrs": ["172.16.0.0/12"]},
     }
 
 

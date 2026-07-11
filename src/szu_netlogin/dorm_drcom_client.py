@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 import requests
 
 from .logger import get_logger, redact_sensitive_text
-from .portal_detect import SourceAddressAdapter, is_allowed_campus_source_ip
+from .portal_detect import SourceAddressAdapter
 
 LoginStatus = Literal["success", "failed", "unknown"]
 LogoutStatus = Literal["success", "failed", "unknown"]
@@ -119,9 +119,6 @@ class DormDrcomClient:
         params = self.build_login_params(username, password)
         timeout_seconds = int(self.auth["timeout_seconds"])
         source_ip = _get_source_ip(str(self.auth["login_url"]), timeout_seconds)
-        if source_ip and not is_allowed_campus_source_ip(self.config, source_ip):
-            self.logger.info("宿舍区 Dr.COM 登录跳过：源地址不是校园网地址 source_ip=%s", source_ip)
-            return LoginResult("failed", "suspected_proxy_interference", source_ip=source_ip)
         if source_ip:
             params["wlan_user_ip"] = source_ip
             _add_terminal_mac_param(params, source_ip, self.logger)
@@ -210,12 +207,10 @@ class DormDrcomClient:
 
         timeout_seconds = int(self.auth["timeout_seconds"])
         source_ip = _get_source_ip(logout_url, timeout_seconds)
-        if source_ip and is_allowed_campus_source_ip(self.config, source_ip):
+        if source_ip:
             adapter = SourceAddressAdapter(source_ip)
             self.session.mount("http://", adapter)
             self.session.mount("https://", adapter)
-        elif source_ip:
-            self.logger.info("宿舍区 Dr.COM 退出跳过绑定非校园网源地址：source_ip=%s", source_ip)
 
         terminal = self.discover_logout_terminal_params(username, source_ip=source_ip)
         self.logger.info(
@@ -291,7 +286,7 @@ class DormDrcomClient:
         page_text = self._fetch_logout_page(page_url)
         online_record = self._fetch_online_record(username)
         source_mac = ""
-        if source_ip and is_allowed_campus_source_ip(self.config, source_ip):
+        if source_ip:
             source_mac = _get_terminal_mac_for_ip(source_ip)
 
         return _build_portal_terminal_params(
@@ -474,6 +469,11 @@ class DormDrcomClient:
                 str(key).lower(): value for key, value in parsed_or_text.items()
             }
             message = " ".join(str(value) for value in values.values())
+
+            if _contains_password_error(message):
+                return False
+            if _contains_existing_session_success(message):
+                return True
 
             for key in ("success", "result", "ret_code", "code"):
                 if key not in values:
@@ -720,6 +720,17 @@ def _contains_success(text: str) -> bool:
         "已登陆",
         "logged in",
         "online",
+    )
+    return any(word in lowered for word in success_words)
+
+
+def _contains_existing_session_success(text: str) -> bool:
+    lowered = text.lower()
+    success_words = (
+        "已经在线",
+        "已在线",
+        "already online",
+        "already logged in",
     )
     return any(word in lowered for word in success_words)
 

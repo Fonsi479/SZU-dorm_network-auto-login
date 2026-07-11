@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -98,16 +99,27 @@ def _set_private_file_password(config: dict[str, Any], password: str) -> None:
     if not password_file_value:
         raise ValueError("security.password_file 不能为空。")
 
+    if os.name == "nt":
+        raise ValueError("Windows 不支持 private_file 密码来源；请使用系统凭据库。")
+
     password_file = Path(password_file_value).expanduser()
     password_file.parent.mkdir(parents=True, exist_ok=True)
-    password_file.write_text(
-        f"password: {json.dumps(password, ensure_ascii=False)}\n",
-        encoding="utf-8",
-    )
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{password_file.name}.", dir=password_file.parent)
     try:
-        os.chmod(password_file, 0o600)
-    except OSError:
-        pass
+        with os.fdopen(fd, "w", encoding="utf-8") as temporary_file:
+            temporary_file.write(f"password: {json.dumps(password, ensure_ascii=False)}\n")
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.chmod(temporary_name, 0o600)
+        if os.stat(temporary_name).st_mode & 0o777 != 0o600:
+            raise OSError("无法设置密码文件为 0600")
+        os.replace(temporary_name, password_file)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def _get_keyring_password(service: str, username: str) -> str:

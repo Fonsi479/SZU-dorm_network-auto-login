@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import ast
+import ipaddress
 import json
 import os
 import subprocess
 import sys
-from ipaddress import ip_network
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -25,9 +25,6 @@ def get_project_root() -> Path:
         return Path(configured_home).expanduser().resolve()
 
     if getattr(sys, "frozen", False):
-        bundled_project_root = _find_project_root_from_executable()
-        if bundled_project_root is not None:
-            return bundled_project_root
         return DEFAULT_APP_PROJECT_ROOT
 
     return SOURCE_PROJECT_ROOT
@@ -56,9 +53,16 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
             f"找不到配置文件：{config_path}。请先运行 cp config.example.yaml config.yaml"
         )
 
-    text = config_path.read_text(encoding="utf-8")
-    data = _parse_yaml(text)
-    validate_config(data)
+    try:
+        text = config_path.read_text(encoding="utf-8")
+        data = _parse_yaml(text)
+        validate_config(data)
+    except ConfigError:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise ConfigError(f"无法读取配置文件 {config_path}：{exc}") from exc
+    except Exception as exc:
+        raise ConfigError(f"配置文件 {config_path} 格式不正确：{exc}") from exc
     return data
 
 
@@ -82,6 +86,13 @@ def validate_config(config: dict[str, Any]) -> None:
         if auth.get(key) in (None, ""):
             raise ConfigError(f"auth.{key} 不能为空。")
 
+    try:
+        timeout_seconds = float(auth["timeout_seconds"])
+    except (TypeError, ValueError):
+        raise ConfigError("auth.timeout_seconds 必须是正数。") from None
+    if isinstance(auth["timeout_seconds"], bool) or timeout_seconds <= 0 or not timeout_seconds.is_integer():
+        raise ConfigError("auth.timeout_seconds 必须是正整数。")
+
     if not str(auth["login_url"]).startswith("http://"):
         raise ConfigError("auth.login_url 应该使用宿舍区 HTTP 登录地址。")
 
@@ -103,7 +114,15 @@ def validate_config(config: dict[str, Any]) -> None:
     if not isinstance(network.get("test_urls"), list) or not network["test_urls"]:
         raise ConfigError("network.test_urls 至少需要填写一个检测网址。")
 
-    _validate_campus_source_cidrs(network)
+    for key in ("dorm_gateway_hosts", "campus_wifi_names", "campus_source_networks"):
+        value = network.get(key)
+        if value is not None and not isinstance(value, list):
+            raise ConfigError(f"network.{key} 必须是列表。")
+    for value in network.get("campus_source_networks") or ["172.16.0.0/12"]:
+        try:
+            ipaddress.ip_network(str(value), strict=False)
+        except ValueError:
+            raise ConfigError("network.campus_source_networks 必须是有效 CIDR 网段列表。") from None
 
     password_source = str(security.get("password_source", "env"))
     if password_source not in ("env", "keychain", "private_file"):
@@ -158,34 +177,20 @@ def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
     return section
 
 
-def _validate_campus_source_cidrs(network: dict[str, Any]) -> None:
-    if "campus_source_cidrs" not in network:
-        return
-
-    cidrs = network.get("campus_source_cidrs")
-    if not isinstance(cidrs, list) or not cidrs:
-        raise ConfigError("network.campus_source_cidrs 必须是至少包含一个 CIDR 的列表。")
-
-    for cidr in cidrs:
-        try:
-            ip_network(str(cidr), strict=False)
-        except ValueError as exc:
-            raise ConfigError(f"network.campus_source_cidrs 包含无效 CIDR：{cidr}") from exc
-
-
 def _get_keychain_password(config: dict[str, Any]) -> str:
     service, account = _get_keychain_target(config)
+
+    if sys.platform == "darwin":
+        return _get_macos_keychain_password(service, account)
 
     try:
         password = _load_keyring().get_password(service, account) or ""
     except Exception:
         password = ""
-    if password:
-        return password
+    return password
 
-    if sys.platform != "darwin":
-        return ""
 
+def _get_macos_keychain_password(service: str, account: str) -> str:
     try:
         result = subprocess.run(
             [
@@ -259,7 +264,10 @@ def _parse_yaml(text: str) -> dict[str, Any]:
     except Exception:
         return _parse_simple_yaml(text)
 
-    loaded = yaml.safe_load(text)
+    try:
+        loaded = yaml.safe_load(text)
+    except Exception as exc:
+        raise ConfigError(f"config.yaml YAML 格式不正确：{exc}") from exc
     if not isinstance(loaded, dict):
         raise ConfigError("config.yaml 内容格式不正确。")
     return loaded
@@ -555,7 +563,11 @@ def _parse_scalar(value: str) -> Any:
             parsed[_parse_inline_key(key)] = _parse_scalar(item_value)
         return parsed
 
-    if value[0] in ("'", '"') and value[-1:] == value[0]:
+    if value[0] == "'" and value[-1:] == "'":
+        # YAML single quotes escape a quote by doubling it; Python literals do not.
+        return value[1:-1].replace("''", "'")
+
+    if value[0] == '"' and value[-1:] == '"':
         try:
             return ast.literal_eval(value)
         except Exception:

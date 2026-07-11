@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -22,6 +23,7 @@ if __package__ in (None, ""):
     from src.szu_netlogin.config import (
         ConfigError,
         DEFAULT_CONFIG_PATH,
+        get_password_env_name,
         PROJECT_HOME_ENV,
         PROJECT_ROOT,
         load_config,
@@ -37,6 +39,7 @@ else:
     from .config import (
         ConfigError,
         DEFAULT_CONFIG_PATH,
+        get_password_env_name,
         PROJECT_HOME_ENV,
         PROJECT_ROOT,
         load_config,
@@ -74,6 +77,13 @@ AUTO_LOGIN_INITIAL_DELAY_SECONDS = 5
 AUTO_LOGIN_BACKOFF_SECONDS = (120, 300, 600, 900)
 MENUBAR_LOG_MAX_BYTES = 1_000_000
 MENUBAR_LOG_BACKUP_COUNT = 5
+
+
+def get_bundled_resource_root() -> Path:
+    """Locate packaged helper assets without confusing them with writable app data."""
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    return PROJECT_ROOT
 
 
 @dataclass(frozen=True)
@@ -142,9 +152,6 @@ class AutoLoginBackoff:
 
 
 def get_menubar_logger() -> logging.Logger:
-    MENUBAR_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    MENUBAR_ERR_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-
     logger = logging.getLogger("szu_netlogin_menubar")
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -152,29 +159,32 @@ def get_menubar_logger() -> logging.Logger:
     if any(isinstance(handler, QueueHandler) for handler in logger.handlers):
         return logger
 
+    for log_dir in (MENUBAR_LOG_FILE.parent, MENUBAR_ERR_LOG_FILE.parent):
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # SafeRotatingFileHandler will discard a failed write; logging must never
+            # prevent the menu-bar app from starting.
+            pass
+
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     handlers: list[logging.Handler] = []
 
-    handler = SafeRotatingFileHandler(
-        MENUBAR_LOG_FILE,
-        maxBytes=MENUBAR_LOG_MAX_BYTES,
-        backupCount=MENUBAR_LOG_BACKUP_COUNT,
-        encoding="utf-8",
-        delay=True,
-    )
-    handler.setFormatter(formatter)
-    handlers.append(handler)
+    for log_file, level in ((MENUBAR_LOG_FILE, logging.INFO), (MENUBAR_ERR_LOG_FILE, logging.ERROR)):
+        try:
+            handler = SafeRotatingFileHandler(
+                log_file, maxBytes=MENUBAR_LOG_MAX_BYTES,
+                backupCount=MENUBAR_LOG_BACKUP_COUNT, encoding="utf-8", delay=True,
+            )
+        except OSError:
+            continue
+        handler.setLevel(level)
+        handler.setFormatter(formatter)
+        handlers.append(handler)
 
-    error_handler = SafeRotatingFileHandler(
-        MENUBAR_ERR_LOG_FILE,
-        maxBytes=MENUBAR_LOG_MAX_BYTES,
-        backupCount=MENUBAR_LOG_BACKUP_COUNT,
-        encoding="utf-8",
-        delay=True,
-    )
-    error_handler.setLevel(logging.ERROR)
-    error_handler.setFormatter(formatter)
-    handlers.append(error_handler)
+    if not handlers:
+        logger.addHandler(logging.NullHandler())
+        return logger
 
     log_queue: Queue[logging.LogRecord] = Queue()
     logger.addHandler(QueueHandler(log_queue))
@@ -213,7 +223,11 @@ class SzuDormMenubarApp(RumpsAppBase):
         self.logger = get_menubar_logger()
         self._refresh_in_progress = False
         self._auto_login_in_progress = False
+        self._menu_action_in_progress = False
         self._network_probe_enabled = True
+        self._shutting_down = False
+        self._active_process: subprocess.Popen[str] | None = None
+        self._active_process_lock = threading.Lock()
         self._last_status_result: StatusRefreshResult | None = None
         self._worker_lock = threading.Lock()
         self._background_results: Queue[tuple[str, Any]] = Queue()
@@ -380,7 +394,6 @@ class SzuDormMenubarApp(RumpsAppBase):
         message = (
             f"状态刷新：{run_label}，{environment_label}，{campus_label}，{gateway_label}，"
             f"source_ip={result.network_status.source_ip or '-'}，"
-            f"fallback={'yes' if result.network_status.used_system_fallback else 'no'}，"
             f"时间={datetime.now().strftime('%H:%M:%S')}"
         )
         if result.config_error:
@@ -401,6 +414,9 @@ class SzuDormMenubarApp(RumpsAppBase):
             self.timer.start()
 
         if not self._network_probe_enabled:
+            return
+
+        if self._last_status_result is None:
             return
 
         if not self._auto_login_schedule.consume_if_due():
@@ -485,6 +501,16 @@ class SzuDormMenubarApp(RumpsAppBase):
                 self.refresh_status(None)
                 continue
 
+            if kind == "menu_action":
+                completion, result, error = payload
+                with self._worker_lock:
+                    self._menu_action_in_progress = False
+                if error is not None:
+                    self._handle_exception("菜单操作失败", error)
+                    continue
+                completion(result)
+                continue
+
             title, exc, formatted_traceback = payload
             message = str(exc) or type(exc).__name__
             self.logger.error("%s：%s\n%s", title, message, formatted_traceback)
@@ -492,40 +518,54 @@ class SzuDormMenubarApp(RumpsAppBase):
     def login_now(self, _sender: Any) -> None:
         try:
             self.logger.info("用户点击：立即登录")
-            result = self._run_control_process(["login-now"], timeout=60)
-            output = f"{result.stdout}\n{result.stderr}"
-
-            if result.returncode == 0:
-                self._auto_login_schedule.record_success()
-                title = "登录成功"
-                detail = "自动重试退避已重置。"
-            elif "不确定" in output:
-                title = f"结果不确定：{extract_login_reason(output) or '服务器响应不确定'}"
-                detail = "详情可查看日志。"
-            else:
-                title = f"登录失败：{extract_login_reason(output) or '原因未知'}"
-                detail = "详情可查看日志。"
-
-            self.logger.info("立即登录完成：returncode=%s result=%s", result.returncode, title)
-            rumps.notification("SZU Dorm", title, detail)
-            if result.returncode != 0:
-                rumps.alert(title, short_output(result) or "详情可查看日志。")
-            self.refresh_status(None)
+            self._run_menu_action(
+                lambda: self._run_control_process(["login-now"], timeout=60),
+                self._finish_login_now,
+            )
         except Exception as exc:
             self._handle_exception("立即登录失败", exc)
+
+    def _finish_login_now(self, result: subprocess.CompletedProcess[str]) -> None:
+        output = f"{result.stdout}\n{result.stderr}"
+        if result.returncode == 0:
+            self._auto_login_schedule.record_success()
+            title, detail = "登录成功", "自动重试退避已重置。"
+        elif "不确定" in output:
+            title, detail = f"结果不确定：{extract_login_reason(output) or '服务器响应不确定'}", "详情可查看日志。"
+        else:
+            title, detail = f"登录失败：{extract_login_reason(output) or '原因未知'}", "详情可查看日志。"
+        self.logger.info("立即登录完成：returncode=%s result=%s", result.returncode, title)
+        rumps.notification("SZU Dorm", title, detail)
+        if result.returncode != 0:
+            rumps.alert(title, short_output(result) or "详情可查看日志。")
+        self.refresh_status(None)
 
     def logout_now(self, _sender: Any) -> None:
         try:
             self.logger.info("用户点击：退出校园网账号")
-            self._logout_with_pause("manual")
+            self._cancel_active_control_process()
+            self._run_menu_action(
+                lambda: self._run_control_process(["logout", "--pause-for", "manual"], timeout=75),
+                self._finish_logout,
+            )
         except Exception as exc:
             self._handle_exception("退出校园网账号失败", exc)
 
     def _logout_with_pause(self, pause_for: str) -> None:
-        result = self._run_control_process(["logout", "--pause-for", pause_for], timeout=35)
+        # Logout can issue several serialized portal calls and then verify the result.
+        result = self._run_control_process(["logout", "--pause-for", pause_for], timeout=75)
         output = short_output(result)
         title = extract_logout_title(output, result.returncode)
 
+        self.logger.info("退出完成：returncode=%s result=%s", result.returncode, title)
+        rumps.notification("SZU Dorm", title, extract_logout_detail(output))
+        if result.returncode != 0:
+            rumps.alert(title, output or "详情可查看日志。")
+        self.refresh_status(None)
+
+    def _finish_logout(self, result: subprocess.CompletedProcess[str]) -> None:
+        output = short_output(result)
+        title = extract_logout_title(output, result.returncode)
         self.logger.info("退出完成：returncode=%s result=%s", result.returncode, title)
         rumps.notification("SZU Dorm", title, extract_logout_detail(output))
         if result.returncode != 0:
@@ -536,14 +576,19 @@ class SzuDormMenubarApp(RumpsAppBase):
         try:
             command = "resume" if is_paused() else "pause"
             self.logger.info("用户点击：%s", "恢复自动登录" if command == "resume" else "暂停自动登录")
-            self._run_control([command], timeout=20)
-            if command == "resume":
-                rumps.notification("SZU Dorm", "已恢复自动登录", "状态已刷新。")
-            else:
-                rumps.notification("SZU Dorm", "已暂停自动登录", "状态已刷新。")
-            self.refresh_status(None)
+            if command == "pause":
+                self._cancel_active_control_process()
+            self._run_menu_action(
+                lambda: self._run_control([command], timeout=20),
+                lambda _result: self._finish_toggle_pause(command),
+            )
         except Exception as exc:
             self._handle_exception("切换暂停状态失败", exc)
+
+    def _finish_toggle_pause(self, command: str) -> None:
+        title = "已恢复自动登录" if command == "resume" else "已暂停自动登录"
+        rumps.notification("SZU Dorm", title, "状态已刷新。")
+        self.refresh_status(None)
 
     def toggle_network_probe(self, _sender: Any) -> None:
         try:
@@ -574,12 +619,17 @@ class SzuDormMenubarApp(RumpsAppBase):
                 rumps.alert("修改账号失败", "账号不能为空。")
                 return
 
-            self._run_control(["set-username", username], timeout=20)
-            self.logger.info("账号已修改：username=%s", mask_username(username))
-            rumps.notification("SZU Dorm", "账号已保存", f"当前账号：{mask_username(username)}")
-            self.refresh_status(None)
+            self._run_menu_action(
+                lambda: self._run_control(["set-username", username], timeout=20),
+                lambda _result: self._finish_change_username(username),
+            )
         except Exception as exc:
             self._handle_exception("修改账号失败", exc)
+
+    def _finish_change_username(self, username: str) -> None:
+        self.logger.info("账号已修改：username=%s", mask_username(username))
+        rumps.notification("SZU Dorm", "账号已保存", f"当前账号：{mask_username(username)}")
+        self.refresh_status(None)
 
     def change_password(self, _sender: Any) -> None:
         try:
@@ -631,16 +681,18 @@ class SzuDormMenubarApp(RumpsAppBase):
     def generate_diagnostic_report(self, _sender: Any) -> None:
         try:
             self.logger.info("用户点击：生成诊断报告")
-            result = self._run_control_process(["generate-diagnostic-report"], timeout=45)
-            if result.returncode != 0:
-                raise RuntimeError(short_output(result))
-
-            report_path = extract_report_path(result.stdout)
-            if report_path:
-                subprocess.run(["open", report_path], check=False, timeout=10)
-            rumps.notification("SZU Dorm", "诊断报告已生成", report_path or "已写入 logs 目录。")
+            self._run_menu_action(
+                lambda: self._run_control(["generate-diagnostic-report"], timeout=45),
+                self._finish_generate_diagnostic_report,
+            )
         except Exception as exc:
             self._handle_exception("生成诊断报告失败", exc)
+
+    def _finish_generate_diagnostic_report(self, result: subprocess.CompletedProcess[str]) -> None:
+        report_path = extract_report_path(result.stdout)
+        if report_path:
+            subprocess.Popen(["open", report_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        rumps.notification("SZU Dorm", "诊断报告已生成", report_path or "已写入 logs 目录。")
 
     def open_config(self, _sender: Any) -> None:
         self._run_simple_control_action("open-config", "打开配置文件失败")
@@ -651,35 +703,45 @@ class SzuDormMenubarApp(RumpsAppBase):
     def reset_pause(self, _sender: Any) -> None:
         try:
             self.logger.info("用户点击：重置暂停状态")
-            self._run_control(["reset-pause"], timeout=20)
-            self._auto_login_schedule.record_success()
-            rumps.notification("SZU Dorm", "暂停状态已重置", "自动登录已恢复。")
-            self.refresh_status(None)
+            self._run_menu_action(
+                lambda: self._run_control(["reset-pause"], timeout=20),
+                lambda _result: self._finish_reset_pause(),
+            )
         except Exception as exc:
             self._handle_exception("重置暂停状态失败", exc)
+
+    def _finish_reset_pause(self) -> None:
+        self._auto_login_schedule.record_success()
+        rumps.notification("SZU Dorm", "暂停状态已重置", "自动登录已恢复。")
+        self.refresh_status(None)
 
     def check_dependencies(self, _sender: Any) -> None:
         try:
             self.logger.info("用户点击：检查依赖")
-            result = self._run_control_process(["check-dependencies"], timeout=30)
-            output = short_output(result)
-            if result.returncode == 0:
-                rumps.notification("SZU Dorm", "依赖检查通过", "常见依赖可用。")
-                return
-            rumps.alert("依赖检查失败", output or "详情可查看日志。")
+            self._run_menu_action(
+                lambda: self._run_control_process(["check-dependencies"], timeout=30),
+                self._finish_check_dependencies,
+            )
         except Exception as exc:
             self._handle_exception("检查依赖失败", exc)
 
+    def _finish_check_dependencies(self, result: subprocess.CompletedProcess[str]) -> None:
+        output = short_output(result)
+        if result.returncode == 0:
+            rumps.notification("SZU Dorm", "依赖检查通过", "常见依赖可用。")
+            return
+        rumps.alert("依赖检查失败", output or "详情可查看日志。")
+
     def install_launchagent(self, _sender: Any) -> None:
         self._run_launchagent_script(
-            PROJECT_ROOT / "scripts" / "install_launchagent.sh",
+            get_bundled_resource_root() / "scripts" / "install_launchagent.sh",
             missing_message="未找到安装脚本",
             success_message="开机自启安装完成",
         )
 
     def uninstall_launchagent(self, _sender: Any) -> None:
         self._run_launchagent_script(
-            PROJECT_ROOT / "scripts" / "uninstall_launchagent.sh",
+            get_bundled_resource_root() / "scripts" / "uninstall_launchagent.sh",
             missing_message="未找到卸载脚本",
             success_message="开机自启卸载完成",
         )
@@ -687,14 +749,15 @@ class SzuDormMenubarApp(RumpsAppBase):
     def reinstall_launchagent(self, _sender: Any) -> None:
         try:
             self.logger.info("用户点击：重装开机自启")
-            uninstall_script = PROJECT_ROOT / "scripts" / "uninstall_launchagent.sh"
-            install_script = PROJECT_ROOT / "scripts" / "install_launchagent.sh"
+            resource_root = get_bundled_resource_root()
+            uninstall_script = resource_root / "scripts" / "uninstall_launchagent.sh"
+            install_script = resource_root / "scripts" / "install_launchagent.sh"
             for script_path in (uninstall_script, install_script):
                 if not script_path.exists():
                     raise RuntimeError(f"未找到脚本：{script_path}")
                 result = subprocess.run(
-                    [str(script_path)],
-                    cwd=PROJECT_ROOT,
+                    ["/bin/zsh", str(script_path)],
+                    cwd=resource_root,
                     check=False,
                     capture_output=True,
                     text=True,
@@ -711,6 +774,8 @@ class SzuDormMenubarApp(RumpsAppBase):
 
     def quit_app(self, _sender: Any) -> None:
         self.logger.info("用户退出状态栏客户端。")
+        self._shutting_down = True
+        self._cancel_active_control_process()
         self._set_network_probe_enabled(False, refresh=False)
         self._stop_timer(self.watchdog_timer, "watchdog 定时器")
         rumps.quit_application()
@@ -751,7 +816,10 @@ class SzuDormMenubarApp(RumpsAppBase):
     def _run_simple_control_action(self, command: str, error_title: str) -> None:
         try:
             self.logger.info("用户点击：%s", command)
-            self._run_control([command], timeout=20)
+            self._run_menu_action(
+                lambda: self._run_control([command], timeout=20),
+                lambda _result: None,
+            )
         except Exception as exc:
             self._handle_exception(error_title, exc)
 
@@ -768,9 +836,17 @@ class SzuDormMenubarApp(RumpsAppBase):
                 return
 
             self.logger.info("运行脚本：%s", script_path.name)
+            env = build_control_env()
+            try:
+                env["SZU_NETLOGIN_PASSWORD_ENV_NAME"] = get_password_env_name(load_config())
+            except ConfigError:
+                pass
+            if getattr(sys, "frozen", False):
+                env["SZU_NETLOGIN_APP_EXECUTABLE"] = sys.executable
             result = subprocess.run(
-                [str(script_path)],
-                cwd=PROJECT_ROOT,
+                ["/bin/zsh", str(script_path)],
+                cwd=script_path.parent.parent,
+                env=env,
                 check=False,
                 capture_output=True,
                 text=True,
@@ -791,27 +867,81 @@ class SzuDormMenubarApp(RumpsAppBase):
             raise RuntimeError(short_output(result))
         return result
 
+    def _run_menu_action(
+        self,
+        action: Callable[[], Any],
+        completion: Callable[[Any], None],
+    ) -> None:
+        with self._worker_lock:
+            if self._menu_action_in_progress:
+                raise RuntimeError("已有菜单操作正在执行，请稍候。")
+            self._menu_action_in_progress = True
+
+        def worker() -> None:
+            try:
+                self._background_results.put(("menu_action", (completion, action(), None)))
+            except Exception as exc:
+                self._background_results.put(("menu_action", (completion, None, exc)))
+
+        threading.Thread(target=worker, name="szu-menu-action", daemon=True).start()
+
     def _run_control_process(
         self,
         args: list[str],
         timeout: int,
     ) -> subprocess.CompletedProcess[str]:
         command = [*build_control_command(), *args]
+        if getattr(self, "_shutting_down", False):
+            raise RuntimeError("状态栏客户端正在退出，已取消命令。")
+        process: subprocess.Popen[str] | None = None
         try:
-            result = subprocess.run(
-                command,
-                cwd=PROJECT_ROOT,
-                env=build_control_env(),
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
+            process = subprocess.Popen(
+                command, cwd=PROJECT_ROOT, env=build_control_env(), text=True,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True,
             )
+            with self._active_process_lock:
+                if self._shutting_down:
+                    self._terminate_process(process)
+                    raise RuntimeError("状态栏客户端正在退出，已取消命令。")
+                self._active_process = process
+            stdout, stderr = process.communicate(timeout=timeout)
+            result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
         except subprocess.TimeoutExpired as exc:
+            if process is not None:
+                self._terminate_process(process)
             raise RuntimeError(f"命令超时：{mask_command(args)}") from exc
+        finally:
+            if process is not None:
+                with self._active_process_lock:
+                    if self._active_process is process:
+                        self._active_process = None
 
         self._log_completed_process(mask_command(args), result)
         return result
+
+    def _cancel_active_control_process(self) -> None:
+        with getattr(self, "_active_process_lock", threading.Lock()):
+            process = getattr(self, "_active_process", None)
+        if process is not None and process.poll() is None:
+            self.logger.info("正在取消运行中的控制命令。")
+            self._terminate_process(process)
+
+    def _terminate_process(self, process: subprocess.Popen[str]) -> None:
+        try:
+            if os.name != "nt":
+                os.killpg(process.pid, signal.SIGTERM)
+            else:  # pragma: no cover - Windows implementation
+                process.terminate()
+            process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                if os.name != "nt":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:  # pragma: no cover - Windows implementation
+                    process.kill()
+            except OSError:
+                pass
 
     def _log_completed_process(
         self,
@@ -911,7 +1041,6 @@ def extract_login_reason(output: str) -> str:
         "密码错误",
         "网关不可达",
         "外网已通",
-        "疑似代理/VPN 干扰",
         "门户接口变化",
         "服务器响应不确定",
         "门户返回失败",

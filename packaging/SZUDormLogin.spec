@@ -11,7 +11,10 @@ a = Analysis(
     [str(entry_script)],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[],
+    datas=[
+        (str(project_root / "scripts"), "scripts"),
+        (str(project_root / "launchd"), "launchd"),
+    ],
     hiddenimports=[
         "rumps",
         "objc",

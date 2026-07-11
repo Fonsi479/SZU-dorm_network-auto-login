@@ -147,7 +147,6 @@ def print_status() -> int:
     print(f"宿舍区网关是否可达：{_yes_no(network_status.gateway_reachable)}")
     print(f"当前网络环境：{classify_network_environment(config, network_status).label}")
     print(f"源 IP：{network_status.source_ip or '-'}")
-    print(f"是否走系统代理/VPN fallback：{_yes_no(network_status.used_system_fallback)}")
     print(f"config.yaml 是否存在：{_yes_no(config_exists)}")
     print(f"是否已设置账号：{_yes_no(_is_username_set(username))}")
     print(f"是否已设置密码：{_yes_no(has_password(config) if config and _is_username_set(username) else False)}")
@@ -505,7 +504,13 @@ def _verify_campus_logged_out(config: dict[str, Any]) -> bool:
     except Exception as exc:
         get_logger().info("退出后校园网状态确认失败：%s", exc)
         return False
-    return status.gateway_reachable and not status.campus_internet_ok
+    # A timeout/DNS failure is not evidence that the portal session was removed.
+    # Only the captive-portal signature from a successful probe sequence confirms it.
+    return (
+        status.gateway_reachable
+        and not status.campus_internet_ok
+        and status.internet_portal_redirect
+    )
 
 
 def _replace_username(text: str, username: str) -> str:
@@ -532,8 +537,8 @@ def _replace_username(text: str, username: str) -> str:
             return "".join(lines)
 
     if user_section_index is None:
-        ending = "\n" if text.endswith("\n") else ""
-        return f"{text}{ending}user:\n  username: {new_value}\n"
+        separator = "" if not text or text.endswith("\n") else "\n"
+        return f"{text}{separator}user:\n  username: {new_value}\n"
 
     insert_at = user_section_index + 1
     lines.insert(insert_at, f"  username: {new_value}\n")

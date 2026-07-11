@@ -24,7 +24,6 @@ def main() -> int:
     print(f"宿舍区网关：{'可连接' if status.gateway_reachable else '不可连接'}")
     print(f"网关原因：{status.gateway_reason or '-'}")
     print(f"外网检测路径：{status.internet_route or '-'}")
-    print(f"是否走系统代理/VPN fallback：{'是' if status.used_system_fallback else '否'}")
     print(f"外网原因：{status.internet_reason or '-'}")
     print(f"是否可能需要登录：{'是' if status.maybe_need_login else '否'}")
     return 0
