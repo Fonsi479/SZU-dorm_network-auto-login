@@ -77,6 +77,11 @@ AUTO_LOGIN_INITIAL_DELAY_SECONDS = 5
 AUTO_LOGIN_BACKOFF_SECONDS = (120, 300, 600, 900)
 MENUBAR_LOG_MAX_BYTES = 1_000_000
 MENUBAR_LOG_BACKUP_COUNT = 5
+LAUNCHAGENT_LABELS = (
+    "com.szu-netlogin.dorm-drcom",
+    "com.fonsi.szu-dorm-drcom",
+    "com.szu.autologin",
+)
 
 
 def get_bundled_resource_root() -> Path:
@@ -257,9 +262,17 @@ class SzuDormMenubarApp(RumpsAppBase):
         self.open_log_item = rumps.MenuItem("打开日志", callback=self.open_log)
         self.reset_pause_item = rumps.MenuItem("重置暂停状态", callback=self.reset_pause)
         self.check_dependencies_item = rumps.MenuItem("检查依赖", callback=self.check_dependencies)
-        self.install_item = rumps.MenuItem("安装开机自启", callback=self.install_launchagent)
-        self.uninstall_item = rumps.MenuItem("卸载开机自启", callback=self.uninstall_launchagent)
-        self.reinstall_item = rumps.MenuItem("重装开机自启", callback=self.reinstall_launchagent)
+        self.diagnostics_item = rumps.MenuItem("诊断与维护")
+        for item in (
+            self.diagnostic_report_item,
+            self.open_config_item,
+            self.open_log_item,
+            self.reset_pause_item,
+            self.check_dependencies_item,
+        ):
+            self.diagnostics_item.add(item)
+        self.launchagent_item = rumps.MenuItem("安装开机自启", callback=self.toggle_launchagent)
+        self._update_launchagent_item_title()
         self.quit_item = rumps.MenuItem("退出状态栏客户端", callback=self.quit_app)
 
         super().__init__(
@@ -274,14 +287,8 @@ class SzuDormMenubarApp(RumpsAppBase):
                 self.network_probe_item,
                 self.username_item,
                 self.password_item,
-                self.diagnostic_report_item,
-                self.open_config_item,
-                self.open_log_item,
-                self.reset_pause_item,
-                self.check_dependencies_item,
-                self.install_item,
-                self.uninstall_item,
-                self.reinstall_item,
+                self.diagnostics_item,
+                self.launchagent_item,
                 self.quit_item,
             ],
             quit_button=None,
@@ -407,6 +414,7 @@ class SzuDormMenubarApp(RumpsAppBase):
             run_on_main_thread(self._watchdog_tick, _sender)
             return
 
+        self._update_launchagent_item_title()
         self._drain_background_results()
 
         if self._network_probe_enabled and not self.timer.is_alive():
@@ -732,45 +740,17 @@ class SzuDormMenubarApp(RumpsAppBase):
             return
         rumps.alert("依赖检查失败", output or "详情可查看日志。")
 
-    def install_launchagent(self, _sender: Any) -> None:
-        self._run_launchagent_script(
-            get_bundled_resource_root() / "scripts" / "install_launchagent.sh",
-            missing_message="未找到安装脚本",
-            success_message="开机自启安装完成",
-        )
-
-    def uninstall_launchagent(self, _sender: Any) -> None:
-        self._run_launchagent_script(
-            get_bundled_resource_root() / "scripts" / "uninstall_launchagent.sh",
-            missing_message="未找到卸载脚本",
-            success_message="开机自启卸载完成",
-        )
-
-    def reinstall_launchagent(self, _sender: Any) -> None:
+    def toggle_launchagent(self, _sender: Any) -> None:
         try:
-            self.logger.info("用户点击：重装开机自启")
-            resource_root = get_bundled_resource_root()
-            uninstall_script = resource_root / "scripts" / "uninstall_launchagent.sh"
-            install_script = resource_root / "scripts" / "install_launchagent.sh"
-            for script_path in (uninstall_script, install_script):
-                if not script_path.exists():
-                    raise RuntimeError(f"未找到脚本：{script_path}")
-                result = subprocess.run(
-                    ["/bin/zsh", str(script_path)],
-                    cwd=resource_root,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-                self._log_completed_process(script_path.name, result)
-                if result.returncode != 0:
-                    raise RuntimeError(short_output(result))
-
-            rumps.notification("SZU Dorm", "开机自启已重装", "LaunchAgent 已重新安装。")
-            self.refresh_status(None)
+            install = not is_launchagent_installed()
+            operation = "安装" if install else "卸载"
+            self.logger.info("用户点击：%s开机自启", operation)
+            self._run_menu_action(
+                lambda: self._change_launchagent_installation(install),
+                self._finish_launchagent_change,
+            )
         except Exception as exc:
-            self._handle_exception("重装开机自启失败", exc)
+            self._handle_exception("切换开机自启失败", exc)
 
     def quit_app(self, _sender: Any) -> None:
         self.logger.info("用户退出状态栏客户端。")
@@ -813,6 +793,11 @@ class SzuDormMenubarApp(RumpsAppBase):
             "关闭联网状态探测" if self._network_probe_enabled else "开启联网状态探测"
         )
 
+    def _update_launchagent_item_title(self) -> None:
+        item = getattr(self, "launchagent_item", None)
+        if item is not None:
+            item.title = "卸载开机自启" if is_launchagent_installed() else "安装开机自启"
+
     def _run_simple_control_action(self, command: str, error_title: str) -> None:
         try:
             self.logger.info("用户点击：%s", command)
@@ -823,43 +808,45 @@ class SzuDormMenubarApp(RumpsAppBase):
         except Exception as exc:
             self._handle_exception(error_title, exc)
 
-    def _run_launchagent_script(
-        self,
-        script_path: Path,
-        missing_message: str,
-        success_message: str,
-    ) -> None:
-        try:
-            if not script_path.exists():
-                self.logger.warning("%s：%s", missing_message, script_path)
-                rumps.alert("SZU Dorm", missing_message)
-                return
+    def _change_launchagent_installation(self, install: bool) -> bool:
+        script_name = "install_launchagent.sh" if install else "uninstall_launchagent.sh"
+        script_path = get_bundled_resource_root() / "scripts" / script_name
+        if not script_path.exists():
+            raise RuntimeError(f"未找到{'安装' if install else '卸载'}脚本：{script_path}")
 
-            self.logger.info("运行脚本：%s", script_path.name)
-            env = build_control_env()
+        self.logger.info("运行脚本：%s", script_path.name)
+        env = build_control_env()
+        if install:
             try:
                 env["SZU_NETLOGIN_PASSWORD_ENV_NAME"] = get_password_env_name(load_config())
             except ConfigError:
                 pass
             if getattr(sys, "frozen", False):
                 env["SZU_NETLOGIN_APP_EXECUTABLE"] = sys.executable
-            result = subprocess.run(
-                ["/bin/zsh", str(script_path)],
-                cwd=script_path.parent.parent,
-                env=env,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            self._log_completed_process(script_path.name, result)
-            if result.returncode != 0:
-                raise RuntimeError(short_output(result))
 
-            rumps.notification("SZU Dorm", success_message, "操作已完成。")
-            self.refresh_status(None)
-        except Exception as exc:
-            self._handle_exception(f"{success_message}失败", exc)
+        result = subprocess.run(
+            ["/bin/zsh", str(script_path)],
+            cwd=script_path.parent.parent,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self._log_completed_process(script_path.name, result)
+        if result.returncode != 0:
+            raise RuntimeError(short_output(result))
+        if is_launchagent_installed() != install:
+            state = "安装" if install else "卸载"
+            raise RuntimeError(f"脚本执行完成，但未能确认开机自启已{state}。")
+        return install
+
+    def _finish_launchagent_change(self, installed: bool) -> None:
+        self._update_launchagent_item_title()
+        title = "开机自启已安装" if installed else "开机自启已卸载"
+        detail = "登录 macOS 后会自动检查网络。" if installed else "不会再随登录自动运行。"
+        rumps.notification("SZU Dorm", title, detail)
+        self.refresh_status(None)
 
     def _run_control(self, args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
         result = self._run_control_process(args, timeout)
@@ -967,6 +954,11 @@ class SzuDormMenubarApp(RumpsAppBase):
 
 def get_username(config: dict[str, Any]) -> str:
     return str((config.get("user") or {}).get("username") or "").strip()
+
+
+def is_launchagent_installed(target_dir: Path | None = None) -> bool:
+    launchagents_dir = target_dir or (Path.home() / "Library" / "LaunchAgents")
+    return any((launchagents_dir / f"{label}.plist").is_file() for label in LAUNCHAGENT_LABELS)
 
 
 def is_username_set(username: str) -> bool:

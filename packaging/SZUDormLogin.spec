@@ -70,8 +70,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "SZU Dorm Login",
         "CFBundleDisplayName": "SZU Dorm Login",
-        "CFBundleShortVersionString": "1.1.0",
-        "CFBundleVersion": "2",
+        "CFBundleShortVersionString": "1.2.0",
+        "CFBundleVersion": "3",
         "LSUIElement": True,
     },
 )

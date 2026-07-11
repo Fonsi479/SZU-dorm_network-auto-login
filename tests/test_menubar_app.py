@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import unittest
 import threading
+from pathlib import Path
 from queue import Queue
+from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 from src.szu_netlogin.menubar_app import (
@@ -15,6 +17,7 @@ from src.szu_netlogin.menubar_app import (
     extract_logout_title,
     extract_report_path,
     format_interval,
+    is_launchagent_installed,
     should_start_auto_login,
 )
 from src.szu_netlogin.portal_detect import NetworkStatus
@@ -191,11 +194,15 @@ class NetworkProbeToggleTests(unittest.TestCase):
 
 
 class MenubarMenuTests(unittest.TestCase):
-    def test_hidden_advanced_items_are_not_added_to_menu(self) -> None:
+    def test_diagnostics_are_grouped_and_launchagent_uses_one_dynamic_item(self) -> None:
         class FakeMenuItem:
             def __init__(self, title: str, callback=None) -> None:
                 self.title = title
                 self.callback = callback
+                self.children = []
+
+            def add(self, item) -> None:
+                self.children.append(item)
 
         class FakeTimer:
             def __init__(self, callback, interval) -> None:
@@ -216,14 +223,62 @@ class MenubarMenuTests(unittest.TestCase):
             patch.object(SzuDormMenubarApp, "_warn_if_config_missing"),
             patch.object(SzuDormMenubarApp, "_warn_if_optional_dependencies_missing"),
             patch.object(SzuDormMenubarApp, "refresh_status"),
+            patch("src.szu_netlogin.menubar_app.is_launchagent_installed", return_value=False),
         ):
             SzuDormMenubarApp()
 
         menu = app_init.call_args.kwargs["menu"]
         titles = [item.title for item in menu]
+        self.assertIn("诊断与维护", titles)
+        self.assertIn("安装开机自启", titles)
+        self.assertNotIn("卸载开机自启", titles)
+        self.assertNotIn("重装开机自启", titles)
+        diagnostics = next(item for item in menu if item.title == "诊断与维护")
+        self.assertEqual(
+            [item.title for item in diagnostics.children],
+            ["生成诊断报告", "打开配置文件", "打开日志", "重置暂停状态", "检查依赖"],
+        )
+        for child in diagnostics.children:
+            self.assertNotIn(child, menu)
         self.assertNotIn("退出账号（暂停 30 分钟）", titles)
         self.assertNotIn("退出账号（下次开机恢复）", titles)
         self.assertNotIn("写入 SZU_NETLOGIN_HOME", titles)
+
+    def test_launchagent_installation_detection_supports_current_and_legacy_labels(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            launchagents_dir = Path(temp_dir)
+            self.assertFalse(is_launchagent_installed(launchagents_dir))
+
+            for label in (
+                "com.szu-netlogin.dorm-drcom",
+                "com.fonsi.szu-dorm-drcom",
+                "com.szu.autologin",
+            ):
+                plist_path = launchagents_dir / f"{label}.plist"
+                plist_path.touch()
+                self.assertTrue(is_launchagent_installed(launchagents_dir))
+                plist_path.unlink()
+
+    def test_launchagent_toggle_selects_the_opposite_of_current_state(self) -> None:
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
+                app.logger = Mock()
+                app._change_launchagent_installation = Mock(return_value=not installed)
+                app._finish_launchagent_change = Mock()
+
+                def run_now(action, completion) -> None:
+                    completion(action())
+
+                app._run_menu_action = Mock(side_effect=run_now)
+                with patch(
+                    "src.szu_netlogin.menubar_app.is_launchagent_installed",
+                    return_value=installed,
+                ):
+                    app.toggle_launchagent(None)
+
+                app._change_launchagent_installation.assert_called_once_with(not installed)
+                app._finish_launchagent_change.assert_called_once_with(not installed)
 
 
 class AutoLoginBackoffTests(unittest.TestCase):

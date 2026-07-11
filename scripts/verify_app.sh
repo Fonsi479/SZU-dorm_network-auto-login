@@ -9,6 +9,8 @@ EXEC_PATH="${APP_PATH}/Contents/MacOS/${APP_NAME}"
 INFO_PLIST="${APP_PATH}/Contents/Info.plist"
 MENUBAR_LOG="${PROJECT_ROOT}/logs/menubar.log"
 APP_HOME="${HOME}/Library/Application Support/szu-netlogin"
+EXPECTED_SHORT_VERSION="1.2.0"
+EXPECTED_BUILD_VERSION="3"
 
 fail() {
   echo "验证失败：$1" >&2
@@ -25,12 +27,16 @@ echo "App 路径：${APP_PATH}"
 [[ -f "${APP_PATH}/Contents/Resources/launchd/com.szu-netlogin.dorm-drcom.plist" ]] || fail "App 缺少 LaunchAgent plist 模板"
 
 plutil -lint "${INFO_PLIST}" >/dev/null || fail "Info.plist 格式不正确"
+SHORT_VERSION="$(plutil -extract CFBundleShortVersionString raw -o - "${INFO_PLIST}")"
+BUILD_VERSION="$(plutil -extract CFBundleVersion raw -o - "${INFO_PLIST}")"
+[[ "${SHORT_VERSION}" == "${EXPECTED_SHORT_VERSION}" ]] || fail "App 版本应为 ${EXPECTED_SHORT_VERSION}，实际为 ${SHORT_VERSION}"
+[[ "${BUILD_VERSION}" == "${EXPECTED_BUILD_VERSION}" ]] || fail "App 构建号应为 ${EXPECTED_BUILD_VERSION}，实际为 ${BUILD_VERSION}"
 
 if ! "${EXEC_PATH}" --szu-netlogin-control check-dependencies >/dev/null 2>&1; then
   fail "App 控制入口无法启动或依赖缺失"
 fi
 
-echo "App 包检查：通过"
+echo "App 包检查：通过（版本 ${SHORT_VERSION}，构建 ${BUILD_VERSION}）"
 
 if xattr -p com.apple.quarantine "${APP_PATH}" >/dev/null 2>&1; then
   echo "提醒：App 带有 macOS 隔离标记，首次打开可能需要在 系统设置 -> 隐私与安全性 允许。"
@@ -38,10 +44,13 @@ else
   echo "macOS 隔离标记：未发现"
 fi
 
-if [[ -f "${MENUBAR_LOG}" ]]; then
+if [[ -f "${MENUBAR_LOG}" && "${MENUBAR_LOG}" -nt "${EXEC_PATH}" ]]; then
   echo
-  echo "最近菜单栏日志："
+  echo "本次构建后的菜单栏日志："
   tail -n 12 "${MENUBAR_LOG}"
+elif [[ -f "${MENUBAR_LOG}" ]]; then
+  echo
+  echo "菜单栏日志早于本次构建，已跳过历史内容：${MENUBAR_LOG}"
 else
   echo
   echo "还没有菜单栏日志：${MENUBAR_LOG}"
