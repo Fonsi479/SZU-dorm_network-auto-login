@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
 import subprocess
@@ -14,12 +15,13 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 import requests
 
 from .logger import get_logger, redact_sensitive_text
+from .platform_paths import run_subprocess_hidden
 from .portal_detect import SourceAddressAdapter
 
 LoginStatus = Literal["success", "failed", "unknown"]
 LogoutStatus = Literal["success", "failed", "unknown"]
 USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
 )
 
@@ -862,6 +864,9 @@ def _add_terminal_mac_param(params: dict[str, str], source_ip: str, logger: Any)
 
 
 def _get_terminal_mac_for_ip(source_ip: str) -> str:
+    if os.name == "nt":
+        return _get_windows_terminal_mac_for_ip(source_ip)
+
     try:
         result = subprocess.run(
             ["/sbin/ifconfig"],
@@ -877,6 +882,37 @@ def _get_terminal_mac_for_ip(source_ip: str) -> str:
         return ""
 
     return _parse_ifconfig_mac_for_ip(result.stdout, source_ip)
+
+
+def _get_windows_terminal_mac_for_ip(source_ip: str) -> str:
+    env = os.environ.copy()
+    env["SZU_SOURCE_IP"] = source_ip
+    command = [
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        (
+            "$ip=Get-NetIPAddress -IPAddress $env:SZU_SOURCE_IP -ErrorAction SilentlyContinue "
+            "| Select-Object -First 1;"
+            "if($ip){(Get-NetAdapter -InterfaceIndex $ip.InterfaceIndex -ErrorAction SilentlyContinue)"
+            ".MacAddress}"
+        ),
+    ]
+    try:
+        result = run_subprocess_hidden(
+            command,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return _normalize_mac(result.stdout.strip())
 
 
 def _parse_ifconfig_mac_for_ip(ifconfig_output: str, source_ip: str) -> str:

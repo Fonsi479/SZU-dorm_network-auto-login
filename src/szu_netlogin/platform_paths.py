@@ -1,4 +1,4 @@
-"""Small platform helpers shared by CLI, macOS, and Windows clients."""
+"""Platform helpers used by the Windows client and shared CLI core."""
 
 from __future__ import annotations
 

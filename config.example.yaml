@@ -37,7 +37,7 @@ security:
   # 可选值：env、keychain、private_file
   password_source: "keychain"
   password_env_name: "SZU_NET_PASSWORD"
-  # 当 password_source: "keychain" 时使用；macOS 对应 Keychain，Windows 对应系统凭据库/keyring 后端。
+  # 当 password_source: "keychain" 时使用；Windows 对应系统凭据库/keyring 后端。
   keychain_service: "szu-netlogin"
   # 可选；不填则使用 user.username。
   keychain_account: ""

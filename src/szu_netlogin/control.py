@@ -1,4 +1,4 @@
-"""Control commands for the future macOS status bar UI."""
+"""Control commands shared by the Windows desktop client and CLI."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Password storage helpers backed by config.yaml and macOS Keychain."""
+"""Password storage helpers backed by the system credential store or a private file."""
 
 from __future__ import annotations
 

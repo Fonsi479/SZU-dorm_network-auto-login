@@ -49,6 +49,7 @@ echo.
 echo [2/5] Creating local runtime environment...
 set "VENV_DIR=%PROJECT_ROOT%.venv-szu-dorm-login"
 set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
+set "VENV_PYTHONW=%VENV_DIR%\Scripts\pythonw.exe"
 if not exist "%VENV_PYTHON%" (
   "%PYTHON_EXE%" -m venv "%VENV_DIR%"
   if errorlevel 1 goto :failed
@@ -64,6 +65,7 @@ if errorlevel 1 goto :failed
 echo.
 echo [4/5] Creating desktop shortcut...
 call :create_shortcut
+if errorlevel 1 goto :failed
 
 echo.
 echo [5/5] Launching SZU Dorm Login...
@@ -81,7 +83,7 @@ call :select_python_installer
 set "PYTHON_INSTALLER_PATH=%TEMP%\%PYTHON_INSTALLER%"
 set "PYTHON_INSTALLER_URL=%PYTHON_MIRROR%/%PYTHON_INSTALLER%"
 echo Downloading: %PYTHON_INSTALLER_URL%
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '%PYTHON_INSTALLER_URL%' -OutFile '%PYTHON_INSTALLER_PATH%'"
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri $env:PYTHON_INSTALLER_URL -OutFile $env:PYTHON_INSTALLER_PATH"
 if errorlevel 1 exit /b 1
 echo Installing: %PYTHON_INSTALLER%
 start /wait "" "%PYTHON_INSTALLER_PATH%" /quiet InstallAllUsers=0 PrependPath=1 Include_launcher=1 Include_pip=1 Include_test=0 SimpleInstall=1
@@ -124,8 +126,8 @@ if not errorlevel 1 set "PYTHON_EXE=%~1"
 exit /b 0
 
 :create_shortcut
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$root='%PROJECT_ROOT%'; $pythonw=Join-Path $root '.venv-szu-dorm-login\\Scripts\\pythonw.exe'; $script=Join-Path $root 'apps\\windows_desktop\\szu_windows_desktop.py'; $w=New-Object -ComObject WScript.Shell; $p=[IO.Path]::Combine([Environment]::GetFolderPath('Desktop'),'SZU Dorm Login.lnk'); $s=$w.CreateShortcut($p); if(Test-Path $pythonw){ $s.TargetPath=$pythonw; $s.Arguments='\"' + $script + '\"' } else { $s.TargetPath=(Join-Path $root 'start_szu_dorm_login.bat') }; $s.WorkingDirectory=$root; $s.Save()" >nul 2>nul
-exit /b 0
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$root=$env:PROJECT_ROOT; $pythonw=$env:VENV_PYTHONW; $script=Join-Path $root 'apps\windows_desktop\szu_windows_desktop.py'; if(-not (Test-Path -LiteralPath $pythonw)){ Write-Error 'pythonw.exe was not found'; exit 2 }; $w=New-Object -ComObject WScript.Shell; $p=[IO.Path]::Combine([Environment]::GetFolderPath('Desktop'),'SZU Dorm Login.lnk'); $s=$w.CreateShortcut($p); $s.TargetPath=$pythonw; $s.Arguments='\"' + $script + '\"'; $s.WorkingDirectory=$root; $s.WindowStyle=7; $s.Save(); if(-not (Test-Path -LiteralPath $p)){ Write-Error 'Desktop shortcut was not created'; exit 3 }" >nul 2>nul
+exit /b %ERRORLEVEL%
 
 :failed
 echo.

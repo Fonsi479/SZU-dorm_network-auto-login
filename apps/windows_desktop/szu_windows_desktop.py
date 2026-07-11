@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any
+from typing import Any, Callable
 
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
@@ -48,6 +48,7 @@ from src.szu_netlogin.state import describe_pause_state, is_paused  # noqa: E402
 
 
 APP_NAME = "SZU Dorm Login"
+APP_VERSION = "1.1.0"
 CONTROL_MODULE = "src.szu_netlogin.control"
 CONTROL_DISPATCH_ARG = "--szu-netlogin-control"
 STATUS_REFRESH_SECONDS = 30
@@ -55,6 +56,7 @@ WATCHDOG_INTERVAL_SECONDS = 1
 AUTO_LOGIN_INITIAL_DELAY_SECONDS = 5
 AUTO_LOGIN_BACKOFF_SECONDS = (120, 300, 600, 900)
 USERNAME_PLACEHOLDER = "你的校园卡号，不要写密码"
+STARTUP_LINK_NAME = "SZU Dorm Login.lnk"
 
 
 @dataclass(frozen=True)
@@ -106,11 +108,16 @@ class SzuDormWindowsApp:
         self._messages: Queue[tuple[str, Any]] = Queue()
         self._status_lock = threading.Lock()
         self._command_lock = threading.Lock()
+        self._active_process_lock = threading.Lock()
         self._refresh_in_progress = False
         self._command_in_progress = False
         self._network_probe_enabled = True
+        self._closing = False
+        self._active_process: subprocess.Popen[str] | None = None
         self._last_status_result: DesktopStatusResult | None = None
         self._status_after_id: str | None = None
+        self._drain_after_id: str | None = None
+        self._watchdog_after_id: str | None = None
         self._auto_login_schedule = AutoLoginBackoff(
             AUTO_LOGIN_BACKOFF_SECONDS,
             AUTO_LOGIN_INITIAL_DELAY_SECONDS,
@@ -122,35 +129,66 @@ class SzuDormWindowsApp:
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.root.after(100, self.refresh_status)
-        self.root.after(100, self._drain_messages)
-        self.root.after(WATCHDOG_INTERVAL_SECONDS * 1000, self._watchdog_tick)
+        self._drain_after_id = self.root.after(100, self._drain_messages)
+        self._watchdog_after_id = self.root.after(
+            WATCHDOG_INTERVAL_SECONDS * 1000,
+            self._watchdog_tick,
+        )
 
     def _build_ui(self) -> None:
         self.root.title(APP_NAME)
-        self.root.minsize(760, 560)
+        self.root.geometry("900x680")
+        self.root.minsize(820, 620)
 
         style = ttk.Style(self.root)
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("Title.TLabel", font=("Segoe UI", 16, "bold"))
-        style.configure("StatusName.TLabel", foreground="#445")
+        style.configure("Title.TLabel", font=("Segoe UI", 18, "bold"))
+        style.configure("Subtitle.TLabel", foreground="#5f6b7a")
+        style.configure("State.TLabel", font=("Segoe UI", 10, "bold"), foreground="#176b3a")
+        style.configure("StatusName.TLabel", foreground="#445", font=("Segoe UI", 10, "bold"))
         style.configure("StatusValue.TLabel", font=("Segoe UI", 10))
+        style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"))
 
         main = ttk.Frame(self.root, padding=16)
         main.pack(fill=tk.BOTH, expand=True)
         main.columnconfigure(0, weight=1)
-        main.rowconfigure(3, weight=1)
+        main.rowconfigure(1, weight=1)
 
-        ttk.Label(main, text="SZU Dorm Login", style="Title.TLabel").grid(
-            row=0,
-            column=0,
-            sticky="w",
+        header = ttk.Frame(main)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        header.columnconfigure(0, weight=1)
+        title_group = ttk.Frame(header)
+        title_group.grid(row=0, column=0, sticky="w")
+        ttk.Label(title_group, text="SZU Dorm Login", style="Title.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(
+            title_group,
+            text=f"Windows 独立客户端 v{APP_VERSION} · 宿舍区校园网自动登录",
+            style="Subtitle.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self.header_state_var = tk.StringVar(value="正在检查网络…")
+        ttk.Label(header, textvariable=self.header_state_var, style="State.TLabel").grid(
+            row=0, column=1, rowspan=2, sticky="e", padx=(16, 0)
         )
 
-        status_frame = ttk.LabelFrame(main, text="当前状态", padding=12)
-        status_frame.grid(row=1, column=0, sticky="ew", pady=(12, 10))
+        self.notebook = ttk.Notebook(main)
+        self.notebook.grid(row=1, column=0, sticky="nsew")
+
+        overview = ttk.Frame(self.notebook, padding=14)
+        diagnostics = ttk.Frame(self.notebook, padding=14)
+        self.notebook.add(overview, text="概览")
+        self.notebook.add(diagnostics, text="诊断与日志")
+        overview.columnconfigure(0, weight=1)
+        overview.rowconfigure(0, weight=1)
+        diagnostics.columnconfigure(0, weight=1)
+        diagnostics.rowconfigure(1, weight=1)
+
+        status_frame = ttk.LabelFrame(overview, text="当前状态", padding=12)
+        status_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 12))
         status_frame.columnconfigure(1, weight=1)
         self._add_status_row(status_frame, 0, "自动登录", "run_state")
         self._add_status_row(status_frame, 1, "暂停状态", "pause_state")
@@ -159,10 +197,11 @@ class SzuDormWindowsApp:
         self._add_status_row(status_frame, 4, "宿舍网关", "gateway")
         self._add_status_row(status_frame, 5, "源 IP", "source_ip")
         self._add_status_row(status_frame, 6, "配置文件", "config")
-        self._add_status_row(status_frame, 7, "更新时间", "updated_at")
+        self._add_status_row(status_frame, 7, "开机自启", "startup")
+        self._add_status_row(status_frame, 8, "更新时间", "updated_at")
 
-        button_frame = ttk.Frame(main)
-        button_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        button_frame = ttk.LabelFrame(overview, text="快捷操作", padding=8)
+        button_frame.grid(row=1, column=0, sticky="ew")
         for index in range(4):
             button_frame.columnconfigure(index, weight=1)
 
@@ -179,6 +218,7 @@ class SzuDormWindowsApp:
             1,
             "立即登录",
             lambda: self._run_control_action(["login-now"], "立即登录", timeout=80),
+            style="Primary.TButton",
         )
         self.check_login_button = self._add_button(
             button_frame,
@@ -199,12 +239,34 @@ class SzuDormWindowsApp:
         )
         self.username_button = self._add_button(button_frame, 1, 2, "修改账号", self.change_username)
         self.password_button = self._add_button(button_frame, 1, 3, "修改密码", self.change_password)
-
-        self.config_button = self._add_button(button_frame, 2, 0, "打开配置", self.open_config)
-        self.log_button = self._add_button(button_frame, 2, 1, "打开日志", self.open_log)
-        self.report_button = self._add_button(
+        self.startup_button = self._add_button(
             button_frame,
             2,
+            0,
+            "安装开机自启",
+            self.toggle_windows_startup,
+            columnspan=2,
+        )
+        self.open_diagnostics_button = self._add_button(
+            button_frame,
+            2,
+            2,
+            "打开诊断工具",
+            lambda: self.notebook.select(diagnostics),
+            columnspan=2,
+        )
+
+        diagnostic_buttons = ttk.Frame(diagnostics)
+        diagnostic_buttons.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        for index in range(4):
+            diagnostic_buttons.columnconfigure(index, weight=1)
+        self.config_button = self._add_button(
+            diagnostic_buttons, 0, 0, "打开配置", self.open_config
+        )
+        self.log_button = self._add_button(diagnostic_buttons, 0, 1, "打开日志", self.open_log)
+        self.report_button = self._add_button(
+            diagnostic_buttons,
+            0,
             2,
             "诊断报告",
             lambda: self._run_control_action(
@@ -214,19 +276,51 @@ class SzuDormWindowsApp:
             ),
         )
         self.reset_pause_button = self._add_button(
-            button_frame,
-            2,
+            diagnostic_buttons,
+            0,
             3,
             "重置暂停",
             lambda: self._run_control_action(["reset-pause"], "重置暂停", timeout=30),
         )
+        self.dependencies_button = self._add_button(
+            diagnostic_buttons,
+            1,
+            0,
+            "检查依赖",
+            lambda: self._run_control_action(
+                ["check-dependencies"],
+                "检查依赖",
+                timeout=30,
+            ),
+            columnspan=4,
+        )
 
-        output_frame = ttk.LabelFrame(main, text="运行输出", padding=8)
-        output_frame.grid(row=3, column=0, sticky="nsew")
+        output_frame = ttk.LabelFrame(diagnostics, text="脱敏运行输出", padding=8)
+        output_frame.grid(row=1, column=0, sticky="nsew")
         output_frame.rowconfigure(0, weight=1)
         output_frame.columnconfigure(0, weight=1)
-        self.output = ScrolledText(output_frame, height=10, wrap=tk.WORD, state=tk.DISABLED)
+        self.output = ScrolledText(
+            output_frame,
+            height=10,
+            wrap=tk.WORD,
+            state=tk.DISABLED,
+            font=("Consolas", 10),
+            background="#111827",
+            foreground="#e5e7eb",
+            insertbackground="#f9fafb",
+            selectbackground="#374151",
+            relief=tk.FLAT,
+            padx=10,
+            pady=8,
+        )
         self.output.grid(row=0, column=0, sticky="nsew")
+        self._append_output("诊断输出将在这里显示；账号、密码和 URL 等敏感内容会自动脱敏。")
+
+        self.footer_var = tk.StringVar(value=f"配置：{DEFAULT_CONFIG_PATH}")
+        ttk.Label(main, textvariable=self.footer_var, style="Subtitle.TLabel").grid(
+            row=2, column=0, sticky="w", pady=(10, 0)
+        )
+        self._update_startup_ui()
 
     def _ensure_initial_config_file(self) -> None:
         if DEFAULT_CONFIG_PATH.exists():
@@ -260,13 +354,25 @@ class SzuDormWindowsApp:
         column: int,
         text: str,
         command,
+        *,
+        columnspan: int = 1,
+        style: str | None = None,
     ) -> ttk.Button:
-        button = ttk.Button(parent, text=text, command=command)
-        button.grid(row=row, column=column, sticky="ew", padx=4, pady=4)
+        button = ttk.Button(parent, text=text, command=command, style=style)
+        button.grid(
+            row=row,
+            column=column,
+            columnspan=columnspan,
+            sticky="ew",
+            padx=4,
+            pady=4,
+        )
         self._command_buttons.append(button)
         return button
 
     def refresh_status(self) -> None:
+        if self._closing:
+            return
         if not self._network_probe_enabled:
             self._apply_status_result(
                 DesktopStatusResult(
@@ -290,6 +396,8 @@ class SzuDormWindowsApp:
             config, config_error = self._load_config_for_status()
             network_status = probe_network(config) if config else NetworkStatus(False, False)
             environment = classify_network_environment(config, network_status)
+            if self._closing:
+                return
             self._messages.put(
                 (
                     "status",
@@ -322,11 +430,16 @@ class SzuDormWindowsApp:
         self._status_vars["gateway"].set(gateway_label)
         self._status_vars["source_ip"].set(result.network_status.source_ip or "-")
         self._status_vars["config"].set(config_label)
+        self._status_vars["startup"].set(
+            "已安装" if is_windows_startup_enabled() else "未安装"
+        )
         self._status_vars["updated_at"].set(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        self.header_state_var.set(run_label)
         self.pause_button.configure(text="恢复自动登录" if result.paused else "暂停自动登录")
         self.probe_button.configure(
             text="关闭联网探测" if self._network_probe_enabled else "开启联网探测"
         )
+        self._update_startup_ui()
 
         if result.network_status.campus_internet_ok:
             self._auto_login_schedule.record_success()
@@ -334,6 +447,8 @@ class SzuDormWindowsApp:
         self._schedule_next_status_refresh()
 
     def _schedule_next_status_refresh(self) -> None:
+        if self._closing:
+            return
         if self._status_after_id is not None:
             try:
                 self.root.after_cancel(self._status_after_id)
@@ -348,6 +463,9 @@ class SzuDormWindowsApp:
             )
 
     def _watchdog_tick(self) -> None:
+        if self._closing:
+            return
+        self._update_startup_ui()
         if self._network_probe_enabled and self._auto_login_schedule.consume_if_due():
             if should_start_auto_login(is_paused(), self._last_status_result):
                 self._run_control_action(
@@ -361,7 +479,10 @@ class SzuDormWindowsApp:
                 label = self._last_status_result.environment_label or "非宿舍网络"
                 self.logger.info("当前不是宿舍区校园网：%s，本轮自动登录已停止。", label)
 
-        self.root.after(WATCHDOG_INTERVAL_SECONDS * 1000, self._watchdog_tick)
+        self._watchdog_after_id = self.root.after(
+            WATCHDOG_INTERVAL_SECONDS * 1000,
+            self._watchdog_tick,
+        )
 
     def _run_control_action(
         self,
@@ -371,18 +492,46 @@ class SzuDormWindowsApp:
         show_dialog: bool = True,
         auto_login: bool = False,
     ) -> None:
+        if not self._begin_command(label, show_dialog):
+            return
+
+        threading.Thread(
+            target=self._control_worker,
+            args=(args, label, timeout, show_dialog, auto_login),
+            daemon=True,
+        ).start()
+
+    def _begin_command(self, label: str, show_dialog: bool) -> bool:
         with self._command_lock:
             if self._command_in_progress:
                 if show_dialog:
                     messagebox.showinfo(APP_NAME, "已有操作正在执行，请稍后再试。")
-                return
+                return False
             self._command_in_progress = True
 
-        self._set_command_buttons_enabled(False)
+        if show_dialog:
+            self._set_command_buttons_enabled(False)
         self._append_output(f"> {label}")
+        return True
+
+    def _run_local_action(
+        self,
+        action: Callable[[], Any],
+        label: str,
+        completion: Callable[[Any], None],
+    ) -> None:
+        if not self._begin_command(label, True):
+            return
+
+        def worker() -> None:
+            try:
+                self._messages.put(("local_result", (label, completion, action())))
+            except Exception as exc:
+                self._messages.put(("command_error", (label, exc, traceback.format_exc(), True)))
+
         threading.Thread(
-            target=self._control_worker,
-            args=(args, label, timeout, show_dialog, auto_login),
+            target=worker,
+            name="szu-windows-local-action",
             daemon=True,
         ).start()
 
@@ -395,7 +544,7 @@ class SzuDormWindowsApp:
         auto_login: bool,
     ) -> None:
         try:
-            result = run_control_process(args, timeout)
+            result = self._run_control_process(args, timeout)
             self._messages.put(("command_result", (label, args, result, show_dialog, auto_login)))
         except Exception as exc:
             self._messages.put(("command_error", (label, exc, traceback.format_exc(), show_dialog)))
@@ -406,6 +555,8 @@ class SzuDormWindowsApp:
         self._set_command_buttons_enabled(True)
 
     def _set_command_buttons_enabled(self, enabled: bool) -> None:
+        if self._closing:
+            return
         state = tk.NORMAL if enabled else tk.DISABLED
         for button in self._command_buttons:
             button.configure(state=state)
@@ -489,15 +640,39 @@ class SzuDormWindowsApp:
             messagebox.showwarning(APP_NAME, "密码不能为空，未保存。")
             return
 
-        try:
-            set_password(config, password)
-        except Exception as exc:
-            messagebox.showerror(APP_NAME, f"保存密码失败：{exc}")
-            return
+        password_source = describe_password_source(config)
+        self._run_local_action(
+            lambda: set_password(config, password),
+            "保存密码",
+            lambda _result: self._finish_password_change(password_source),
+        )
 
-        messagebox.showinfo(APP_NAME, f"密码已保存到 {describe_password_source(config)}。")
-        self._append_output(f"密码已保存：{describe_password_source(config)}")
+    def _finish_password_change(self, password_source: str) -> None:
+        messagebox.showinfo(APP_NAME, f"密码已保存到 {password_source}。")
+        self._append_output(f"密码已保存：{password_source}")
         self.refresh_status()
+
+    def toggle_windows_startup(self) -> None:
+        enable = not is_windows_startup_enabled()
+        label = "安装开机自启" if enable else "卸载开机自启"
+        self._run_local_action(
+            lambda: set_windows_startup_enabled(enable),
+            label,
+            self._finish_windows_startup_change,
+        )
+
+    def _finish_windows_startup_change(self, enabled: bool) -> None:
+        self._update_startup_ui()
+        self._status_vars["startup"].set("已安装" if enabled else "未安装")
+        detail = "登录 Windows 后会自动启动客户端。" if enabled else "已移除启动快捷方式。"
+        self._append_output(detail)
+        messagebox.showinfo(APP_NAME, detail)
+
+    def _update_startup_ui(self) -> None:
+        enabled = is_windows_startup_enabled()
+        button = getattr(self, "startup_button", None)
+        if button is not None:
+            button.configure(text="卸载开机自启" if enabled else "安装开机自启")
 
     def open_config(self) -> None:
         if not DEFAULT_CONFIG_PATH.exists() and not self._confirm_create_config():
@@ -539,6 +714,8 @@ class SzuDormWindowsApp:
             return None, str(exc)
 
     def _drain_messages(self) -> None:
+        if self._closing:
+            return
         while True:
             try:
                 kind, payload = self._messages.get_nowait()
@@ -546,6 +723,9 @@ class SzuDormWindowsApp:
                 break
 
             if kind == "status":
+                if not self._network_probe_enabled and payload.network_probe_enabled:
+                    self.logger.info("忽略已关闭探测后的旧状态刷新结果。")
+                    continue
                 self._apply_status_result(payload)
                 continue
 
@@ -564,11 +744,20 @@ class SzuDormWindowsApp:
                     messagebox.showerror(APP_NAME, f"{label}失败：{message}")
                 continue
 
+            if kind == "local_result":
+                _label, completion, result = payload
+                self._finish_command()
+                completion(result)
+                continue
+
             title, exc, formatted_traceback = payload
             self.logger.error("%s：%s\n%s", title, exc, formatted_traceback)
             self._append_output(f"{title}：{exc}")
+            if title == "刷新状态失败":
+                self.header_state_var.set("状态刷新失败，将自动重试")
+                self._schedule_next_status_refresh()
 
-        self.root.after(100, self._drain_messages)
+        self._drain_after_id = self.root.after(100, self._drain_messages)
 
     def _handle_command_result(
         self,
@@ -620,30 +809,180 @@ class SzuDormWindowsApp:
         self.output.configure(state=tk.DISABLED)
 
     def _close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
         self._network_probe_enabled = False
-        if self._status_after_id is not None:
+        self._cancel_active_control_process()
+        for after_id in (
+            self._status_after_id,
+            self._drain_after_id,
+            self._watchdog_after_id,
+        ):
+            if after_id is None:
+                continue
             try:
-                self.root.after_cancel(self._status_after_id)
+                self.root.after_cancel(after_id)
             except tk.TclError:
                 pass
         self.root.destroy()
 
+    def _run_control_process(
+        self,
+        args: list[str],
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
+        command = [*build_control_command(), *args]
+        process: subprocess.Popen[str] | None = None
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=PROJECT_ROOT,
+                env=build_control_env(),
+                text=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                **hidden_popen_options(),
+            )
+            with self._active_process_lock:
+                if self._closing:
+                    self._terminate_process(process)
+                    raise RuntimeError("客户端正在退出，已取消命令。")
+                self._active_process = process
+            stdout, stderr = process.communicate(timeout=timeout)
+            return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired as exc:
+            if process is not None:
+                self._terminate_process(process)
+            raise RuntimeError(f"命令超时：{mask_command(args)}") from exc
+        finally:
+            if process is not None:
+                with self._active_process_lock:
+                    if self._active_process is process:
+                        self._active_process = None
 
-def run_control_process(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
-    PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
+    def _cancel_active_control_process(self) -> None:
+        with self._active_process_lock:
+            process = self._active_process
+        if process is not None and process.poll() is None:
+            self.logger.info("正在取消运行中的控制命令。")
+            self._terminate_process(process)
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[str]) -> None:
+        try:
+            process.terminate()
+            process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+
+def get_windows_startup_dir() -> Path:
+    appdata = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    return appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+
+
+def get_windows_startup_link(startup_dir: Path | None = None) -> Path:
+    return (startup_dir or get_windows_startup_dir()) / STARTUP_LINK_NAME
+
+
+def is_windows_startup_enabled(startup_dir: Path | None = None) -> bool:
+    return get_windows_startup_link(startup_dir).is_file()
+
+
+def get_windows_launcher() -> tuple[Path, str, Path]:
+    if getattr(sys, "frozen", False):
+        executable = Path(sys.executable).resolve()
+        return executable, "", executable.parent
+
+    script_path = Path(__file__).resolve()
+    executable = Path(sys.executable).resolve()
+    pythonw = executable.with_name("pythonw.exe")
+    if pythonw.is_file():
+        executable = pythonw
+    return executable, f'"{script_path}"', script_path.parents[2]
+
+
+def set_windows_startup_enabled(
+    enabled: bool,
+    startup_dir: Path | None = None,
+    launcher: tuple[Path, str, Path] | None = None,
+) -> bool:
+    startup_link = get_windows_startup_link(startup_dir)
+    if not enabled:
+        try:
+            startup_link.unlink()
+        except FileNotFoundError:
+            pass
+        if startup_link.exists():
+            raise RuntimeError(f"无法移除开机自启快捷方式：{startup_link}")
+        return False
+
+    startup_link.parent.mkdir(parents=True, exist_ok=True)
+    executable, arguments, working_directory = launcher or get_windows_launcher()
+    env = os.environ.copy()
+    env.update(
+        {
+            "SZU_STARTUP_LINK": str(startup_link),
+            "SZU_STARTUP_TARGET": str(executable),
+            "SZU_STARTUP_ARGS": arguments,
+            "SZU_STARTUP_WORKDIR": str(working_directory),
+        }
+    )
+    powershell_script = (
+        "$w=New-Object -ComObject WScript.Shell;"
+        "$s=$w.CreateShortcut($env:SZU_STARTUP_LINK);"
+        "$s.TargetPath=$env:SZU_STARTUP_TARGET;"
+        "$s.Arguments=$env:SZU_STARTUP_ARGS;"
+        "$s.WorkingDirectory=$env:SZU_STARTUP_WORKDIR;"
+        "$s.WindowStyle=7;"
+        "$s.Save()"
+    )
     try:
-        return run_subprocess_hidden(
-            [*build_control_command(), *args],
-            cwd=PROJECT_ROOT,
-            env=build_control_env(),
+        result = run_subprocess_hidden(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                powershell_script,
+            ],
+            env=env,
             check=False,
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
-            timeout=timeout,
+            timeout=15,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"命令超时：{mask_command(args)}") from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"创建开机自启快捷方式失败：{exc}") from exc
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "PowerShell 返回失败").strip()[:500]
+        raise RuntimeError(f"创建开机自启快捷方式失败：{detail}")
+    if not startup_link.is_file():
+        raise RuntimeError(f"未能确认开机自启快捷方式已创建：{startup_link}")
+    return True
+
+
+def hidden_popen_options() -> dict[str, Any]:
+    if os.name != "nt":
+        return {}
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "startupinfo": startupinfo,
+    }
 
 
 def build_control_command() -> list[str]:
@@ -773,9 +1112,8 @@ network:
     - "SZU_CTC&CMCC"
   timeout_seconds: 3
   max_test_urls: 3
-  campus_source_cidrs:
+  campus_source_networks:
     - "172.16.0.0/12"
-  allow_system_fallback: true
   test_urls:
     - "http://captive.apple.com/hotspot-detect.html"
     - "http://www.baidu.com/"

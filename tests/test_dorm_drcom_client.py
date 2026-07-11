@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -7,6 +8,7 @@ from src.szu_netlogin.dorm_drcom_client import (
     DormDrcomClient,
     PortalTerminalParams,
     _build_portal_terminal_params,
+    _get_windows_terminal_mac_for_ip,
     _ip_to_parse_int,
     _parse_ifconfig_mac_for_ip,
 )
@@ -242,6 +244,33 @@ vlanid="0"   ;ss4="000000000000";ss5="172.24.182.13"  ;
 
         self.assertEqual(result.status, "unknown")
         self.assertEqual(result.reason, "server_response_uncertain")
+
+
+class WindowsTerminalMacTests(unittest.TestCase):
+    def test_reads_mac_from_source_ip_interface_without_console_window(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["powershell"],
+            0,
+            "9E-B5-6A-20-11-E4\n",
+            "",
+        )
+        with patch(
+            "src.szu_netlogin.dorm_drcom_client.run_subprocess_hidden",
+            return_value=completed,
+        ) as run_hidden:
+            mac = _get_windows_terminal_mac_for_ip("172.24.182.13")
+
+        self.assertEqual(mac, "9eb56a2011e4")
+        self.assertEqual(run_hidden.call_args.kwargs["env"]["SZU_SOURCE_IP"], "172.24.182.13")
+        self.assertIn("Get-NetAdapter", run_hidden.call_args.args[0][-1])
+
+    def test_returns_empty_mac_when_adapter_lookup_fails(self) -> None:
+        completed = subprocess.CompletedProcess(["powershell"], 1, "", "failed")
+        with patch(
+            "src.szu_netlogin.dorm_drcom_client.run_subprocess_hidden",
+            return_value=completed,
+        ):
+            self.assertEqual(_get_windows_terminal_mac_for_ip("172.24.182.13"), "")
 
 
 class _Response:

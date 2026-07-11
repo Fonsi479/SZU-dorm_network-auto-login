@@ -7,7 +7,6 @@ __all__ = [
     "dorm_drcom_client",
     "logger",
     "login",
-    "menubar_app",
     "password_store",
     "portal_detect",
     "state",
