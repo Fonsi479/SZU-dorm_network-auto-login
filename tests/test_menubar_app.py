@@ -195,6 +195,43 @@ class NetworkProbeToggleTests(unittest.TestCase):
 
 
 class MenubarMenuTests(unittest.TestCase):
+    def test_login_prompts_for_missing_password_then_starts_login(self) -> None:
+        app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
+        app.logger = Mock()
+        app.login_item = Mock(title="立即登录")
+        app._prompt_and_save_password = Mock(return_value=True)
+        app._set_login_busy = Mock()
+        app._run_menu_action = Mock()
+        config = {"user": {"username": "481505"}, "security": {"password_source": "keychain"}}
+
+        with (
+            patch("src.szu_netlogin.menubar_app.load_config", return_value=config),
+            patch("src.szu_netlogin.menubar_app.has_password", return_value=False),
+        ):
+            app.login_now(None)
+
+        app._prompt_and_save_password.assert_called_once_with(config, "481505")
+        app._set_login_busy.assert_called_once_with(True)
+        app._run_menu_action.assert_called_once()
+
+    def test_login_cancelled_password_prompt_does_not_start_command(self) -> None:
+        app = SzuDormMenubarApp.__new__(SzuDormMenubarApp)
+        app.logger = Mock()
+        app.login_item = Mock(title="立即登录")
+        app._prompt_and_save_password = Mock(return_value=False)
+        app._set_login_busy = Mock()
+        app._run_menu_action = Mock()
+        config = {"user": {"username": "481505"}, "security": {"password_source": "keychain"}}
+
+        with (
+            patch("src.szu_netlogin.menubar_app.load_config", return_value=config),
+            patch("src.szu_netlogin.menubar_app.has_password", return_value=False),
+        ):
+            app.login_now(None)
+
+        app._run_menu_action.assert_not_called()
+        app._set_login_busy.assert_not_called()
+
     def test_diagnostics_are_grouped_and_launchagent_uses_one_dynamic_item(self) -> None:
         class FakeMenuItem:
             def __init__(self, title: str, callback=None) -> None:

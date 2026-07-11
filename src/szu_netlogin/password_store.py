@@ -21,7 +21,13 @@ PASSWORD_ENV_NAME = "SZU_NET_PASSWORD"
 
 def get_password(config_or_username: dict[str, Any] | str) -> str:
     if isinstance(config_or_username, dict):
-        return _get_config_password(config_or_username)
+        password = _get_config_password(config_or_username)
+        if password:
+            return password
+        security = config_or_username.get("security") or {}
+        if str(security.get("password_source", "env")) == "keychain":
+            return _get_private_file_password(config_or_username)
+        return ""
 
     username = config_or_username
     password = _get_keyring_password(SERVICE_NAME, username)
@@ -42,7 +48,12 @@ def set_password(config_or_username: dict[str, Any] | str, password: str) -> Non
 
         if password_source == "keychain":
             service, account = _get_keychain_target(config_or_username)
-            _set_keychain_password(service, account, password)
+            try:
+                _set_keychain_password(service, account, password)
+            except RuntimeError:
+                if not str(security.get("password_file") or "").strip():
+                    raise
+                _set_private_file_password(config_or_username, password)
             return
 
         if password_source == "private_file":
@@ -64,7 +75,7 @@ def set_password(config_or_username: dict[str, Any] | str, password: str) -> Non
 
 def has_password(config_or_username: dict[str, Any] | str) -> bool:
     if isinstance(config_or_username, dict):
-        return bool(_get_config_password(config_or_username))
+        return bool(get_password(config_or_username))
 
     username = config_or_username
     return bool(_get_keyring_password(SERVICE_NAME, username) or os.environ.get(PASSWORD_ENV_NAME, ""))
@@ -72,6 +83,12 @@ def has_password(config_or_username: dict[str, Any] | str) -> bool:
 
 def describe_password_source(config_or_username: dict[str, Any] | str) -> str:
     if isinstance(config_or_username, dict):
+        security = config_or_username.get("security") or {}
+        if (
+            str(security.get("password_source", "env")) == "keychain"
+            and _get_private_file_password(config_or_username)
+        ):
+            return f"私有密码文件 {security.get('password_file')}（钥匙串不可用时回退）"
         return _describe_config_password_source(config_or_username)
 
     return f"系统凭据库服务 {SERVICE_NAME} 或环境变量 {PASSWORD_ENV_NAME}"
@@ -89,8 +106,73 @@ def _get_keychain_target(config_or_username: dict[str, Any] | str) -> tuple[str,
 
 
 def _set_keychain_password(service: str, account: str, password: str) -> None:
-    keyring = _load_keyring()
-    keyring.set_password(service, account, password)
+    try:
+        keyring = _load_keyring()
+        keyring.set_password(service, account, password)
+        return
+    except Exception as keyring_error:
+        try:
+            _set_security_password(service, account, password)
+            return
+        except Exception as security_error:
+            raise RuntimeError(
+                f"无法保存密码到 macOS 钥匙串：{security_error}"
+            ) from keyring_error
+
+
+def _set_security_password(service: str, account: str, password: str) -> None:
+    """Use Apple's signed CLI when a frozen Python keyring client is rejected."""
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/security",
+                "add-generic-password",
+                "-U",
+                "-a",
+                account,
+                "-s",
+                service,
+                "-X",
+                password.encode("utf-8").hex(),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(str(exc) or type(exc).__name__) from exc
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(detail or f"security 退出码 {result.returncode}")
+
+
+def _get_private_file_password(config: dict[str, Any]) -> str:
+    security = config.get("security") or {}
+    password_file_value = str(security.get("password_file") or "").strip()
+    if not password_file_value:
+        return ""
+    password_file = Path(password_file_value).expanduser()
+    try:
+        text = password_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if not text:
+        return ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        if key.strip() != "password":
+            continue
+        try:
+            parsed = json.loads(value.strip())
+        except json.JSONDecodeError:
+            return value.strip().strip("'\"")
+        return parsed if isinstance(parsed, str) else str(parsed)
+    return text.splitlines()[0].strip()
 
 
 def _set_private_file_password(config: dict[str, Any], password: str) -> None:

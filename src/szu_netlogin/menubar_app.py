@@ -28,7 +28,7 @@ if __package__ in (None, ""):
         PROJECT_ROOT,
         load_config,
     )
-    from src.szu_netlogin.password_store import describe_password_source, set_password
+    from src.szu_netlogin.password_store import describe_password_source, has_password, set_password
     from src.szu_netlogin.portal_detect import (
         NetworkStatus,
         classify_network_environment,
@@ -44,7 +44,7 @@ else:
         PROJECT_ROOT,
         load_config,
     )
-    from .password_store import describe_password_source, set_password
+    from .password_store import describe_password_source, has_password, set_password
     from .portal_detect import NetworkStatus, classify_network_environment, probe_network
     from .state import is_paused
 
@@ -57,11 +57,18 @@ else:
     RUMPS_IMPORT_ERROR = None
 
 try:
-    from Foundation import NSThread
+    from AppKit import NSControlStateValueOff, NSControlStateValueOn, NSSwitch, NSTextField, NSView
+    from Foundation import NSObject, NSThread
     from PyObjCTools import AppHelper
 except Exception:  # pragma: no cover - exercised on machines missing GUI deps
+    NSObject = object  # type: ignore[assignment,misc]
     NSThread = None  # type: ignore[assignment]
     AppHelper = None  # type: ignore[assignment]
+    NSView = None  # type: ignore[assignment]
+    NSTextField = None  # type: ignore[assignment]
+    NSSwitch = None  # type: ignore[assignment]
+    NSControlStateValueOff = 0
+    NSControlStateValueOn = 1
 
 
 MENUBAR_LOG_FILE = PROJECT_ROOT / "logs" / "menubar.log"
@@ -82,6 +89,20 @@ LAUNCHAGENT_LABELS = (
     "com.fonsi.szu-dorm-drcom",
     "com.szu.autologin",
 )
+
+
+class MenuSwitchTarget(NSObject):
+    """Retained Objective-C target that forwards an NSSwitch click to Python."""
+
+    def initWithCallback_(self, callback: Callable[[Any], None]):
+        self = self.init()
+        if self is None:
+            return None
+        self.callback = callback
+        return self
+
+    def switchChanged_(self, sender: Any) -> None:
+        self.callback(sender)
 
 
 def get_bundled_resource_root() -> Path:
@@ -236,6 +257,7 @@ class SzuDormMenubarApp(RumpsAppBase):
         self._last_status_result: StatusRefreshResult | None = None
         self._worker_lock = threading.Lock()
         self._background_results: Queue[tuple[str, Any]] = Queue()
+        self._switch_controls: dict[str, Any] = {}
         self._auto_login_schedule = AutoLoginBackoff(
             AUTO_LOGIN_BACKOFF_SECONDS,
             AUTO_LOGIN_INITIAL_DELAY_SECONDS,
@@ -298,6 +320,19 @@ class SzuDormMenubarApp(RumpsAppBase):
             ],
             quit_button=None,
         )
+
+        self._install_menu_switch("auto_login", self.pause_item, self.toggle_pause)
+        self._install_menu_switch(
+            "network_probe",
+            self.network_probe_item,
+            self.toggle_network_probe,
+        )
+        self._install_menu_switch(
+            "launchagent",
+            self.launchagent_item,
+            self.toggle_launchagent,
+        )
+        self._update_launchagent_item_title()
 
         self.timer = rumps.Timer(self.refresh_status, STATUS_REFRESH_SECONDS)
         self.timer.start()
@@ -387,6 +422,7 @@ class SzuDormMenubarApp(RumpsAppBase):
         self._update_network_probe_item_title()
         self.pause_item.title = "自动登录"
         self.pause_item.state = 0 if result.paused else 1
+        self._set_switch_state("auto_login", not result.paused)
 
         if not result.network_probe_enabled:
             self.status_item.title = run_label
@@ -523,6 +559,7 @@ class SzuDormMenubarApp(RumpsAppBase):
                 with self._worker_lock:
                     self._menu_action_in_progress = False
                 if error is not None:
+                    self._set_login_busy(False)
                     self._handle_exception("菜单操作失败", error)
                     continue
                 completion(result)
@@ -535,14 +572,27 @@ class SzuDormMenubarApp(RumpsAppBase):
     def login_now(self, _sender: Any) -> None:
         try:
             self.logger.info("用户点击：立即登录")
+            config = load_config()
+            username = get_username(config)
+            if not is_username_set(username):
+                rumps.alert("无法登录", "请先在“账号与凭据 → 修改账号”中设置校园网账号。")
+                return
+            if not has_password(config) and not self._prompt_and_save_password(config, username):
+                return
+
+            self._set_login_busy(True)
             self._run_menu_action(
                 lambda: self._run_control_process(["login-now"], timeout=60),
                 self._finish_login_now,
             )
+        except ConfigError as exc:
+            rumps.alert("无法登录", str(exc))
         except Exception as exc:
+            self._set_login_busy(False)
             self._handle_exception("立即登录失败", exc)
 
     def _finish_login_now(self, result: subprocess.CompletedProcess[str]) -> None:
+        self._set_login_busy(False)
         output = f"{result.stdout}\n{result.stderr}"
         if result.returncode == 0:
             self._auto_login_schedule.record_success()
@@ -665,31 +715,10 @@ class SzuDormMenubarApp(RumpsAppBase):
                 )
                 return
 
-            response = rumps.Window(
-                message=f"请输入 {mask_username(username)} 的校园网密码：",
-                title="修改密码",
-                ok="保存",
-                cancel="取消",
-                dimensions=(320, 120),
-                secure=True,
-            ).run()
-            if not response.clicked:
-                return
-
-            password = response.text
-            if not password:
-                rumps.alert("修改密码失败", "密码不能为空，未保存。")
-                return
-
-            password_source_label = describe_password_source(config)
-            set_password(config, password)
-            self.logger.info(
-                "密码已保存：source=%s username=%s",
-                password_source_label,
-                mask_username(username),
-            )
-            rumps.notification("SZU Dorm", "密码已保存", f"已保存到 {password_source_label}。")
-            self.refresh_status(None)
+            if self._prompt_and_save_password(config, username, title="修改密码"):
+                password_source_label = describe_password_source(config)
+                rumps.notification("SZU Dorm", "密码已保存", f"已保存到 {password_source_label}。")
+                self.refresh_status(None)
         except ValueError as exc:
             rumps.alert("修改密码失败", str(exc))
         except Exception as exc:
@@ -800,12 +829,92 @@ class SzuDormMenubarApp(RumpsAppBase):
     def _update_network_probe_item_title(self) -> None:
         self.network_probe_item.title = "联网状态探测"
         self.network_probe_item.state = 1 if self._network_probe_enabled else 0
+        self._set_switch_state("network_probe", self._network_probe_enabled)
 
     def _update_launchagent_item_title(self) -> None:
         item = getattr(self, "launchagent_item", None)
         if item is not None:
             item.title = "开机自动运行"
-            item.state = 1 if is_launchagent_installed() else 0
+            installed = is_launchagent_installed()
+            item.state = 1 if installed else 0
+            self._set_switch_state("launchagent", installed)
+
+    def _install_menu_switch(
+        self,
+        key: str,
+        menu_item: Any,
+        callback: Callable[[Any], None],
+    ) -> None:
+        """Replace a checkmark menu row with a Settings-style macOS switch."""
+        native_item = getattr(menu_item, "_menuitem", None)
+        if NSView is None or native_item is None:
+            return
+
+        row = NSView.alloc().initWithFrame_(((0, 0), (260, 30)))
+        label = NSTextField.labelWithString_(menu_item.title)
+        label.setFrame_(((14, 6), (188, 18)))
+        switch = NSSwitch.alloc().initWithFrame_(((207, 4), (42, 22)))
+        switch.setState_(NSControlStateValueOn if bool(menu_item.state) else NSControlStateValueOff)
+        target = MenuSwitchTarget.alloc().initWithCallback_(callback)
+        switch.setTarget_(target)
+        switch.setAction_("switchChanged:")
+        row.addSubview_(label)
+        row.addSubview_(switch)
+        native_item.setView_(row)
+        self._switch_controls[key] = (row, label, switch, target)
+
+    def _set_switch_state(self, key: str, enabled: bool) -> None:
+        controls = getattr(self, "_switch_controls", {}).get(key)
+        if controls is None:
+            return
+        controls[2].setState_(NSControlStateValueOn if enabled else NSControlStateValueOff)
+
+    def _set_login_busy(self, busy: bool) -> None:
+        item = getattr(self, "login_item", None)
+        if item is None:
+            return
+        item.title = "正在登录…" if busy else "立即登录"
+        native_item = getattr(item, "_menuitem", None)
+        if native_item is not None:
+            native_item.setEnabled_(not busy)
+
+    def _prompt_and_save_password(
+        self,
+        config: dict[str, Any],
+        username: str,
+        title: str = "登录需要密码",
+    ) -> bool:
+        security = config.get("security") or {}
+        if str(security.get("password_source", "env")) == "env":
+            rumps.alert(
+                "无法保存密码",
+                f"当前密码来源是 {describe_password_source(config)}，"
+                "请把 security.password_source 改为 keychain 或 private_file。",
+            )
+            return False
+
+        response = rumps.Window(
+            message=f"请输入 {mask_username(username)} 的校园网密码：",
+            title=title,
+            ok="保存并继续" if title == "登录需要密码" else "保存",
+            cancel="取消",
+            dimensions=(320, 120),
+            secure=True,
+        ).run()
+        if not response.clicked:
+            return False
+        if not response.text:
+            rumps.alert("无法保存密码", "密码不能为空。")
+            return False
+
+        password_source_label = describe_password_source(config)
+        set_password(config, response.text)
+        self.logger.info(
+            "密码已保存：source=%s username=%s",
+            password_source_label,
+            mask_username(username),
+        )
+        return True
 
     def _run_simple_control_action(self, command: str, error_title: str) -> None:
         try:
