@@ -63,7 +63,9 @@ chmod 644 "${TARGET_PLIST}"
 PASSWORD_ENV_NAME="${SZU_NETLOGIN_PASSWORD_ENV_NAME:-$(cd "${CONFIG_HOME}" 2>/dev/null && "${PYTHON_BIN}" -c 'from src.szu_netlogin.config import get_password_env_name, load_config; print(get_password_env_name(load_config()))' 2>/dev/null || true)}"
 PASSWORD_VALUE=""
 if [[ -n "${PASSWORD_ENV_NAME}" ]]; then
-  PASSWORD_VALUE="${(P)PASSWORD_ENV_NAME}"
+  # printenv returns a non-zero status for an unset variable.  Reading it this
+  # way keeps `set -u` from turning an optional password into a script crash.
+  PASSWORD_VALUE="$(printenv "${PASSWORD_ENV_NAME}" 2>/dev/null || true)"
 fi
 if [[ -n "${PASSWORD_ENV_NAME}" && -n "${PASSWORD_VALUE}" ]]; then
   launchctl setenv "${PASSWORD_ENV_NAME}" "${PASSWORD_VALUE}"

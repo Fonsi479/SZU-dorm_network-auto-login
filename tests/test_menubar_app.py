@@ -189,7 +189,8 @@ class NetworkProbeToggleTests(unittest.TestCase):
         self.assertFalse(app._network_probe_enabled)
         self.assertTrue(app.timer.stopped)
         self.assertTrue(app.watchdog_timer.stopped)
-        self.assertEqual(app.network_probe_item.title, "开启联网状态探测")
+        self.assertEqual(app.network_probe_item.title, "联网状态探测")
+        self.assertEqual(app.network_probe_item.state, 0)
         rumps.quit_application.assert_called_once_with()
 
 
@@ -200,6 +201,7 @@ class MenubarMenuTests(unittest.TestCase):
                 self.title = title
                 self.callback = callback
                 self.children = []
+                self.state = 0
 
             def add(self, item) -> None:
                 self.children.append(item)
@@ -228,18 +230,25 @@ class MenubarMenuTests(unittest.TestCase):
             SzuDormMenubarApp()
 
         menu = app_init.call_args.kwargs["menu"]
-        titles = [item.title for item in menu]
+        titles = [item.title if item is not None else None for item in menu]
         self.assertIn("诊断与维护", titles)
-        self.assertIn("安装开机自启", titles)
-        self.assertNotIn("卸载开机自启", titles)
-        self.assertNotIn("重装开机自启", titles)
-        diagnostics = next(item for item in menu if item.title == "诊断与维护")
+        self.assertIn("开机自动运行", titles)
+        self.assertIn("账号与凭据", titles)
+        self.assertEqual(titles.count(None), 3)
+        diagnostics = next(
+            item for item in menu if item is not None and item.title == "诊断与维护"
+        )
         self.assertEqual(
             [item.title for item in diagnostics.children],
             ["生成诊断报告", "打开配置文件", "打开日志", "重置暂停状态", "检查依赖"],
         )
         for child in diagnostics.children:
             self.assertNotIn(child, menu)
+        account = next(item for item in menu if item is not None and item.title == "账号与凭据")
+        self.assertEqual([item.title for item in account.children], ["修改账号", "修改密码"])
+        self.assertEqual(next(item for item in menu if item is not None and item.title == "自动登录").state, 1)
+        self.assertEqual(next(item for item in menu if item is not None and item.title == "联网状态探测").state, 1)
+        self.assertEqual(next(item for item in menu if item is not None and item.title == "开机自动运行").state, 0)
         self.assertNotIn("退出账号（暂停 30 分钟）", titles)
         self.assertNotIn("退出账号（下次开机恢复）", titles)
         self.assertNotIn("写入 SZU_NETLOGIN_HOME", titles)

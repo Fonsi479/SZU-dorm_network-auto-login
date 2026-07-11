@@ -243,17 +243,21 @@ class SzuDormMenubarApp(RumpsAppBase):
         self._warn_if_config_missing()
         self._warn_if_optional_dependencies_missing()
 
-        self.status_item = rumps.MenuItem("状态：正在检查...")
+        self.status_item = rumps.MenuItem("正在检查网络…")
         self.login_item = rumps.MenuItem("立即登录", callback=self.login_now)
-        self.logout_item = rumps.MenuItem("退出账号（手动恢复）", callback=self.logout_now)
-        self.logout_hint_item = rumps.MenuItem("退出账号会先暂停自动登录，避免马上重新登录")
-        self.pause_item = rumps.MenuItem("暂停自动登录", callback=self.toggle_pause)
+        self.logout_item = rumps.MenuItem("退出当前账号", callback=self.logout_now)
+        self.pause_item = rumps.MenuItem("自动登录", callback=self.toggle_pause)
+        self.pause_item.state = 1
         self.network_probe_item = rumps.MenuItem(
-            "关闭联网状态探测",
+            "联网状态探测",
             callback=self.toggle_network_probe,
         )
+        self.network_probe_item.state = 1
         self.username_item = rumps.MenuItem("修改账号", callback=self.change_username)
         self.password_item = rumps.MenuItem("修改密码", callback=self.change_password)
+        self.account_item = rumps.MenuItem("账号与凭据")
+        self.account_item.add(self.username_item)
+        self.account_item.add(self.password_item)
         self.diagnostic_report_item = rumps.MenuItem(
             "生成诊断报告",
             callback=self.generate_diagnostic_report,
@@ -271,7 +275,7 @@ class SzuDormMenubarApp(RumpsAppBase):
             self.check_dependencies_item,
         ):
             self.diagnostics_item.add(item)
-        self.launchagent_item = rumps.MenuItem("安装开机自启", callback=self.toggle_launchagent)
+        self.launchagent_item = rumps.MenuItem("开机自动运行", callback=self.toggle_launchagent)
         self._update_launchagent_item_title()
         self.quit_item = rumps.MenuItem("退出状态栏客户端", callback=self.quit_app)
 
@@ -280,15 +284,16 @@ class SzuDormMenubarApp(RumpsAppBase):
             title="SZU Dorm",
             menu=[
                 self.status_item,
+                None,
                 self.login_item,
                 self.logout_item,
-                self.logout_hint_item,
                 self.pause_item,
+                None,
                 self.network_probe_item,
-                self.username_item,
-                self.password_item,
+                self.account_item,
                 self.diagnostics_item,
                 self.launchagent_item,
+                None,
                 self.quit_item,
             ],
             quit_button=None,
@@ -380,24 +385,28 @@ class SzuDormMenubarApp(RumpsAppBase):
         self._last_status_result = result
         run_label = auto_login_state_label(result.paused, result)
         self._update_network_probe_item_title()
-        self.pause_item.title = "恢复自动登录" if result.paused else "暂停自动登录"
+        self.pause_item.title = "自动登录"
+        self.pause_item.state = 0 if result.paused else 1
 
         if not result.network_probe_enabled:
-            self.status_item.title = f"状态：{run_label}"
+            self.status_item.title = run_label
             self.logger.info(
                 "状态刷新：联网状态探测已关闭，时间=%s",
                 datetime.now().strftime("%H:%M:%S"),
             )
             return
 
-        campus_label = (
-            "校园网出口已连通" if result.network_status.campus_internet_ok else "校园网出口未连通"
-        )
+        campus_label = "外网已连接" if result.network_status.campus_internet_ok else "外网未连接"
         gateway_label = "网关可达" if result.network_status.gateway_reachable else "网关不可达"
         environment_label = result.environment_label or "网络环境未知"
-        self.status_item.title = (
-            f"状态：{run_label}｜{environment_label}｜{campus_label}｜{gateway_label}"
-        )
+        if result.config_error:
+            self.status_item.title = "⚠︎  配置需要检查"
+        elif result.network_status.campus_internet_ok:
+            self.status_item.title = f"●  网络已连接  ·  {environment_label}"
+        elif result.network_status.gateway_reachable:
+            self.status_item.title = f"◐  等待登录  ·  {environment_label}"
+        else:
+            self.status_item.title = f"○  网络未连接  ·  {environment_label}"
         message = (
             f"状态刷新：{run_label}，{environment_label}，{campus_label}，{gateway_label}，"
             f"source_ip={result.network_status.source_ip or '-'}，"
@@ -789,14 +798,14 @@ class SzuDormMenubarApp(RumpsAppBase):
             self.logger.warning("%s停止失败：%s", label, exc)
 
     def _update_network_probe_item_title(self) -> None:
-        self.network_probe_item.title = (
-            "关闭联网状态探测" if self._network_probe_enabled else "开启联网状态探测"
-        )
+        self.network_probe_item.title = "联网状态探测"
+        self.network_probe_item.state = 1 if self._network_probe_enabled else 0
 
     def _update_launchagent_item_title(self) -> None:
         item = getattr(self, "launchagent_item", None)
         if item is not None:
-            item.title = "卸载开机自启" if is_launchagent_installed() else "安装开机自启"
+            item.title = "开机自动运行"
+            item.state = 1 if is_launchagent_installed() else 0
 
     def _run_simple_control_action(self, command: str, error_title: str) -> None:
         try:
