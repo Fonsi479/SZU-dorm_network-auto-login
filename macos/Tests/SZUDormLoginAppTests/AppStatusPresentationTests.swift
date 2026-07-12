@@ -15,8 +15,8 @@ struct AppStatusPresentationTests {
     func internetProbeDoesNotOverrideOfflineSession() {
         let presentation = make(session: .offline, internetOK: true, autoLoginEnabled: true)
 
-        #expect(presentation.text.contains("会话已离线"))
-        #expect(!presentation.text.contains("会话已在线"))
+        #expect(presentation.text == "●  校园网离线")
+        #expect(presentation.detail == "宿舍网络  ·  外网可用  ·  IP 172.24.59.154")
         #expect(presentation.tone == .warning)
     }
 
@@ -24,8 +24,7 @@ struct AppStatusPresentationTests {
     func internetProbeDoesNotOverrideUnknownSession() {
         let presentation = make(session: .unknown, internetOK: true, autoLoginEnabled: true)
 
-        #expect(presentation.text.contains("会话待确认"))
-        #expect(presentation.detail.contains("门户会话未知"))
+        #expect(presentation.text == "●  校园网状态待确认")
         #expect(presentation.tone == .warning)
     }
 
@@ -33,8 +32,8 @@ struct AppStatusPresentationTests {
     func verifiedSessionOutranksInternetProbeFailure() {
         let presentation = make(session: .online, internetOK: false, autoLoginEnabled: true)
 
-        #expect(presentation.text.contains("会话已在线"))
-        #expect(presentation.detail.contains("外网探测不可达"))
+        #expect(presentation.text == "●  校园网在线")
+        #expect(presentation.detail.contains("外网不可用"))
         #expect(presentation.tone == .warning)
     }
 

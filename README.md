@@ -1,20 +1,23 @@
-# SZU Dorm Login for macOS
+# SZU Dorm Login
 
-深圳大学宿舍区 Dr.COM / ePortal 自动登录工具。macOS 版从 `2.0.0` 开始使用纯 Swift 重写，不包含 Python 解释器、PyInstaller、rumps 或 PyObjC。
+深圳大学宿舍区 Dr.COM / ePortal 自动登录工具。仓库按平台和技术栈维护三条相互独立的版本线。
 
-## 平台已经完全分离
+## 三个版本
 
-| 平台 | Git 分支 | 技术栈 | 发布物 |
-|---|---|---|---|
-| macOS | `main` | Swift、AppKit、SwiftUI、Security、ServiceManagement | 原生 `.app` |
-| Windows | `windows` | Python、Tkinter、requests、keyring | 独立 Windows 压缩包 |
+| 版本 | 适用平台 | Git 分支 | 技术栈 | 维护状态 |
+|---|---|---|---|---|
+| `macpython` | macOS | `macpython` | Python、rumps、PyObjC | 已停止维护 |
+| `macswift` | macOS | `macswift` | Swift、AppKit、SwiftUI、Security、ServiceManagement | 当前推荐 |
+| `winpython` | Windows | `winpython` | Python、Tkinter、requests、keyring | 独立维护 |
 
-两个平台拥有独立的界面、启动机制、构建脚本、测试和 Release。`main` 不再携带 Python 客户端；Windows 的 Python 源码仍完整保留在 `windows` 分支。
+`macpython` 是旧版 macOS Python 客户端，仅保留用于历史兼容和迁移参考，不再接收新功能、缺陷修复或维护更新。macOS 用户建议使用 `macswift`：它是原生 Swift 版本，运行时不需要 Python，启动和状态栏集成也更稳定。Windows 用户使用 `winpython`。
+
+三个版本拥有独立的界面、启动机制、构建脚本、测试和 Release，不会把旧 macOS Python 客户端、macOS Swift 客户端和 Windows 客户端混在同一发布物中。
 
 如需开发 Windows 版：
 
 ```bash
-git switch windows
+git switch winpython
 ```
 
 ## macOS 功能
@@ -175,9 +178,10 @@ config.example.json                        可公开的原生配置示例
 
 ## Release 约定
 
-- macOS Release：从 `main` 构建，只包含原生 Swift `.app` 和 macOS 源码
-- Windows Release：从 `windows` 分支构建，只包含 Python Windows 客户端
-- 两个平台不复用安装包，也不把另一平台的桌面代码混入 Release
+- `macpython` Release：仅提供旧版 macOS Python 客户端的历史归档，不再维护
+- `macswift` Release：只包含原生 Swift `.app` 和 macOS Swift 源码，macOS 用户优先选择此版本
+- `winpython` Release：只包含 Python Windows 客户端和独立 Windows 压缩包
+- 三个版本不复用安装包，也不把其他版本的桌面代码混入 Release
 
 ## 致谢
 

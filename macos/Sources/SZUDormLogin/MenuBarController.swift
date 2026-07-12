@@ -125,7 +125,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         model.$statusDetail
             .receive(on: RunLoop.main)
-            .sink { [weak self] detail in self?.detailMenuItem.title = detail }
+            .sink { [weak self] detail in self?.updateStatusDetail(detail) }
             .store(in: &cancellables)
 
         Publishers.CombineLatest4(
@@ -188,6 +188,16 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             ]
         )
         statusItem.button?.toolTip = "\(text)\n\(model.statusDetail)"
+    }
+
+    private func updateStatusDetail(_ detail: String) {
+        detailMenuItem.attributedTitle = NSAttributedString(
+            string: detail,
+            attributes: [
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .font: NSFont.systemFont(ofSize: 11),
+            ]
+        )
     }
 
     private func actionItem(

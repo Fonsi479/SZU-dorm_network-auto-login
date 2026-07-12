@@ -14,20 +14,20 @@ struct AppStatusPresentation: Equatable {
         let text: String
         let tone: AppModel.StatusTone
         if !status.gatewayReachable {
-            text = "●  网络未连接  ·  \(environment.label)"
+            text = "●  校园网未连接"
             tone = .failure
         } else {
             switch status.campusSessionState {
             case .online:
-                text = "●  校园网会话已在线  ·  \(environment.label)"
+                text = "●  校园网在线"
                 tone = status.campusInternetOK ? .success : .warning
             case .offline:
                 text = autoLoginEnabled
-                    ? "●  校园网会话已离线  ·  \(environment.label)"
-                    : "●  已退出校园网  ·  \(environment.label)"
+                    ? "●  校园网离线"
+                    : "●  已退出校园网"
                 tone = autoLoginEnabled ? .warning : .success
             case .unknown:
-                text = "●  校园网会话待确认  ·  \(environment.label)"
+                text = "●  校园网状态待确认"
                 tone = .warning
             }
         }
@@ -41,7 +41,13 @@ struct AppStatusPresentation: Equatable {
         }
         let internet = status.campusInternetOK ? "外网探测可达" : "外网探测不可达"
         let source = status.sourceIP.isEmpty ? "-" : status.sourceIP
-        let detail = "\(gateway) · \(session) · \(internet) · 源 IP \(source)"
+        let detail: String
+        if !status.gatewayReachable {
+            detail = "\(environment.label)  ·  \(gateway)  ·  IP \(source)"
+        } else {
+            let internetSummary = status.campusInternetOK ? "外网可用" : "外网不可用"
+            detail = "\(environment.label)  ·  \(internetSummary)  ·  IP \(source)"
+        }
 
         return AppStatusPresentation(
             text: text,
