@@ -4,70 +4,52 @@ set -euo pipefail
 APP_NAME="SZU Dorm Login"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
-APP_PATH="${PROJECT_ROOT}/dist/${APP_NAME}.app"
-EXEC_PATH="${APP_PATH}/Contents/MacOS/${APP_NAME}"
-INFO_PLIST="${APP_PATH}/Contents/Info.plist"
-MENUBAR_LOG="${PROJECT_ROOT}/logs/menubar.log"
-APP_HOME="${HOME}/Library/Application Support/szu-netlogin"
-EXPECTED_SHORT_VERSION="1.2.0"
-EXPECTED_BUILD_VERSION="3"
+APP_BUNDLE="${PROJECT_ROOT}/dist/${APP_NAME}.app"
+EXECUTABLE="${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+INFO_PLIST="${APP_BUNDLE}/Contents/Info.plist"
 
-fail() {
-  echo "验证失败：$1" >&2
+[[ -d "${APP_BUNDLE}" ]] || { echo "找不到 App：${APP_BUNDLE}" >&2; exit 1; }
+[[ -x "${EXECUTABLE}" ]] || { echo "App 可执行文件不存在或不可执行。" >&2; exit 1; }
+
+plutil -lint "${INFO_PLIST}" >/dev/null
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${INFO_PLIST}")"
+BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${INFO_PLIST}")"
+IDENTIFIER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${INFO_PLIST}")"
+MIN_SYSTEM="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "${INFO_PLIST}")"
+UI_ELEMENT="$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "${INFO_PLIST}")"
+
+[[ "${VERSION}" == "2.0.0" ]] || { echo "版本错误：${VERSION}" >&2; exit 1; }
+[[ "${BUILD}" == "1" ]] || { echo "构建号错误：${BUILD}" >&2; exit 1; }
+[[ "${IDENTIFIER}" == "com.szu-netlogin.dorm-login" ]] || { echo "Bundle ID 错误：${IDENTIFIER}" >&2; exit 1; }
+[[ "${MIN_SYSTEM}" == "13.0" ]] || { echo "最低系统版本错误：${MIN_SYSTEM}" >&2; exit 1; }
+[[ "${UI_ELEMENT}" == "true" ]] || { echo "App 未配置为状态栏应用。" >&2; exit 1; }
+
+VERSION_OUTPUT="$("${EXECUTABLE}" --version)"
+[[ "${VERSION_OUTPUT}" == *"native Swift"* ]] || { echo "可执行文件不是预期的 Swift 版本。" >&2; exit 1; }
+UI_SMOKE_OUTPUT="$("${EXECUTABLE}" --ui-smoke-test)"
+[[ "${UI_SMOKE_OUTPUT}" == *"初始化：正常"* ]] || { echo "状态栏 UI 初始化检查失败。" >&2; exit 1; }
+
+if otool -L "${EXECUTABLE}" | grep -Eiq 'python|libpython'; then
+  echo "App 仍链接了 Python 运行时。" >&2
   exit 1
-}
-
-echo "项目目录：${PROJECT_ROOT}"
-echo "App 路径：${APP_PATH}"
-
-[[ -d "${APP_PATH}" ]] || fail "找不到 app，请先运行 bash scripts/build_app.sh"
-[[ -f "${INFO_PLIST}" ]] || fail "找不到 Info.plist"
-[[ -x "${EXEC_PATH}" ]] || fail "主程序不存在或没有执行权限：${EXEC_PATH}"
-[[ -f "${APP_PATH}/Contents/Resources/scripts/install_launchagent.sh" ]] || fail "App 缺少 LaunchAgent 安装脚本"
-[[ -f "${APP_PATH}/Contents/Resources/launchd/com.szu-netlogin.dorm-drcom.plist" ]] || fail "App 缺少 LaunchAgent plist 模板"
-
-plutil -lint "${INFO_PLIST}" >/dev/null || fail "Info.plist 格式不正确"
-SHORT_VERSION="$(plutil -extract CFBundleShortVersionString raw -o - "${INFO_PLIST}")"
-BUILD_VERSION="$(plutil -extract CFBundleVersion raw -o - "${INFO_PLIST}")"
-[[ "${SHORT_VERSION}" == "${EXPECTED_SHORT_VERSION}" ]] || fail "App 版本应为 ${EXPECTED_SHORT_VERSION}，实际为 ${SHORT_VERSION}"
-[[ "${BUILD_VERSION}" == "${EXPECTED_BUILD_VERSION}" ]] || fail "App 构建号应为 ${EXPECTED_BUILD_VERSION}，实际为 ${BUILD_VERSION}"
-
-if ! "${EXEC_PATH}" --szu-netlogin-control check-dependencies >/dev/null 2>&1; then
-  fail "App 控制入口无法启动或依赖缺失"
 fi
-
-echo "App 包检查：通过（版本 ${SHORT_VERSION}，构建 ${BUILD_VERSION}）"
-
-if xattr -p com.apple.quarantine "${APP_PATH}" >/dev/null 2>&1; then
-  echo "提醒：App 带有 macOS 隔离标记，首次打开可能需要在 系统设置 -> 隐私与安全性 允许。"
-else
-  echo "macOS 隔离标记：未发现"
-fi
-
-if [[ -f "${MENUBAR_LOG}" && "${MENUBAR_LOG}" -nt "${EXEC_PATH}" ]]; then
-  echo
-  echo "本次构建后的菜单栏日志："
-  tail -n 12 "${MENUBAR_LOG}"
-elif [[ -f "${MENUBAR_LOG}" ]]; then
-  echo
-  echo "菜单栏日志早于本次构建，已跳过历史内容：${MENUBAR_LOG}"
-else
-  echo
-  echo "还没有菜单栏日志：${MENUBAR_LOG}"
-fi
-
-if [[ "${1:-}" == "--launch" ]]; then
-  mkdir -p "${APP_HOME}"
-  if [[ ! -f "${APP_HOME}/config.yaml" && -f "${PROJECT_ROOT}/config.yaml" ]]; then
-    cp -p "${PROJECT_ROOT}/config.yaml" "${APP_HOME}/config.yaml"
-    chmod 600 "${APP_HOME}/config.yaml" 2>/dev/null || true
-    echo "已把当前 config.yaml 复制到 App 配置目录：${APP_HOME}"
+for framework in AppKit Security ServiceManagement SwiftUI; do
+  if ! otool -L "${EXECUTABLE}" | grep -q "/${framework}.framework/"; then
+    echo "原生可执行文件未链接必要框架：${framework}" >&2
+    exit 1
   fi
-  launchctl setenv SZU_NETLOGIN_HOME "${APP_HOME}"
-  open "${APP_PATH}"
-  echo
-  echo "已请求打开 App。它是菜单栏 App，请看屏幕顶部的 SZU Dorm。"
-else
-  echo
-  echo "如需启动 App：scripts/verify_app.sh --launch"
+done
+if find "${APP_BUNDLE}/Contents" -iname '*python*' -print -quit | grep -q .; then
+  echo "App 包中仍包含 Python 文件。" >&2
+  exit 1
 fi
+
+codesign --verify --deep --strict "${APP_BUNDLE}"
+bash "${PROJECT_ROOT}/scripts/run_swift_checks.sh"
+
+SIZE="$(du -sh "${APP_BUNDLE}" | awk '{print $1}')"
+echo "App 验证通过：${APP_BUNDLE}"
+echo "版本：${VERSION}（${BUILD}）"
+echo "架构：$(lipo -archs "${EXECUTABLE}")"
+echo "大小：${SIZE}"
+echo "Python 运行时：未包含"

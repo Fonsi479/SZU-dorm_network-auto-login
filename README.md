@@ -1,200 +1,50 @@
-# SZU Dorm NetLogin
+# SZU Dorm Login for macOS
 
-深圳大学宿舍区 Dr.COM / ePortal 自动登录工具。`main` 分支面向 macOS 本地使用，包含共享登录核心、命令行控制、macOS 状态栏客户端和 LaunchAgent 自动检查脚本。
+深圳大学宿舍区 Dr.COM / ePortal 自动登录工具。macOS 版从 `2.0.0` 开始使用纯 Swift 重写，不包含 Python 解释器、PyInstaller、rumps 或 PyObjC。
 
-Windows 版不放入 `main` 分支源码包，会通过独立 GitHub Release 发布搬运包。
+## 平台已经完全分离
 
-## 功能
+| 平台 | Git 分支 | 技术栈 | 发布物 |
+|---|---|---|---|
+| macOS | `main` | Swift、AppKit、SwiftUI、Security、ServiceManagement | 原生 `.app` |
+| Windows | `windows` | Python、Tkinter、requests、keyring | 独立 Windows 压缩包 |
 
-- 自动检测校园网出口连通性，已登录时不会重复登录
-- 只在宿舍区网关可达且源 IP 符合校园网网段时尝试登录
-- 支持系统凭据库、环境变量或私有文件读取密码
-- 提供命令行控制：登录、退出、暂停、恢复、诊断
-- 提供 macOS 状态栏客户端，支持手动登录、退出账号、暂停恢复，以及悬浮展开的“诊断与维护”二级菜单
-- 支持用户级 LaunchAgent，登录 macOS 后自动检查
-- 登录失败会显示分级原因，后台自动登录连续失败时会按 2/5/10/15 分钟退避重试
-- 日志默认脱敏，不打印密码或完整登录 URL
+两个平台拥有独立的界面、启动机制、构建脚本、测试和 Release。`main` 不再携带 Python 客户端；Windows 的 Python 源码仍完整保留在 `windows` 分支。
 
-## 适用范围
-
-这个项目只面向深圳大学宿舍区 Dr.COM / ePortal 场景。
-
-它不处理教学区网络，不处理 srun，不需要 `sudo`，也不会把密码写进 `config.yaml`。
-
-## 安全提醒
-
-公开仓库只应提交源码、脚本、示例配置和文档。请不要提交 `config.yaml`、`logs/`、`build/`、`dist/`、私有密码文件、账号密码、Token 或本机绝对路径；这些本地文件已由默认 `.gitignore` 排除。
-
-## 安装依赖
+如需开发 Windows 版：
 
 ```bash
-python3 -m pip install -r requirements.txt
+git switch windows
 ```
 
-如需打包 macOS App：
+## macOS 功能
 
-```bash
-python3 -m pip install -r requirements-build.txt
-```
+- 自动检测宿舍区网关和校园网出口，网络已连接时不会重复登录
+- 只有网关可达且源 IP 落在配置的校园网段时，才允许后台发送账号密码
+- Dr.COM 登录请求使用 Swift BSD Socket，并显式绑定已检测的校园网源 IP
+- 支持登录、退出、暂停/恢复自动登录和关闭/开启联网探测
+- 登录失败后按 2/5/10/15 分钟退避重试，系统唤醒后立即补检
+- 使用 macOS Keychain 保存密码，配置文件和日志不保存密码
+- 使用 ServiceManagement 原生管理“登录时启动”，不再安装 Python LaunchAgent
+- 原生设置窗口、通知、诊断报告和脱敏轮转日志
+- 可自动导入 `1.x` 版 `config.yaml`，并提示移除旧 Python LaunchAgent
 
-## 快速开始
+本项目仅面向深圳大学宿舍区 Dr.COM / ePortal，不处理教学区网络或 srun。
 
-复制示例配置：
+## 系统要求
 
-```bash
-cp config.example.yaml config.yaml
-```
+- macOS 13 或更新版本
+- 本地构建需要 Apple Swift 工具链；安装 Xcode Command Line Tools 即可
+- 运行打包后的 App 不需要 Python，也不需要额外安装依赖
 
-设置校园网账号：
+## 构建、验证和运行
 
-```bash
-python3 -m src.szu_netlogin.control set-username 校园卡号
-```
-
-设置密码：
-
-```bash
-python3 -m src.szu_netlogin.control set-password
-```
-
-默认配置会把密码保存到系统凭据库，服务名为 `szu-netlogin`。macOS 对应 Keychain；如果 `config.yaml` 改成 `private_file`，则会写入配置的私有密码文件；`env` 模式需要手动设置环境变量。
-
-检查配置：
-
-```bash
-python3 -m src.szu_netlogin.login --dry-run
-```
-
-立即登录：
-
-```bash
-python3 -m src.szu_netlogin.login
-```
-
-只在校园网出口不可用且宿舍区网关可达时登录：
-
-```bash
-python3 -m src.szu_netlogin.login --check-and-login
-```
-
-## 常用命令
-
-查看状态：
-
-```bash
-python3 -m src.szu_netlogin.control status
-```
-
-暂停或恢复自动登录：
-
-```bash
-python3 -m src.szu_netlogin.control pause
-python3 -m src.szu_netlogin.control resume
-```
-
-退出校园网账号，并暂停自动登录直到手动恢复：
-
-```bash
-python3 -m src.szu_netlogin.control logout
-```
-
-退出后只暂停 30 分钟：
-
-```bash
-python3 -m src.szu_netlogin.control logout --pause-for 30m
-```
-
-退出后暂停到下次开机：
-
-```bash
-python3 -m src.szu_netlogin.control logout --pause-for next-boot
-```
-
-生成一键诊断报告：
-
-```bash
-python3 -m src.szu_netlogin.control generate-diagnostic-report
-```
-
-常见修复入口：
-
-```bash
-python3 -m src.szu_netlogin.control reset-pause
-python3 -m src.szu_netlogin.control check-dependencies
-python3 -m src.szu_netlogin.control set-project-home-env
-```
-
-打开配置、日志或项目目录：
-
-```bash
-python3 -m src.szu_netlogin.control open-config
-python3 -m src.szu_netlogin.control open-log
-python3 -m src.szu_netlogin.control open-project
-```
-
-## macOS 状态栏客户端
-
-启动状态栏客户端：
-
-```bash
-./scripts/run_menubar.sh
-```
-
-或直接运行：
-
-```bash
-python3 -m src.szu_netlogin.menubar_app
-```
-
-状态栏会显示 `SZU Dorm`。只要状态栏客户端正在运行且联网状态探测已开启，它会每 30 秒刷新状态，并且只在“宿舍区网关可达且校园网出口不可用”时启动后台自动登录；长时间睡眠后也会在唤醒时尽快补检。
-
-状态栏客户端日志：
-
-```bash
-tail -n 80 logs/menubar.log
-```
-
-登录日志：
-
-```bash
-tail -n 80 ~/Library/Logs/szu-netlogin/netlogin.log
-```
-
-状态栏中的开机自启入口会自动判断 LaunchAgent 是否已安装：未安装时显示“安装开机自启”，已安装时显示“卸载开机自启”。诊断报告、配置文件、日志、暂停状态重置和依赖检查统一收纳在“诊断与维护”二级菜单中。
-
-## 开机自启
-
-安装用户级 LaunchAgent：
-
-```bash
-./scripts/install_launchagent.sh
-```
-
-卸载：
-
-```bash
-./scripts/uninstall_launchagent.sh
-```
-
-LaunchAgent 标签为 `com.szu-netlogin.dorm-drcom`，对应用户级 plist 路径：
-
-```text
-~/Library/LaunchAgents/com.szu-netlogin.dorm-drcom.plist
-```
-
-查看 launchd 输出：
-
-```bash
-tail -n 80 ~/Library/Logs/szu-netlogin/launchagent.out.log
-tail -n 80 ~/Library/Logs/szu-netlogin/launchagent.err.log
-```
-
-## 打包 macOS App
-
-状态栏客户端可以通过 PyInstaller 打包成 `.app`：
+在仓库根目录执行：
 
 ```bash
 bash scripts/build_app.sh
+bash scripts/verify_app.sh
+bash scripts/open_menubar_app.sh
 ```
 
 生成结果：
@@ -203,77 +53,135 @@ bash scripts/build_app.sh
 dist/SZU Dorm Login.app
 ```
 
-当前 App 版本为 `1.2.0`（构建号 `3`）。
+构建脚本默认生成当前 Mac 架构的 App。验证会检查：
 
-验证 App：
+- Swift 核心行为检查
+- Bundle 元数据与版本
+- 代码签名完整性
+- 可执行架构
+- App 内没有 Python 文件或 `libpython` 链接
 
-```bash
-bash scripts/verify_app.sh
-```
-
-打开 App：
-
-```bash
-bash scripts/open_menubar_app.sh
-```
-
-`.app` 运行时会读取项目目录中的 `config.yaml`。项目目录查找顺序：
-
-1. 环境变量 `SZU_NETLOGIN_HOME`
-2. 打包后默认目录 `~/Library/Application Support/szu-netlogin`
-
-如果你想指定其他配置目录，可以先设置：
+源码开发时可直接运行：
 
 ```bash
-launchctl setenv SZU_NETLOGIN_HOME "/path/to/szu-netlogin"
+bash scripts/run_menubar.sh
 ```
 
-如果 macOS 提示无法验证开发者，请在系统设置的隐私与安全性页面允许打开。确认是 quarantine 标记导致时，也可以手动移除：
+运行纯 Swift 核心检查：
 
 ```bash
-xattr -dr com.apple.quarantine "dist/SZU Dorm Login.app"
+bash scripts/run_swift_checks.sh
 ```
 
-## GitHub Releases
+## 首次使用
 
-- macOS release：包含 `SZU Dorm Login.app` 压缩包和对应源码包，不包含 Windows 桌面客户端。
-- Windows release：单独发布 Windows 搬运包，和 macOS release 分开管理。
+打开 App 后，从状态栏的“账号与凭据 → 打开设置…”填写校园网账号。密码在设置窗口或“修改密码…”中保存，实际写入 macOS Keychain。
 
-## 项目结构
+原生配置文件位于：
 
 ```text
-src/szu_netlogin/        核心登录、检测、控制和 macOS 状态栏代码
-scripts/                 本地运行、打包、LaunchAgent 安装脚本
-launchd/                 LaunchAgent 模板
-packaging/               PyInstaller 配置
-config.example.yaml      可公开的示例配置
-diagnose.py              兼容诊断入口
+~/Library/Application Support/szu-netlogin/config.json
 ```
 
-## 致谢 / Acknowledgements
+日志位于：
 
-本项目在实现过程中参考和借鉴了以下开源项目与工具，在此表示感谢：
+```text
+~/Library/Logs/szu-netlogin/netlogin.log
+```
 
-* [1136623363/SZU-Drcom](https://github.com/1136623363/SZU-Drcom)
-  提供了深圳大学宿舍区 Dr.COM / ePortal 自动登录场景的参考，尤其是宿舍区网关与登录流程相关思路。
+诊断报告位于：
 
-* [Sleepstars/SZU-login](https://github.com/Sleepstars/SZU-login)
-  提供了深圳大学教学区与宿舍区网络认证差异的参考，尤其是教学区 srun 与宿舍区 ePortal/Dr.COM 的区分、配置文件和自动检测思路。
+```text
+~/Library/Logs/szu-netlogin/diagnostics/
+```
 
-* [ackness/szu-autoconnect](https://github.com/ackness/szu-autoconnect)
-  提供了深大校园网自动联网、保持在线以及 UI 化控制的参考思路。
+配置示例见 [`config.example.json`](config.example.json)。通常直接使用设置窗口即可，不需要手工编辑 JSON。
 
-* [ceynri/szu-network-connecter](https://github.com/ceynri/szu-network-connecter)
-  提供了深大校园网一键登录认证、浏览器插件交互和用户体验设计方面的参考。
+## 从 Python macOS 版迁移
 
-* [Sleepstars/SZU_Utils](https://github.com/Sleepstars/SZU_Utils)
-  提供了深大校园网实用脚本集合方面的参考。
+第一次启动 Swift App 时会按以下顺序处理旧数据：
 
-* [jaredks/rumps](https://github.com/jaredks/rumps)
-  本项目的 macOS 状态栏客户端基于 rumps 构建。
+1. 如果尚无 `config.json`，读取 `~/Library/Application Support/szu-netlogin/config.yaml`。
+2. 兼容读取 `SZU_NETLOGIN_HOME/config.yaml` 或开发目录中的 `config.yaml`。
+3. 把账号、网关、网段、门户参数和 Keychain 服务名写入权限为 `0600` 的 `config.json`。
+4. 继续使用原有 `szu-netlogin` Keychain 项目，不复制或显示密码。
+5. 如果检测到旧 Python LaunchAgent，明确询问后再移除，并迁移为 ServiceManagement 登录项。
 
-本项目主要面向个人学习与自用场景。若项目中存在直接引用、修改或复用上述项目代码的部分，请遵循对应项目的开源许可证要求，并在相关文件中保留原作者版权与许可证声明。
+旧配置不会被自动删除，可以在确认新版本工作正常后自行备份或清理。
 
-## 注意
+## 状态栏结构
 
-校园网接口可能会调整。如果登录或退出失败，先运行诊断命令并查看脱敏日志，再根据新的门户接口更新 `config.example.yaml` 或自己的 `config.yaml`。状态栏会检查宿舍区网关是否可达，并按系统默认网络路径检测外网是否可用。
+- 当前网络状态和探测详情
+- 立即登录
+- 退出当前账号
+- 自动登录
+- 联网状态探测
+- 账号与凭据
+  - 打开设置
+  - 修改账号
+  - 修改密码
+- 诊断与维护
+  - 生成诊断报告
+  - 打开配置文件
+  - 打开日志目录
+  - 重置暂停状态
+  - 运行原生自检
+- 登录时启动
+- 退出应用
+
+## 命令行入口
+
+打包后的 Swift 可执行文件也提供只读或控制入口：
+
+```bash
+"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --version
+"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --self-test
+"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --ui-smoke-test
+"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --probe
+"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --session-status
+"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --login
+"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --check-and-login
+"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --logout
+"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --diagnostic-report
+"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --launch-at-login-status
+"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --auto-login-status
+"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --pause-auto-login
+"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --resume-auto-login
+```
+
+## 源码结构
+
+```text
+macos/Package.swift                       Swift Package
+macos/Sources/SZUNetCore/                 配置、网络、Dr.COM、Keychain、状态和诊断核心
+macos/Sources/SZUDormLogin/                可测试的 AppKit/SwiftUI 应用层
+macos/Sources/SZUDormLoginExecutable/      极薄的应用启动入口
+macos/Tests/                               Swift Testing 自动化测试
+macos/Resources/Info.plist                 App Bundle 元数据
+scripts/build_app.sh                       Swift release 构建和 App 打包
+scripts/verify_app.sh                      App 完整性与无 Python 验证
+config.example.json                        可公开的原生配置示例
+```
+
+## 安全边界
+
+- 后台自动登录必须同时满足“宿舍区网关可达”和“源 IP 位于配置的校园网段”
+- 手动点击登录由用户明确触发，不经过自动登录环境门控
+- 密码只从 Keychain 读取，并在 HTTP 参数构造后直接发送给配置的 Dr.COM 地址
+- 日志会隐藏账号、密码和完整登录 URL
+- App 不需要 `sudo`，也不安装系统级守护进程
+
+公开仓库或 Release 中不要包含真实 `config.json`、旧 `config.yaml`、日志、诊断报告、账号密码、Token 或本机绝对路径。
+
+## Release 约定
+
+- macOS Release：从 `main` 构建，只包含原生 Swift `.app` 和 macOS 源码
+- Windows Release：从 `windows` 分支构建，只包含 Python Windows 客户端
+- 两个平台不复用安装包，也不把另一平台的桌面代码混入 Release
+
+## 致谢
+
+- [1136623363/SZU-Drcom](https://github.com/1136623363/SZU-Drcom)
+- [Sleepstars/SZU-login](https://github.com/Sleepstars/SZU-login)
+
+本项目采用 MIT License。

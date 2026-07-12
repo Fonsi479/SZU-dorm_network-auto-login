@@ -1,10 +1,10 @@
 __pycache__/
 *.pyc
 .DS_Store
-.env
-.venv/
-.venv-windows-build-*/
-venv/
+
+macos/.build/
+macos/.swiftpm/
+DerivedData/
 
 build/
 dist/
@@ -14,12 +14,12 @@ dist/
 logs/*
 !logs/.gitkeep
 
+config.json
 config.yaml
 *.local.yaml
 *.private.yaml
 
-# Windows desktop release files are published from a separate release tag,
-# not tracked on the macOS-focused main branch.
+# Windows desktop files live only on the independent `windows` branch.
 apps/windows_desktop/
 one_click_install_and_run.bat
 start_szu_dorm_login.bat

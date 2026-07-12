@@ -2,45 +2,41 @@
 set -euo pipefail
 
 APP_NAME="SZU Dorm Login"
-ENTRY="src/szu_netlogin/menubar_app.py"
-SPEC="packaging/SZUDormLogin.spec"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
-CURRENT_DIR="$(pwd -P)"
+PACKAGE_ROOT="${PROJECT_ROOT}/macos"
+APP_BUNDLE="${PROJECT_ROOT}/dist/${APP_NAME}.app"
+CONTENTS="${APP_BUNDLE}/Contents"
 
-if [[ "${CURRENT_DIR}" != "${PROJECT_ROOT}" ]]; then
+if [[ "$(pwd -P)" != "${PROJECT_ROOT}" ]]; then
   echo "请在项目根目录运行：bash scripts/build_app.sh" >&2
-  echo "当前目录：${CURRENT_DIR}" >&2
-  echo "项目根目录：${PROJECT_ROOT}" >&2
   exit 1
 fi
 
-if [[ ! -f "${ENTRY}" ]]; then
-  echo "找不到入口文件：${ENTRY}" >&2
+if ! command -v swift >/dev/null 2>&1; then
+  echo "未找到 Swift 编译器。请先安装 Xcode Command Line Tools。" >&2
   exit 1
 fi
 
-if ! command -v pyinstaller >/dev/null 2>&1; then
-  echo "未安装 PyInstaller。请先运行：python3 -m pip install pyinstaller" >&2
+echo "正在编译原生 Swift macOS 应用…"
+swift build --package-path "${PACKAGE_ROOT}" --configuration release --product SZUDormLogin
+BIN_DIR="$(swift build --package-path "${PACKAGE_ROOT}" --configuration release --show-bin-path)"
+SOURCE_EXECUTABLE="${BIN_DIR}/SZUDormLogin"
+
+if [[ ! -x "${SOURCE_EXECUTABLE}" ]]; then
+  echo "Swift 编译完成，但找不到可执行文件：${SOURCE_EXECUTABLE}" >&2
   exit 1
 fi
 
-if [[ ! -f "${SPEC}" ]]; then
-  echo "找不到 PyInstaller spec：${SPEC}" >&2
-  exit 1
-fi
+rm -rf "${APP_BUNDLE}"
+mkdir -p "${CONTENTS}/MacOS" "${CONTENTS}/Resources"
+cp "${SOURCE_EXECUTABLE}" "${CONTENTS}/MacOS/${APP_NAME}"
+cp "${PACKAGE_ROOT}/Resources/Info.plist" "${CONTENTS}/Info.plist"
+cp "${PROJECT_ROOT}/config.example.json" "${CONTENTS}/Resources/config.example.json"
+chmod 755 "${CONTENTS}/MacOS/${APP_NAME}"
 
-# SZUDormLogin.spec uses console=False, the spec-file equivalent of --windowed.
-export SZU_NETLOGIN_HOME="${PROJECT_ROOT}"
-pyinstaller --noconfirm --clean "${SPEC}"
+plutil -lint "${CONTENTS}/Info.plist" >/dev/null
+codesign --force --deep --sign - "${APP_BUNDLE}" >/dev/null
 
-if [[ ! -d "dist/${APP_NAME}.app" ]]; then
-  echo "打包失败：未生成 dist/${APP_NAME}.app" >&2
-  exit 1
-fi
-
-if [[ -d "dist/${APP_NAME}" ]]; then
-  rm -rf "dist/${APP_NAME}"
-fi
-
-echo "打包完成：dist/${APP_NAME}.app"
+echo "打包完成：${APP_BUNDLE}"
+echo "实现：纯 Swift / AppKit / SwiftUI（不包含 Python 运行时）"

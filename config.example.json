@@ -1,0 +1,43 @@
+{
+  "auth" : {
+    "accountPrefix" : ",1,",
+    "callback" : "dr1003",
+    "loginMethod" : "1",
+    "loginURL" : "http://172.30.255.42:801/eportal/portal/login",
+    "logoutCallback" : "dr1004",
+    "logoutJSVersion" : "4.1.3",
+    "logoutPageURL" : "",
+    "logoutURL" : "",
+    "timeoutSeconds" : 8,
+    "unbindURL" : ""
+  },
+  "network" : {
+    "campusSourceNetworks" : [
+      "172.16.0.0/12"
+    ],
+    "campusWiFiNames" : [
+      "SZU_CTC&CMCC"
+    ],
+    "gatewayHosts" : [
+      "172.30.255.42"
+    ],
+    "maxTestURLs" : 3,
+    "testURLs" : [
+      "http://captive.apple.com/hotspot-detect.html",
+      "http://www.baidu.com/",
+      "https://www.baidu.com/"
+    ],
+    "timeoutSeconds" : 3
+  },
+  "schemaVersion" : 1,
+  "security" : {
+    "keychainAccount" : "",
+    "keychainService" : "szu-netlogin",
+    "passwordEnvironmentName" : "SZU_NET_PASSWORD",
+    "passwordSource" : "keychain",
+    "privateFilePath" : "~/.szu-netlogin/password.yaml"
+  },
+  "user" : {
+    "username" : "你的校园卡号，不要写密码"
+  }
+}
