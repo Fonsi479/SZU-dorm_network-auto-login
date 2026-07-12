@@ -190,9 +190,9 @@ final class PortalLogoutTransaction {
 
     private func ackLabel(_ value: Bool?) -> String {
         switch value {
-        case true: return "accepted"
-        case false: return "rejected"
-        case nil: return "unknown"
+        case .some(true): return "accepted"
+        case .some(false): return "rejected"
+        case .none: return "unknown"
         }
     }
 }

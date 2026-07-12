@@ -83,7 +83,7 @@ public final class DrCOMClient {
 
             let parsed = PortalCodec.parseJSONP(response.bodyText)
             switch PortalResponseClassifier.success(parsed) {
-            case true:
+            case .some(true):
                 let verified = await PortalSessionReader(
                     configuration: configuration,
                     transport: transport,
@@ -103,7 +103,7 @@ public final class DrCOMClient {
                     httpStatus: response.statusCode,
                     sourceIP: sourceIP
                 )
-            case false:
+            case .some(false):
                 let reason = PortalResponseClassifier.containsPasswordError(
                     PortalResponseClassifier.responseText(parsed)
                 ) ? "password_error" : "server_failed"
@@ -113,7 +113,7 @@ public final class DrCOMClient {
                     httpStatus: response.statusCode,
                     sourceIP: sourceIP
                 )
-            case nil:
+            case .none:
                 return LoginResult(
                     status: .unknown,
                     reason: "portal_interface_changed",
