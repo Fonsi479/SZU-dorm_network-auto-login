@@ -55,7 +55,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func configureStatusItem() {
         if let button = statusItem.button {
-            button.title = "SZU Dorm"
+            button.title = ""
             button.image = NSImage(
                 systemSymbolName: "network",
                 accessibilityDescription: "SZU Dorm 网络状态"

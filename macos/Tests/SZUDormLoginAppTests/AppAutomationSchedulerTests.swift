@@ -1,9 +1,34 @@
 import Foundation
 import Testing
+import SZUNetCore
 @testable import SZUDormLoginApp
 
 @Suite("App automation scheduler", .serialized)
 struct AppAutomationSchedulerTests {
+    @Test("only entering a verified offline state opens the immediate reconnect path")
+    @MainActor
+    func onlyOfflineTransitionTriggersImmediateReconnect() {
+        #expect(AppModel.shouldAllowImmediateAutoLogin(previous: .online, current: .offline))
+        #expect(AppModel.shouldAllowImmediateAutoLogin(previous: .unknown, current: .offline))
+        #expect(AppModel.shouldAllowImmediateAutoLogin(previous: nil, current: .offline))
+        #expect(!AppModel.shouldAllowImmediateAutoLogin(previous: .offline, current: .offline))
+        #expect(!AppModel.shouldAllowImmediateAutoLogin(previous: .online, current: .unknown))
+        #expect(!AppModel.shouldAllowImmediateAutoLogin(previous: .offline, current: .online))
+    }
+
+    @Test("a detected disconnect bypasses an online success delay exactly once")
+    @MainActor
+    func disconnectAllowsOneImmediateAttempt() {
+        let scheduler = AppAutomationScheduler()
+
+        scheduler.recordAutoLoginSuccess()
+        #expect(!scheduler.consumeAutoLoginDeadline())
+
+        scheduler.allowImmediateAutoLogin()
+        #expect(scheduler.consumeAutoLoginDeadline())
+        #expect(!scheduler.consumeAutoLoginDeadline())
+    }
+
     @Test("cancelled probes cannot publish stale UI state")
     @MainActor
     func cancelledProbeCannotPublish() async {

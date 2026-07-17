@@ -38,6 +38,7 @@ extension AppModel {
 
         switch result {
         case .success(let snapshot):
+            let previousSessionState = lastNetworkStatus?.campusSessionState
             configuration = snapshot.configuration
             lastNetworkStatus = snapshot.status
             lastEnvironment = snapshot.environment
@@ -45,6 +46,15 @@ extension AppModel {
             updatePasswordState()
             if snapshot.status.campusSessionState == .online {
                 automation.recordAutoLoginSuccess()
+            } else if Self.shouldAllowImmediateAutoLogin(
+                previous: previousSessionState,
+                current: snapshot.status.campusSessionState
+            ) {
+                // An online probe continuously keeps the ordinary retry
+                // deadline in the future. Once the dorm portal is first seen
+                // offline, bypass that stale success delay exactly once.
+                automation.allowImmediateAutoLogin()
+                logger.info("检测到宿舍门户会话断开，立即放行一次自动登录。")
             }
             if allowAutoLogin {
                 maybeAutoLogin(status: snapshot.status, environment: snapshot.environment)
@@ -124,5 +134,20 @@ extension AppModel {
         statusText = "●  状态探测已关闭"
         statusTone = .neutral
         statusDetail = "周期性网关与联网检测已停止。"
+    }
+
+    func handleNetworkPathRestored() {
+        guard networkProbeEnabled else { return }
+        logger.info("检测到系统网络路径恢复，立即补做宿舍网络检查。")
+        automation.cancelProbe()
+        isRefreshing = false
+        refreshStatus()
+    }
+
+    static func shouldAllowImmediateAutoLogin(
+        previous: CampusSessionState?,
+        current: CampusSessionState
+    ) -> Bool {
+        current == .offline && previous != .offline
     }
 }

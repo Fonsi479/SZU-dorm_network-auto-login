@@ -34,6 +34,7 @@ let package = Package(
             path: "Sources/SZUDormLogin",
             linkerSettings: [
                 .linkedFramework("AppKit"),
+                .linkedFramework("Network"),
                 .linkedFramework("ServiceManagement"),
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("UserNotifications"),

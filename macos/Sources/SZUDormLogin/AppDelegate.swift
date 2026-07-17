@@ -5,6 +5,7 @@ import SZUNetCore
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var model: AppModel?
     private var menuBarController: MenuBarController?
+    private var networkPathObserver: NetworkPathObserver?
     private var wakeObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -29,6 +30,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in model?.handleWake() }
         }
 
+        let networkPathObserver = NetworkPathObserver()
+        self.networkPathObserver = networkPathObserver
+        networkPathObserver.start { [weak model] isAvailable in
+            if isAvailable {
+                model?.handleNetworkPathRestored()
+            }
+        }
+
         model.start()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak model] in
             LegacyLaunchAgentMigrationPrompt.offerIfNeeded(model: model)
@@ -36,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        networkPathObserver?.stop()
         model?.stop()
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)

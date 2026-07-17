@@ -11,7 +11,7 @@ extension AppModel {
         do {
             if enabled {
                 try coordinator.pauseStore.resume()
-                automation.recordAutoLoginSuccess()
+                automation.allowImmediateAutoLogin()
             } else {
                 try coordinator.pauseStore.pause()
             }
@@ -25,7 +25,7 @@ extension AppModel {
                 ),
                 false
             )
-            refreshStatus(allowAutoLogin: false)
+            refreshStatus(allowAutoLogin: enabled)
         } catch {
             onResult?(
                 LoginActionResult(
@@ -97,7 +97,7 @@ extension AppModel {
         do {
             try coordinator.pauseStore.resume()
             autoLoginEnabled = true
-            automation.recordAutoLoginSuccess()
+            automation.allowImmediateAutoLogin()
             onResult?(
                 LoginActionResult(
                     outcome: .unchanged,
@@ -107,7 +107,7 @@ extension AppModel {
                 ),
                 false
             )
-            refreshStatus(allowAutoLogin: false)
+            refreshStatus()
         } catch {
             onResult?(
                 LoginActionResult(

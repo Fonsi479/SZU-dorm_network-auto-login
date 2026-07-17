@@ -162,6 +162,10 @@ final class AppAutomationScheduler {
         backoff.recordSuccess()
     }
 
+    func allowImmediateAutoLogin() {
+        backoff.allowImmediateAttempt()
+    }
+
     func recordAutoLoginFailure() {
         backoff.recordFailure()
     }

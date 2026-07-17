@@ -35,6 +35,14 @@ public struct AutoLoginBackoff: Equatable {
         nextAttempt = date.addingTimeInterval(currentInterval)
     }
 
+    /// Opens one immediate attempt when a previously usable dorm session is
+    /// observed offline. Subsequent attempts still go through the normal
+    /// failure backoff, so an outage cannot create a tight login loop.
+    public mutating func allowImmediateAttempt(at date: Date = Date()) {
+        failureIndex = 0
+        nextAttempt = date
+    }
+
     public mutating func recordFailure(at date: Date = Date()) {
         failureIndex = min(failureIndex + 1, intervals.count - 1)
         nextAttempt = date.addingTimeInterval(currentInterval)
