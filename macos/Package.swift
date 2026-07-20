@@ -47,7 +47,11 @@ let package = Package(
         ),
         .target(
             name: "SZUNETFeature",
-            dependencies: ["SZUNetCore"]
+            dependencies: ["SZUNetCore"],
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("SwiftUI"),
+            ]
         ),
         .executableTarget(
             name: "SZUDormLogin",
