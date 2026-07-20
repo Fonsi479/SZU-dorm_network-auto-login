@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
   push:
     branches: [windows, winpython]
+  pull_request:
+    branches: [windows, winpython]
 
 env:
   PYTHONUTF8: "1"
-  pull_request:
-    branches: [windows, winpython]
 
 jobs:
   test-windows:
