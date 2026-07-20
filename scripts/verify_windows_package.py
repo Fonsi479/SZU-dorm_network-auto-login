@@ -110,7 +110,7 @@ def verify_executable(executable: Path) -> list[str]:
 
 def verify_release(root: Path) -> list[str]:
     failures = verify_executable(root / EXECUTABLE_NAME)
-    for relative in ("使用说明.txt", "SHA256.txt", "LICENSE.txt"):
+    for relative in ("README.txt", "SHA256.txt", "LICENSE.txt"):
         if not (root / relative).is_file():
             failures.append(f"发布目录缺少：{relative}")
     for path in root.rglob("*"):

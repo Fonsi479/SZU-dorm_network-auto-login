@@ -17,6 +17,11 @@ DEFAULT_VERSION = "1.2.0"
 EXECUTABLE_NAME = "SZU Dorm Login.exe"
 
 
+def write_utf8_lf(path: Path, text: str) -> None:
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", default=DEFAULT_VERSION)
@@ -44,11 +49,12 @@ def main(argv: list[str] | None = None) -> int:
     shutil.copy2(root / "LICENSE", package_root / "LICENSE.txt")
 
     digest = hashlib.sha256((package_root / EXECUTABLE_NAME).read_bytes()).hexdigest()
-    (package_root / "SHA256.txt").write_text(
+    write_utf8_lf(
+        package_root / "SHA256.txt",
         f"{digest}  {EXECUTABLE_NAME}\n",
-        encoding="utf-8",
     )
-    (package_root / "使用说明.txt").write_text(
+    write_utf8_lf(
+        package_root / "README.txt",
         "SZU Dorm Login Windows v"
         + args.version
         + "\n\n"
@@ -59,7 +65,6 @@ def main(argv: list[str] | None = None) -> int:
         + "5. 若 Windows SmartScreen 提示未知发布者，这是因为当前测试包未使用商业证书签名。\n\n"
         + "配置：%APPDATA%\\SZU Dorm NetLogin\\config.yaml\n"
         + "日志：%LOCALAPPDATA%\\SZU Dorm NetLogin\\Logs\\netlogin.log\n",
-        encoding="utf-8",
     )
 
     failures = verify_release(package_root)

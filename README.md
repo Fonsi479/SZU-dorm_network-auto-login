@@ -86,6 +86,6 @@ PyInstaller 必须在 Windows 上生成 Windows 可执行文件，因此仓库�
 
 - `main`：原生 Swift macOS 客户端。
 - `winpython` / `windows`：本 Windows 图形客户端。
-- 发布包只包含 `SZU Dorm Login.exe`、使用说明、许可证和 SHA-256，不包含 `.py`、`.bat`、PowerShell 或 macOS 文件。
+- 发布包只包含 `SZU Dorm Login.exe`、`README.txt`、许可证和 SHA-256，不包含 `.py`、`.bat`、PowerShell 或 macOS 文件。
 
 本工具只面向深圳大学宿舍区 Dr.COM / ePortal，不处理教学区 srun，也不用于绕过学校的账号或设备限制。
