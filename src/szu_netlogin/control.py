@@ -16,7 +16,12 @@ from .config import ConfigError, DEFAULT_CONFIG_PATH, PROJECT_HOME_ENV, PROJECT_
 from .logger import LOG_FILE, get_logger
 from .password_store import describe_password_source, has_password, set_password
 from .platform_paths import open_path_with_default_app
-from .portal_detect import NetworkStatus, classify_network_environment, probe_network
+from .portal_detect import (
+    NetworkStatus,
+    classify_network_environment,
+    probe_gateway,
+    probe_internet,
+)
 from .state import PAUSE_FLAG_FILE, describe_pause_state, is_paused, pause, resume
 
 
@@ -32,7 +37,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers.add_parser("resume", help="恢复自动登录")
     subparsers.add_parser("status", help="查看当前状态")
     subparsers.add_parser("login-now", help="立即登录")
-    subparsers.add_parser("check-and-login", help="检查校园网出口，不通时自动登录")
+    subparsers.add_parser("check-and-login", help="检查门户会话，确认离线时自动登录")
     subparsers.add_parser("diagnose", help="诊断当前网络状态")
     subparsers.add_parser("generate-diagnostic-report", help="生成一键诊断报告")
 
@@ -139,11 +144,20 @@ def print_status() -> int:
     config, config_error = _load_config_for_status()
     username = _get_username(config)
     launchagents = find_auto_login_launchagents() if sys.platform == "darwin" else []
-    network_status = probe_network(config) if config else NetworkStatus(False, False)
+    network_status = probe_gateway(config) if config else NetworkStatus(False, False)
+    portal_session = "unknown"
+    if config and _is_username_set(username):
+        from .dorm_drcom_client import DormDrcomClient
+
+        fact = DormDrcomClient(config).session_fact(username, network_status.source_ip)
+        portal_session = fact.state
+        if fact.matches(username, network_status.source_ip):
+            network_status = probe_internet(config, network_status)
 
     print("SZU Netlogin 状态")
     print(f"当前暂停状态：{describe_pause_state()}")
-    print(f"外网是否可用：{_yes_no(network_status.campus_internet_ok)}")
+    print(f"校园网门户会话：{portal_session}")
+    print(f"默认网络出口是否可用：{_yes_no(network_status.campus_internet_ok)}")
     print(f"宿舍区网关是否可达：{_yes_no(network_status.gateway_reachable)}")
     print(f"当前网络环境：{classify_network_environment(config, network_status).label}")
     print(f"源 IP：{network_status.source_ip or '-'}")
@@ -250,6 +264,11 @@ def logout_now(pause_for: str = "manual") -> int:
     if result.status == "success":
         if result.reason == "already_logged_out":
             print("退出结果：当前没有可退出的校园网会话。")
+            print(f"自动登录：{describe_pause_state()}")
+            return 0
+
+        if result.reason in ("portal_logout_verified", "unbind_verified"):
+            print("退出结果：门户会话已确认离线。")
             print(f"自动登录：{describe_pause_state()}")
             return 0
 
@@ -489,6 +508,14 @@ def _logout_failure_reason(reason: str) -> str:
         return "请求退出接口时发生网络异常。"
     if reason == "terminal_ip_not_found":
         return "无法从门户页或在线列表确定当前终端 IP。"
+    if reason == "source_ip_unverified":
+        return "未确认处于校园网源地址，未发送注销请求。"
+    if reason == "session_state_unknown":
+        return "门户会话状态暂时无法确认，未发送注销请求。"
+    if reason == "logout_not_confirmed":
+        return "注销接口已调用，但门户仍报告会话在线。"
+    if reason == "session_verification_unavailable":
+        return "注销后无法读取门户会话状态。"
     if reason == "server_failed":
         return "退出接口返回失败。"
     if reason == "server_unknown":
@@ -500,17 +527,19 @@ def _logout_failure_reason(reason: str) -> str:
 
 def _verify_campus_logged_out(config: dict[str, Any]) -> bool:
     try:
-        status = probe_network(config)
+        from .dorm_drcom_client import DormDrcomClient
+
+        username = _get_username(config)
+        status = probe_gateway(config)
+        if not status.gateway_reachable or not _is_username_set(username):
+            return False
+        fact = DormDrcomClient(config).session_fact(username, status.source_ip)
     except Exception as exc:
         get_logger().info("退出后校园网状态确认失败：%s", exc)
         return False
-    # A timeout/DNS failure is not evidence that the portal session was removed.
-    # Only the captive-portal signature from a successful probe sequence confirms it.
-    return (
-        status.gateway_reachable
-        and not status.campus_internet_ok
-        and status.internet_portal_redirect
-    )
+    # VPN/proxy reachability is intentionally irrelevant here.  Only the
+    # portal's own session fact can confirm logout.
+    return fact.state == "offline"
 
 
 def _replace_username(text: str, username: str) -> str:

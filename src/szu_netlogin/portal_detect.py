@@ -88,7 +88,26 @@ def probe_network(
     config: dict[str, Any] | None = None,
     timeout_seconds: int | None = None,
 ) -> NetworkStatus:
-    """Probe the dorm gateway path once and return a reusable status snapshot."""
+    """Probe the dorm gateway and default internet path.
+
+    Automatic login must not use this combined result as its authentication
+    gate.  The default internet path may be provided by a proxy or VPN; callers
+    that decide whether credentials may be sent should use ``probe_gateway``
+    followed by the portal's own session status instead.
+    """
+    gateway_status = probe_gateway(config, timeout_seconds=timeout_seconds)
+    return probe_internet(
+        config,
+        gateway_status,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def probe_gateway(
+    config: dict[str, Any] | None = None,
+    timeout_seconds: int | None = None,
+) -> NetworkStatus:
+    """Probe only the dorm portal route and record the OS-selected source IP."""
     timeout = timeout_seconds if timeout_seconds is not None else _get_timeout_seconds(config)
     gateway = _probe_gateway(config, timeout)
     if not gateway.reachable:
@@ -100,13 +119,33 @@ def probe_network(
             internet_reason="gateway_unreachable",
         )
 
-    internet = _probe_campus_internet(config, gateway.source_ip, timeout)
     return NetworkStatus(
         gateway_reachable=True,
-        campus_internet_ok=internet.ok,
+        campus_internet_ok=False,
         gateway_host=gateway.host,
         source_ip=gateway.source_ip,
         gateway_reason=gateway.reason,
+        internet_reason="not_probed",
+    )
+
+
+def probe_internet(
+    config: dict[str, Any] | None,
+    gateway_status: NetworkStatus,
+    timeout_seconds: int | None = None,
+) -> NetworkStatus:
+    """Add default-route internet reachability to a gateway status snapshot."""
+    if not gateway_status.gateway_reachable:
+        return gateway_status
+
+    timeout = timeout_seconds if timeout_seconds is not None else _get_timeout_seconds(config)
+    internet = _probe_campus_internet(config, gateway_status.source_ip, timeout)
+    return NetworkStatus(
+        gateway_reachable=True,
+        campus_internet_ok=internet.ok,
+        gateway_host=gateway_status.gateway_host,
+        source_ip=gateway_status.source_ip,
+        gateway_reason=gateway_status.gateway_reason,
         internet_reason=internet.reason,
         internet_route=internet.route,
         internet_portal_redirect=internet.portal_redirect,
@@ -397,7 +436,8 @@ def _get_campus_wifi_names(config: dict[str, Any] | None) -> set[str]:
     return {str(name).strip() for name in names if str(name).strip()}
 
 
-def _is_campus_source_ip(config: dict[str, Any] | None, source_ip: str) -> bool:
+def is_campus_source_ip(config: dict[str, Any] | None, source_ip: str) -> bool:
+    """Return whether a source address belongs to an explicitly allowed campus CIDR."""
     try:
         address = ipaddress.ip_address(source_ip)
     except ValueError:
@@ -411,6 +451,11 @@ def _is_campus_source_ip(config: dict[str, Any] | None, source_ip: str) -> bool:
         except ValueError:
             continue
     return False
+
+
+def _is_campus_source_ip(config: dict[str, Any] | None, source_ip: str) -> bool:
+    """Compatibility alias for older internal callers and tests."""
+    return is_campus_source_ip(config, source_ip)
 
 
 def _get_timeout_seconds(config: dict[str, Any] | None) -> int:

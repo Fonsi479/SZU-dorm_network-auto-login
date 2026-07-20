@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import socket
-import subprocess
+import time
 from dataclasses import dataclass
 from ipaddress import IPv4Address, AddressValueError
 from typing import Any, Literal
@@ -15,11 +14,11 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 import requests
 
 from .logger import get_logger, redact_sensitive_text
-from .platform_paths import run_subprocess_hidden
-from .portal_detect import SourceAddressAdapter
+from .portal_detect import SourceAddressAdapter, is_campus_source_ip
 
 LoginStatus = Literal["success", "failed", "unknown"]
 LogoutStatus = Literal["success", "failed", "unknown"]
+PortalSessionState = Literal["online", "offline", "unknown"]
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
@@ -55,6 +54,45 @@ class PortalTerminalParams:
     page_url: str = ""
 
 
+@dataclass(frozen=True)
+class PortalStatusResult:
+    readable: bool = False
+    declared_online: bool | None = None
+    account: str = ""
+    ip: str = ""
+    mac: str = ""
+    vlan: str = "0"
+    wlan_ac_ip: str = ""
+    wlan_ac_name: str = ""
+
+
+@dataclass(frozen=True)
+class PortalOnlineListResult:
+    readable: bool = False
+    exact_record: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class PortalSessionFact:
+    state: PortalSessionState = "unknown"
+    account: str = ""
+    ip: str = ""
+    mac: str = ""
+    vlan: str = "0"
+    wlan_ac_ip: str = ""
+    wlan_ac_name: str = ""
+    status_was_readable: bool = False
+    online_list_was_readable: bool = False
+    exact_online_record_present: bool | None = None
+
+    def matches(self, username: str, source_ip: str) -> bool:
+        expected_account = username.strip()
+        expected_ip = _normalize_ip(source_ip)
+        account_matches = not expected_account or self.account == expected_account
+        ip_matches = not expected_ip or self.ip == expected_ip
+        return self.state == "online" and account_matches and ip_matches
+
+
 class DormDrcomClient:
     """Client for the dorm Dr.COM login GET endpoint."""
 
@@ -77,12 +115,15 @@ class DormDrcomClient:
         self,
         username: str,
         terminal: PortalTerminalParams | None = None,
+        server_mac: str = "",
     ) -> dict[str, str]:
         terminal = terminal or self.discover_logout_terminal_params(username)
         return {
             "callback": str(self.auth.get("unbind_callback") or self.auth.get("callback") or "dr1003"),
             "user_account": username,
-            "wlan_user_mac": terminal.mac,
+            # MAC unbind uses only a server-reported session MAC.  The page's
+            # all-zero sentinel remains reserved for the logout request body.
+            "wlan_user_mac": _normalize_mac(server_mac) or terminal.mac,
             "wlan_user_ip": _ip_to_parse_int(terminal.ip),
             "jsVersion": terminal.js_version,
         }
@@ -117,16 +158,33 @@ class DormDrcomClient:
             return False
         return None
 
-    def login_with_result(self, username: str, password: str) -> LoginResult:
+    def login_with_result(
+        self,
+        username: str,
+        password: str,
+        known_source_ip: str = "",
+    ) -> LoginResult:
         params = self.build_login_params(username, password)
         timeout_seconds = int(self.auth["timeout_seconds"])
-        source_ip = _get_source_ip(str(self.auth["login_url"]), timeout_seconds)
-        if source_ip:
-            params["wlan_user_ip"] = source_ip
-            _add_terminal_mac_param(params, source_ip, self.logger)
-            adapter = SourceAddressAdapter(source_ip)
-            self.session.mount("http://", adapter)
-            self.session.mount("https://", adapter)
+        source_ip = _normalize_ip(known_source_ip) or _get_source_ip(
+            str(self.auth["login_url"]),
+            timeout_seconds,
+        )
+        if not is_campus_source_ip(self.config, source_ip):
+            self.logger.warning(
+                "宿舍区 Dr.COM 登录停止：源 IP 未通过校园网段校验 source_ip=%s",
+                source_ip or "-",
+            )
+            return LoginResult("failed", "source_ip_unverified", source_ip=source_ip)
+
+        params["wlan_user_ip"] = source_ip
+        # The live portal page owns terminal MAC selection.  Reading a Windows
+        # adapter MAC here is wrong for private/randomized MACs and can also
+        # select a virtual interface.  Login therefore deliberately omits
+        # wlan_user_mac, matching the current macOS client and deployed page.
+        adapter = SourceAddressAdapter(source_ip)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
 
         try:
             response = self.session.get(
@@ -177,9 +235,17 @@ class DormDrcomClient:
         result = self.is_success_response(parsed)
         self.logger.info("宿舍区 Dr.COM 登录判断结果：%s", _result_label(result))
         if result is True:
+            verified = self.verify_login(username, source_ip)
+            if verified is not True:
+                return LoginResult(
+                    "unknown",
+                    "login_not_confirmed" if verified is False else "session_verification_unavailable",
+                    http_status=response.status_code,
+                    source_ip=source_ip,
+                )
             return LoginResult(
                 "success",
-                "server_success",
+                "session_verified",
                 http_status=response.status_code,
                 source_ip=source_ip,
             )
@@ -197,6 +263,79 @@ class DormDrcomClient:
             source_ip=source_ip,
         )
 
+    def verify_login(self, username: str, source_ip: str) -> bool | None:
+        """Confirm an accepted login against the portal session itself."""
+        saw_definitive_mismatch = False
+        for delay in (0.0, 0.35, 0.9):
+            if delay:
+                time.sleep(delay)
+            fact = self.session_fact(username, source_ip)
+            if fact.matches(username, source_ip):
+                return True
+            if fact.state in ("online", "offline"):
+                saw_definitive_mismatch = True
+        return False if saw_definitive_mismatch else None
+
+    def session_fact(self, username: str, source_ip: str) -> PortalSessionFact:
+        """Read the exact portal session without consulting VPN adapters or the internet."""
+        source_ip = _normalize_ip(source_ip)
+        if source_ip:
+            adapter = SourceAddressAdapter(source_ip)
+            self.session.mount("http://", adapter)
+            self.session.mount("https://", adapter)
+
+        status = self._fetch_portal_status()
+        expected_account = status.account.strip() or username.strip()
+        expected_ip = status.ip or source_ip
+        online_list = self._fetch_online_list(expected_account, expected_ip)
+        record = online_list.exact_record or {}
+
+        account = str(record.get("user_account") or expected_account).strip()
+        ip = _normalize_ip(str(record.get("online_ip") or "")) or expected_ip
+        status_mac = _normalize_mac(status.mac)
+        record_mac = _normalize_mac(str(record.get("online_mac") or ""))
+        mac = (
+            _non_sentinel_mac(record_mac)
+            or _non_sentinel_mac(status_mac)
+            or status_mac
+            or record_mac
+        )
+        wlan_ac_ip = status.wlan_ac_ip or _nas_ip_to_dotted(record.get("nas_ip"))
+
+        if status.declared_online is False:
+            state: PortalSessionState = "offline"
+        elif status.declared_online is True:
+            state = "online"
+        elif online_list.exact_record is not None:
+            state = "online"
+        elif online_list.readable and expected_account and expected_ip:
+            state = "offline"
+        else:
+            state = "unknown"
+
+        fact = PortalSessionFact(
+            state=state,
+            account=account,
+            ip=ip,
+            mac=mac,
+            vlan=status.vlan or "0",
+            wlan_ac_ip=wlan_ac_ip,
+            wlan_ac_name=status.wlan_ac_name,
+            status_was_readable=status.readable,
+            online_list_was_readable=online_list.readable,
+            exact_online_record_present=(
+                online_list.exact_record is not None if online_list.readable else None
+            ),
+        )
+        self.logger.info(
+            "门户会话事实：state=%s account_match=%s ip_match=%s mac_source=%s",
+            fact.state,
+            fact.account == username.strip(),
+            fact.ip == source_ip,
+            "server" if fact.mac else "missing",
+        )
+        return fact
+
     def logout(self, username: str) -> LogoutResult:
         logout_url = self._get_logout_url()
         if not logout_url:
@@ -208,13 +347,29 @@ class DormDrcomClient:
             return LogoutResult("failed", "logout_url_invalid")
 
         timeout_seconds = int(self.auth["timeout_seconds"])
-        source_ip = _get_source_ip(logout_url, timeout_seconds)
-        if source_ip:
-            adapter = SourceAddressAdapter(source_ip)
-            self.session.mount("http://", adapter)
-            self.session.mount("https://", adapter)
+        source_ip = _normalize_ip(_get_source_ip(logout_url, timeout_seconds))
+        if not is_campus_source_ip(self.config, source_ip):
+            self.logger.warning(
+                "宿舍区 Dr.COM 退出停止：源 IP 未通过校园网段校验 source_ip=%s",
+                source_ip or "-",
+            )
+            return LogoutResult("failed", "source_ip_unverified")
 
-        terminal = self.discover_logout_terminal_params(username, source_ip=source_ip)
+        adapter = SourceAddressAdapter(source_ip)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+
+        before = self.session_fact(username, source_ip)
+        if before.state == "offline":
+            return LogoutResult("success", "already_logged_out")
+        if before.state == "unknown":
+            return LogoutResult("unknown", "session_state_unknown")
+
+        terminal = self.discover_logout_terminal_params(
+            username,
+            source_ip=source_ip,
+            session_fact=before,
+        )
         self.logger.info(
             "宿舍区 Dr.COM 退出终端参数：ip=%s mac=%s vlan=%s ac_ip=%s page_url=%s",
             terminal.ip,
@@ -227,9 +382,22 @@ class DormDrcomClient:
             self.logger.info("宿舍区 Dr.COM 退出失败：无法确定当前终端 IP")
             return LogoutResult("failed", "terminal_ip_not_found")
 
-        unbind_url = self._get_unbind_url(logout_url)
-        unbind_params = self.build_unbind_params(username, terminal)
-        self._request_logout_unbind(unbind_url, unbind_params, timeout_seconds)
+        if before.mac:
+            unbind_url = self._get_unbind_url(logout_url)
+            unbind_params = self.build_unbind_params(
+                before.account or username,
+                terminal,
+                server_mac=before.mac,
+            )
+            unbind_ack = self._request_logout_unbind(
+                unbind_url,
+                unbind_params,
+                timeout_seconds,
+            )
+            if unbind_ack is True and self._verified_session_state(username, source_ip) == "offline":
+                return LogoutResult("success", "unbind_verified")
+        else:
+            self.logger.info("门户未提供当前会话 MAC，跳过 MAC 解绑并继续注销。")
 
         params = self.build_logout_params(username, terminal)
 
@@ -246,6 +414,9 @@ class DormDrcomClient:
                 type(exc).__name__,
                 _safe_exception_summary(exc),
             )
+            state = self._verified_session_state(username, source_ip)
+            if state == "offline":
+                return LogoutResult("success", "portal_logout_verified")
             return LogoutResult("failed", "request_exception")
 
         preview = redact_sensitive_text(response.text[:200])
@@ -253,50 +424,64 @@ class DormDrcomClient:
         self.logger.info("宿舍区 Dr.COM 退出 HTTP 状态码=%s", response.status_code)
         self.logger.info("宿舍区 Dr.COM 退出响应前 200 字=%s", preview)
 
-        if response.status_code >= 500:
-            self.logger.info("宿舍区 Dr.COM 退出判断结果：不确定")
-            return LogoutResult("unknown", f"http_status_{response.status_code}")
+        parsed = self.parse_jsonp_response(response.text) if 200 <= response.status_code < 300 else None
+        acknowledgement = self.is_success_response(parsed) if parsed is not None else None
+        inactive = self.is_inactive_logout_response(parsed) if parsed is not None else False
+        state = self._verified_session_state(username, source_ip)
 
-        if not 200 <= response.status_code < 300:
-            self.logger.info("宿舍区 Dr.COM 退出判断结果：失败")
-            return LogoutResult("failed", f"http_status_{response.status_code}")
+        if state == "offline":
+            self.logger.info("宿舍区 Dr.COM 退出判断结果：门户会话已确认离线")
+            return LogoutResult(
+                "success",
+                "already_logged_out" if inactive else "portal_logout_verified",
+            )
+        if state == "online":
+            self.logger.info("宿舍区 Dr.COM 退出判断结果：门户会话仍在线")
+            return LogoutResult(
+                "failed",
+                "server_failed" if acknowledgement is False else "logout_not_confirmed",
+            )
+        if response.status_code >= 500 or acknowledgement is None:
+            self.logger.info("宿舍区 Dr.COM 退出判断结果：会话验证不可用")
+            return LogoutResult("unknown", "session_verification_unavailable")
+        return LogoutResult("failed", "server_failed")
 
-        parsed = self.parse_jsonp_response(response.text)
-        result = self.is_success_response(parsed)
-
-        if result is True:
-            self.logger.info("宿舍区 Dr.COM 退出判断结果：成功")
-            return LogoutResult("success", "server_success")
-
-        if result is False:
-            if self.is_inactive_logout_response(parsed):
-                self.logger.info("宿舍区 Dr.COM 退出判断结果：已无可注销会话")
-                return LogoutResult("success", "already_logged_out")
-
-            self.logger.info("宿舍区 Dr.COM 退出判断结果：失败")
-            return LogoutResult("failed", "server_failed")
-
-        self.logger.info("宿舍区 Dr.COM 退出判断结果：不确定")
-        return LogoutResult("unknown", "server_unknown")
+    def _verified_session_state(
+        self,
+        username: str,
+        source_ip: str,
+    ) -> PortalSessionState:
+        last_state: PortalSessionState = "unknown"
+        for delay in (0.0, 0.35, 0.9):
+            if delay:
+                time.sleep(delay)
+            last_state = self.session_fact(username, source_ip).state
+            if last_state == "offline":
+                return "offline"
+        return last_state
 
     def discover_logout_terminal_params(
         self,
         username: str,
         source_ip: str = "",
+        session_fact: PortalSessionFact | None = None,
     ) -> PortalTerminalParams:
         page_url = self._get_logout_page_url()
         page_text = self._fetch_logout_page(page_url)
-        online_record = self._fetch_online_record(username)
-        source_mac = ""
-        if source_ip:
-            source_mac = _get_terminal_mac_for_ip(source_ip)
+        if session_fact is None:
+            online_record = self._fetch_online_record(username, source_ip)
+        else:
+            online_record = {
+                "user_account": session_fact.account,
+                "online_ip": session_fact.ip,
+                "online_mac": session_fact.mac,
+            }
 
         return _build_portal_terminal_params(
             page_url=page_url,
             page_text=page_text,
             online_record=online_record,
             source_ip=source_ip,
-            source_mac=source_mac,
             js_version=str(self.auth.get("logout_js_version") or self.auth.get("js_version") or "4.1.3"),
         )
 
@@ -371,10 +556,57 @@ class DormDrcomClient:
 
         return response.text
 
-    def _fetch_online_record(self, username: str) -> dict[str, Any]:
+    def _fetch_portal_status(self) -> PortalStatusResult:
+        status_url = self._get_status_url()
+        if not status_url:
+            return PortalStatusResult()
+
+        try:
+            response = self.session.get(
+                status_url,
+                params={"callback": "dr1002"},
+                timeout=int(self.auth["timeout_seconds"]),
+                headers=self._portal_headers(),
+            )
+        except requests.RequestException as exc:
+            self.logger.info(
+                "宿舍区 Dr.COM 会话状态获取失败：type=%s reason=%s",
+                type(exc).__name__,
+                _safe_exception_summary(exc),
+            )
+            return PortalStatusResult()
+
+        if not 200 <= response.status_code < 300:
+            self.logger.info("宿舍区 Dr.COM 会话状态获取失败：HTTP 状态码=%s", response.status_code)
+            return PortalStatusResult()
+
+        parsed = self.parse_jsonp_response(response.text)
+        if not isinstance(parsed, dict):
+            return PortalStatusResult()
+
+        return PortalStatusResult(
+            readable=True,
+            declared_online=_parse_result_value(parsed.get("result")),
+            account=_first_mapping_value(parsed, ("uid", "user_account", "account")),
+            ip=_normalize_ip(
+                _first_mapping_value(parsed, ("v46ip", "ss5", "v4ip", "olip"))
+            ),
+            mac=_normalize_mac(_first_mapping_value(parsed, ("ss4", "olmac"))),
+            vlan=_first_mapping_value(parsed, ("vlanid", "cvid", "pvid")) or "0",
+            wlan_ac_ip=_normalize_ip(
+                _first_mapping_value(parsed, ("wlanacip", "AC", "opip"))
+            ),
+            wlan_ac_name=_first_mapping_value(parsed, ("wlanacname",)),
+        )
+
+    def _fetch_online_list(
+        self,
+        expected_account: str,
+        expected_ip: str,
+    ) -> PortalOnlineListResult:
         portal_api = self._get_portal_api_url()
         if not portal_api:
-            return {}
+            return PortalOnlineListResult()
 
         try:
             response = self.session.get(
@@ -389,14 +621,17 @@ class DormDrcomClient:
                 type(exc).__name__,
                 _safe_exception_summary(exc),
             )
-            return {}
+            return PortalOnlineListResult()
 
         if not 200 <= response.status_code < 300:
             self.logger.info("宿舍区 Dr.COM 在线列表获取失败：HTTP 状态码=%s", response.status_code)
-            return {}
+            return PortalOnlineListResult()
 
         parsed = self.parse_jsonp_response(response.text)
-        record = _select_online_record(parsed, username)
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("list"), list):
+            return PortalOnlineListResult()
+
+        record = _select_online_record(parsed, expected_account, expected_ip)
         if record:
             self.logger.info(
                 "宿舍区 Dr.COM 在线列表命中当前会话：online_ip=%s online_mac=%s nas_ip=%s",
@@ -404,7 +639,11 @@ class DormDrcomClient:
                 record.get("online_mac"),
                 record.get("nas_ip"),
             )
-        return record
+        return PortalOnlineListResult(readable=True, exact_record=record or None)
+
+    def _fetch_online_record(self, username: str, source_ip: str = "") -> dict[str, Any]:
+        """Compatibility wrapper that only returns an exact account/IP record."""
+        return self._fetch_online_list(username, _normalize_ip(source_ip)).exact_record or {}
 
     def _get_portal_api_url(self) -> str:
         login_url = str(self.auth.get("login_url") or "").strip()
@@ -422,6 +661,13 @@ class DormDrcomClient:
 
         return ""
 
+    def _get_status_url(self) -> str:
+        page_url = self._get_logout_page_url()
+        parsed = urlparse(page_url)
+        if not parsed.scheme or not parsed.netloc:
+            return ""
+        return urlunparse(parsed._replace(path="/drcom/chkstatus", query="", fragment=""))
+
     def _portal_headers(self, page_url: str = "") -> dict[str, str]:
         referer = _portal_referer(page_url or self._get_logout_page_url() or str(self.auth.get("login_url") or ""))
         return {"User-Agent": USER_AGENT, "Referer": referer}
@@ -431,10 +677,10 @@ class DormDrcomClient:
         unbind_url: str,
         params: dict[str, str],
         timeout_seconds: int,
-    ) -> None:
+    ) -> bool | None:
         if not unbind_url:
             self.logger.info("宿舍区 Dr.COM MAC 解绑接口无法从 logout_url 推导，跳过 unbind")
-            return
+            return None
 
         try:
             response = self.session.get(
@@ -449,11 +695,14 @@ class DormDrcomClient:
                 type(exc).__name__,
                 _safe_exception_summary(exc),
             )
-            return
+            return None
 
         preview = redact_sensitive_text(response.text[:200])
         self.logger.info("宿舍区 Dr.COM MAC 解绑 HTTP 状态码=%s", response.status_code)
         self.logger.info("宿舍区 Dr.COM MAC 解绑响应前 200 字=%s", preview)
+        if not 200 <= response.status_code < 300:
+            return None
+        return self.is_success_response(self.parse_jsonp_response(response.text))
 
     def parse_jsonp_response(self, text: str) -> Any:
         stripped = text.strip()
@@ -516,7 +765,6 @@ def _build_portal_terminal_params(
     page_text: str,
     online_record: dict[str, Any],
     source_ip: str,
-    source_mac: str,
     js_version: str,
 ) -> PortalTerminalParams:
     query = _parse_url_query(page_url)
@@ -530,25 +778,31 @@ def _build_portal_terminal_params(
         or _hex_ip_to_dotted(page_vars.get("ss3", ""))
     )
     online_ip = _normalize_ip(str(online_record.get("online_ip") or ""))
-    terminal_ip = online_ip or page_ip or _normalize_ip(source_ip)
+    # The browser page/query describes the terminal identity used by the
+    # logout request.  online_list is only a fallback for a missing page value.
+    terminal_ip = page_ip or online_ip or _normalize_ip(source_ip)
 
-    page_mac = (
-        _normalize_mac(_first_query_value(query, _MAC_QUERY_NAMES))
-        or _normalize_mac(page_vars.get("ss4", ""))
-        or _normalize_mac(page_vars.get("olmac", ""))
+    page_mac = _normalize_mac(_first_query_value(query, _MAC_QUERY_NAMES))
+    variable_mac = _normalize_mac(page_vars.get("ss4", "") or page_vars.get("olmac", ""))
+    online_mac = _normalize_mac(str(online_record.get("online_mac") or ""))
+    # Preserve the page's all-zero sentinel.  Replacing it with a local or
+    # online-list MAC changes the browser's wire request and can break logout.
+    terminal_mac = (
+        page_mac
+        or variable_mac
+        or _non_sentinel_mac(online_mac)
+        or online_mac
+        or "000000000000"
     )
-    fallback_mac = _normalize_mac(str(online_record.get("online_mac") or "")) or source_mac
-    terminal_mac = page_mac or fallback_mac or "000000000000"
 
     terminal_vlan = (
         _first_query_value(query, ("vlan", "vlanid"))
         or str(page_vars.get("vlanid") or "").strip()
         or "0"
     )
-    terminal_ac_ip = (
-        _first_query_value(query, _AC_IP_QUERY_NAMES)
-        or _nas_ip_to_dotted(online_record.get("nas_ip"))
-    )
+    # Browser code reads AC identity from redirect parameters; online_list's
+    # NAS value is session metadata and must not be manufactured into this body.
+    terminal_ac_ip = _first_query_value(query, _AC_IP_QUERY_NAMES)
     terminal_ac_name = _first_query_value(query, _AC_NAME_QUERY_NAMES)
 
     return PortalTerminalParams(
@@ -604,6 +858,14 @@ def _first_query_value(query: dict[str, list[str]], names: tuple[str, ...]) -> s
     return ""
 
 
+def _first_mapping_value(mapping: dict[str, Any], names: tuple[str, ...]) -> str:
+    for name in names:
+        value = mapping.get(name)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
 def _parse_portal_page_vars(text: str) -> dict[str, str]:
     vars_: dict[str, str] = {}
     for match in _PORTAL_VAR_RE.finditer(text):
@@ -614,7 +876,11 @@ def _parse_portal_page_vars(text: str) -> dict[str, str]:
     return vars_
 
 
-def _select_online_record(parsed: Any, username: str) -> dict[str, Any]:
+def _select_online_record(
+    parsed: Any,
+    username: str,
+    source_ip: str,
+) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         return {}
 
@@ -626,20 +892,19 @@ def _select_online_record(parsed: Any, username: str) -> dict[str, Any]:
     if not dict_records:
         return {}
 
-    username = str(username)
-    for record in dict_records:
-        if str(record.get("user_account") or "") == username and str(record.get("is_owner_ip") or "") == "1":
-            return record
+    username = str(username).strip()
+    source_ip = _normalize_ip(source_ip)
+    if not username or not source_ip:
+        return {}
 
     for record in dict_records:
-        if str(record.get("is_owner_ip") or "") == "1":
+        if (
+            str(record.get("user_account") or "").strip() == username
+            and _normalize_ip(str(record.get("online_ip") or "")) == source_ip
+        ):
             return record
 
-    for record in dict_records:
-        if str(record.get("user_account") or "") == username:
-            return record
-
-    return dict_records[0]
+    return {}
 
 
 def _ip_to_parse_int(ip: str) -> str:
@@ -855,104 +1120,16 @@ def _get_source_ip(url: str, timeout_seconds: int) -> str:
         return ""
 
 
-def _add_terminal_mac_param(params: dict[str, str], source_ip: str, logger: Any) -> None:
-    mac = _get_terminal_mac_for_ip(source_ip)
-    if mac:
-        params["wlan_user_mac"] = mac
-    else:
-        logger.info("宿舍区 Dr.COM 参数未能获取终端 MAC 地址：source_ip=%s", source_ip)
-
-
-def _get_terminal_mac_for_ip(source_ip: str) -> str:
-    if os.name == "nt":
-        return _get_windows_terminal_mac_for_ip(source_ip)
-
-    try:
-        result = subprocess.run(
-            ["/sbin/ifconfig"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-
-    if result.returncode != 0:
-        return ""
-
-    return _parse_ifconfig_mac_for_ip(result.stdout, source_ip)
-
-
-def _get_windows_terminal_mac_for_ip(source_ip: str) -> str:
-    env = os.environ.copy()
-    env["SZU_SOURCE_IP"] = source_ip
-    command = [
-        "powershell",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        (
-            "$ip=Get-NetIPAddress -IPAddress $env:SZU_SOURCE_IP -ErrorAction SilentlyContinue "
-            "| Select-Object -First 1;"
-            "if($ip){(Get-NetAdapter -InterfaceIndex $ip.InterfaceIndex -ErrorAction SilentlyContinue)"
-            ".MacAddress}"
-        ),
-    ]
-    try:
-        result = run_subprocess_hidden(
-            command,
-            env=env,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if result.returncode != 0:
-        return ""
-    return _normalize_mac(result.stdout.strip())
-
-
-def _parse_ifconfig_mac_for_ip(ifconfig_output: str, source_ip: str) -> str:
-    current_ips: list[str] = []
-    current_mac = ""
-
-    for line in ifconfig_output.splitlines():
-        interface_match = re.match(r"^\S+:", line)
-        if interface_match:
-            matched_mac = _mac_for_interface_block(current_ips, current_mac, source_ip)
-            if matched_mac:
-                return matched_mac
-            current_ips = []
-            current_mac = ""
-            continue
-
-        stripped = line.strip()
-        if stripped.startswith("ether "):
-            parts = stripped.split()
-            if len(parts) >= 2:
-                current_mac = _normalize_mac(parts[1])
-        elif stripped.startswith("inet "):
-            parts = stripped.split()
-            if len(parts) >= 2:
-                current_ips.append(parts[1])
-
-    return _mac_for_interface_block(current_ips, current_mac, source_ip)
-
-
-def _mac_for_interface_block(ips: list[str], mac: str, source_ip: str) -> str:
-    if source_ip in ips:
-        return mac
-    return ""
-
-
 def _normalize_mac(value: str) -> str:
     normalized = re.sub(r"[^0-9A-Fa-f]", "", value).lower()
     if len(normalized) == 12:
         return normalized
     return ""
+
+
+def _non_sentinel_mac(value: str) -> str:
+    normalized = _normalize_mac(value)
+    return "" if normalized == "000000000000" else normalized
 
 
 def _result_label(result: bool | None) -> str:

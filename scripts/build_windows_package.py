@@ -1,72 +1,70 @@
 #!/usr/bin/env python3
-"""Build a Windows-only transfer zip from the dedicated Windows branch."""
+"""Assemble the end-user Windows zip around the standalone GUI executable."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import shutil
 import sys
 import zipfile
 from pathlib import Path
 
-from verify_windows_package import verify
+from verify_windows_package import verify_executable, verify_release, verify_source
 
 
-PACKAGE_ENTRIES = (
-    "README.md",
-    "LICENSE",
-    "requirements.txt",
-    "config.example.yaml",
-    "diagnose.py",
-    "one_click_install_and_run.bat",
-    "start_szu_dorm_login.bat",
-    "apps/windows_desktop",
-    "src/szu_netlogin",
-)
-
-
-def copy_entry(source: Path, destination: Path) -> None:
-    if source.is_dir():
-        shutil.copytree(
-            source,
-            destination,
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
-        )
-        return
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
+DEFAULT_VERSION = "1.2.0"
+EXECUTABLE_NAME = "SZU Dorm Login.exe"
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", default="1.1.0")
+    parser.add_argument("--version", default=DEFAULT_VERSION)
+    parser.add_argument("--executable", type=Path)
     args = parser.parse_args(argv)
 
     root = Path(__file__).resolve().parents[1]
-    output_dir = root / "dist" / "release"
-    staging_root = root / "dist" / "windows-staging"
-    package_name = f"szu-dorm-login-windows-v{args.version}"
-    package_root = staging_root / package_name
-    archive_path = output_dir / f"SZU-Dorm-Login-Windows-v{args.version}.zip"
-
-    source_failures = verify(root)
-    if source_failures:
-        for failure in source_failures:
+    executable = (args.executable or root / "dist" / "windows-app" / EXECUTABLE_NAME).resolve()
+    failures = verify_source(root) + verify_executable(executable)
+    if failures:
+        for failure in failures:
             print(f"[失败] {failure}", file=sys.stderr)
         return 1
 
-    shutil.rmtree(staging_root, ignore_errors=True)
-    package_root.mkdir(parents=True)
-    for relative in PACKAGE_ENTRIES:
-        source = root / relative
-        if not source.exists():
-            print(f"[失败] 缺少打包内容：{relative}", file=sys.stderr)
-            return 1
-        copy_entry(source, package_root / relative)
+    output_dir = root / "dist" / "release"
+    staging_root = root / "dist" / "windows-staging"
+    package_name = f"SZU-Dorm-Login-Windows-v{args.version}"
+    package_root = staging_root / package_name
+    archive_path = output_dir / f"{package_name}.zip"
 
-    package_failures = verify(package_root, reject_generated=True)
-    if package_failures:
-        for failure in package_failures:
+    if staging_root.exists():
+        shutil.rmtree(staging_root)
+    package_root.mkdir(parents=True)
+    shutil.copy2(executable, package_root / EXECUTABLE_NAME)
+    shutil.copy2(root / "LICENSE", package_root / "LICENSE.txt")
+
+    digest = hashlib.sha256((package_root / EXECUTABLE_NAME).read_bytes()).hexdigest()
+    (package_root / "SHA256.txt").write_text(
+        f"{digest}  {EXECUTABLE_NAME}\n",
+        encoding="utf-8",
+    )
+    (package_root / "使用说明.txt").write_text(
+        "SZU Dorm Login Windows v"
+        + args.version
+        + "\n\n"
+        + "1. 双击“SZU Dorm Login.exe”。无需安装 Python，也不会打开命令行窗口。\n"
+        + "2. 首次运行，在“概览”页依次点击“修改账号”和“修改密码”。\n"
+        + "3. 如需登录 Windows 后自动运行，点击“安装开机自启”。\n"
+        + "4. 自动登录只依据宿舍网关和校园网门户会话；不会检测、关闭或配置 VPN。\n"
+        + "5. 若 Windows SmartScreen 提示未知发布者，这是因为当前测试包未使用商业证书签名。\n\n"
+        + "配置：%APPDATA%\\SZU Dorm NetLogin\\config.yaml\n"
+        + "日志：%LOCALAPPDATA%\\SZU Dorm NetLogin\\Logs\\netlogin.log\n",
+        encoding="utf-8",
+    )
+
+    failures = verify_release(package_root)
+    if failures:
+        for failure in failures:
             print(f"[失败] {failure}", file=sys.stderr)
         return 1
 
@@ -78,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
                 archive.write(path, path.relative_to(staging_root))
 
     print(f"Windows 发布包：{archive_path}")
+    print(f"SHA-256：{digest}")
     return 0
 
 

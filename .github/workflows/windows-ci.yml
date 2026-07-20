@@ -1,10 +1,11 @@
-name: Windows client checks
+name: Windows client checks and package
 
 on:
+  workflow_dispatch:
   push:
-    branches: [windows]
+    branches: [windows, winpython]
   pull_request:
-    branches: [windows]
+    branches: [windows, winpython]
 
 jobs:
   test-windows:
@@ -26,12 +27,49 @@ jobs:
       - name: Run regression tests and Tk smoke test
         env:
           SZU_RUN_TK_SMOKE: "1"
-        run: python -m unittest discover -s tests
+        run: python -m unittest discover -s tests -v
 
       - name: Verify Windows-only source boundary
         run: python scripts/verify_windows_package.py
 
-      - name: Assemble and verify transfer zip
+  build-windows-gui:
+    if: github.event_name != 'pull_request'
+    needs: test-windows
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install reproducible build dependencies
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Build standalone windowed executable
+        run: python scripts/build_windows_exe.py --version 1.2.0
+
+      - name: Verify PE file and frozen self-test
+        shell: pwsh
         run: |
-          python scripts/build_windows_package.py --version ci
-          python scripts/verify_windows_package.py --package-root dist/windows-staging/szu-dorm-login-windows-vci
+          python scripts/verify_windows_package.py --executable "dist/windows-app/SZU Dorm Login.exe"
+          $process = Start-Process -FilePath "dist/windows-app/SZU Dorm Login.exe" -ArgumentList "--self-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Frozen GUI self-test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Assemble end-user double-click package
+        run: |
+          python scripts/build_windows_package.py --version 1.2.0 --executable "dist/windows-app/SZU Dorm Login.exe"
+          python scripts/verify_windows_package.py --release-root "dist/windows-staging/SZU-Dorm-Login-Windows-v1.2.0"
+
+      - name: Upload Windows GUI package
+        uses: actions/upload-artifact@v4
+        with:
+          name: SZU-Dorm-Login-Windows-v1.2.0
+          path: |
+            dist/release/SZU-Dorm-Login-Windows-v1.2.0.zip
+            dist/windows-app/SZU Dorm Login.exe
+          if-no-files-found: error
+          retention-days: 30

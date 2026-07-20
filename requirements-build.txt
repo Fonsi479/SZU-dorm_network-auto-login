@@ -1,0 +1,3 @@
+-r requirements.txt
+PyInstaller==6.21.0
+Pillow==12.2.0

@@ -11,15 +11,21 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 from apps.windows_desktop.szu_windows_desktop import (
+    AutoLoginBackoff,
     DEFAULT_CONFIG_TEMPLATE,
     DesktopStatusResult,
     SzuDormWindowsApp,
     get_windows_startup_link,
     hidden_popen_options,
     is_windows_startup_enabled,
+    portal_session_label,
+    run_frozen_control_action,
+    run_frozen_self_test,
     set_windows_startup_enabled,
+    should_start_auto_login,
 )
 from src.szu_netlogin.config import _parse_yaml, validate_config
+from src.szu_netlogin.dorm_drcom_client import PortalSessionFact
 from src.szu_netlogin.portal_detect import NetworkStatus
 
 
@@ -103,6 +109,94 @@ class WindowsStartupTests(unittest.TestCase):
 
 
 class WindowsAppLifecycleTests(unittest.TestCase):
+    def test_status_refresh_skips_default_internet_until_portal_online(self) -> None:
+        app = SzuDormWindowsApp.__new__(SzuDormWindowsApp)
+        app._closing = False
+        app._messages = Queue()
+        app._status_lock = threading.Lock()
+        app._refresh_in_progress = True
+        app.logger = Mock()
+        app._load_config_for_status = Mock(
+            return_value=(
+                {
+                    "user": {"username": "481505"},
+                    "auth": {},
+                    "network": {},
+                },
+                "",
+            )
+        )
+        gateway = NetworkStatus(True, False, source_ip="172.24.182.13")
+        environment = Mock(label="宿舍网络", auto_login_available=True)
+
+        with (
+            patch("apps.windows_desktop.szu_windows_desktop.is_paused", return_value=False),
+            patch(
+                "apps.windows_desktop.szu_windows_desktop.probe_gateway",
+                return_value=gateway,
+            ),
+            patch(
+                "apps.windows_desktop.szu_windows_desktop.classify_network_environment",
+                return_value=environment,
+            ),
+            patch("apps.windows_desktop.szu_windows_desktop.DormDrcomClient") as client,
+            patch("apps.windows_desktop.szu_windows_desktop.probe_internet") as internet,
+        ):
+            client.return_value.session_fact.return_value = PortalSessionFact(
+                state="offline",
+                account="481505",
+                ip="172.24.182.13",
+            )
+            app._refresh_status_worker()
+
+        internet.assert_not_called()
+        kind, result = app._messages.get_nowait()
+        self.assertEqual(kind, "status")
+        self.assertEqual(result.portal_session_state, "offline")
+
+    def test_frozen_control_action_captures_output_for_windowed_gui(self) -> None:
+        def fake_main(args):
+            print("门户状态：离线")
+            return 0
+
+        with patch("src.szu_netlogin.control.main", side_effect=fake_main):
+            result = run_frozen_control_action(["status"])
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("门户状态：离线", result.stdout)
+
+    def test_frozen_self_test_checks_embedded_config_without_network(self) -> None:
+        self.assertEqual(run_frozen_self_test(), 0)
+
+    def test_auto_login_requires_confirmed_portal_offline(self) -> None:
+        offline = DesktopStatusResult(
+            False,
+            NetworkStatus(True, True, source_ip="172.24.182.13"),
+            auto_login_available=True,
+            portal_session_state="offline",
+        )
+        unknown = DesktopStatusResult(
+            False,
+            NetworkStatus(True, False, source_ip="172.24.182.13"),
+            auto_login_available=True,
+            portal_session_state="unknown",
+        )
+
+        self.assertTrue(should_start_auto_login(False, offline))
+        self.assertFalse(should_start_auto_login(False, unknown))
+        self.assertFalse(should_start_auto_login(True, offline))
+        self.assertEqual(portal_session_label(offline), "已确认离线")
+
+    def test_offline_transition_can_open_one_immediate_attempt(self) -> None:
+        now = [100.0]
+        schedule = AutoLoginBackoff((120, 300), 60, clock=lambda: now[0])
+        self.assertFalse(schedule.consume_if_due())
+
+        schedule.allow_immediate_attempt()
+
+        self.assertTrue(schedule.consume_if_due())
+        self.assertFalse(schedule.consume_if_due())
+
     @unittest.skipUnless(os.environ.get("SZU_RUN_TK_SMOKE") == "1", "需要真实 Tk 桌面会话")
     def test_ui_builds_with_two_tabs_and_dynamic_startup_button(self) -> None:
         root = tk.Tk()

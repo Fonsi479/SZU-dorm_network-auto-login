@@ -44,7 +44,7 @@ class LoginLockTests(unittest.TestCase):
             patch("src.szu_netlogin.login.load_config", return_value=config),
             patch("src.szu_netlogin.login.describe_password_source", return_value="env"),
             patch(
-                "src.szu_netlogin.login.probe_network",
+                "src.szu_netlogin.login.probe_gateway",
                 return_value=NetworkStatus(
                     gateway_reachable=True,
                     campus_internet_ok=False,

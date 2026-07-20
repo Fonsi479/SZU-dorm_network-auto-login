@@ -11,7 +11,7 @@ from .dorm_drcom_client import DormDrcomClient
 from .logger import LOG_FILE, get_logger
 from .password_store import describe_password_source, get_password, has_password
 from .platform_paths import get_user_log_dir
-from .portal_detect import classify_network_environment, probe_network
+from .portal_detect import classify_network_environment, probe_gateway
 from .state import is_paused
 
 try:
@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--check-and-login",
         action="store_true",
-        help="先检查外网是否已可用，不可用时再尝试登录",
+        help="先检查校园网门户会话，确认离线时再尝试登录",
     )
     return parser.parse_args()
 
@@ -85,14 +85,8 @@ def main() -> int:
 
         if args.check_and_login:
             logger.info("运行模式：check-and-login")
-            print("正在检查外网是否已经可用...")
-            network_status = probe_network(config)
-            if network_status.campus_internet_ok:
-                print("外网已经可用，不需要登录。")
-                print("登录跳过原因：外网已通。")
-                print("如果只是想测试登录接口，请运行：python3 -m src.szu_netlogin.login")
-                logger.info("外网已可用，退出")
-                return 0
+            print("正在检查宿舍区网关与校园网门户会话...")
+            network_status = probe_gateway(config)
 
             gateway_hosts = ((config.get("network") or {}).get("dorm_gateway_hosts") or ["172.30.255.42"])
             if isinstance(gateway_hosts, str):
@@ -124,10 +118,27 @@ def main() -> int:
                 logger.info("自动登录执行前检测到已暂停，跳过自动登录")
                 return 0
 
+            client = DormDrcomClient(config)
+            session = client.session_fact(username, network_status.source_ip)
+            if session.matches(username, network_status.source_ip):
+                print("校园网门户已确认登录，不需要重复登录。")
+                print("登录跳过原因：门户会话已在线。")
+                logger.info("门户会话已在线，自动登录退出")
+                return 0
+            if session.state == "online":
+                print("校园网门户存在其他账号或 IP 的在线会话，本轮不发送账号密码。")
+                logger.warning("自动登录停止本轮：portal session identity mismatch")
+                return 0
+            if session.state == "unknown":
+                print("校园网门户状态暂时无法确认，本轮不发送账号密码。")
+                logger.warning("自动登录停止本轮：portal session state unknown")
+                return 0
+
             print("宿舍区网关可访问，准备尝试宿舍区 Dr.COM 登录。")
             logger.info("需要登录，尝试登录")
         else:
             logger.info("运行模式：直接登录")
+            client = DormDrcomClient(config)
 
         password = get_password(config)
         if not password:
@@ -139,7 +150,11 @@ def main() -> int:
             return 2
 
         print("正在尝试宿舍区 Dr.COM 登录...")
-        result = DormDrcomClient(config).login_with_result(username, password)
+        result = client.login_with_result(
+            username,
+            password,
+            known_source_ip=network_status.source_ip if args.check_and_login else "",
+        )
 
         if result.status == "success":
             print("登录结果：成功。")
@@ -218,6 +233,9 @@ def login_failure_reason_label(reason: str) -> str:
         "server_response_uncertain": "服务器响应不确定",
         "server_failed": "门户返回失败",
         "request_exception": "登录请求异常",
+        "source_ip_unverified": "未确认处于校园网源地址",
+        "login_not_confirmed": "门户未确认登录会话",
+        "session_verification_unavailable": "门户会话状态暂时不可用",
     }
     if reason.startswith("http_status_"):
         return f"HTTP 状态码 {reason.removeprefix('http_status_')}"

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import io
 import shutil
 import subprocess
 import sys
 import threading
 import time
 import traceback
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -24,13 +26,16 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.szu_netlogin.config import (  # noqa: E402
+    _parse_yaml,
     ConfigError,
     DEFAULT_CONFIG_PATH,
     PROJECT_HOME_ENV,
     PROJECT_ROOT,
     load_config,
+    validate_config,
 )
 from src.szu_netlogin.logger import LOG_FILE, get_logger, redact_sensitive_text  # noqa: E402
+from src.szu_netlogin.dorm_drcom_client import DormDrcomClient  # noqa: E402
 from src.szu_netlogin.password_store import (  # noqa: E402
     describe_password_source,
     set_password,
@@ -42,13 +47,14 @@ from src.szu_netlogin.platform_paths import (  # noqa: E402
 from src.szu_netlogin.portal_detect import (  # noqa: E402
     NetworkStatus,
     classify_network_environment,
-    probe_network,
+    probe_gateway,
+    probe_internet,
 )
 from src.szu_netlogin.state import describe_pause_state, is_paused  # noqa: E402
 
 
 APP_NAME = "SZU Dorm Login"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 CONTROL_MODULE = "src.szu_netlogin.control"
 CONTROL_DISPATCH_ARG = "--szu-netlogin-control"
 STATUS_REFRESH_SECONDS = 30
@@ -67,6 +73,8 @@ class DesktopStatusResult:
     network_probe_enabled: bool = True
     environment_label: str = ""
     auto_login_available: bool = True
+    portal_session_state: str = "unknown"
+    portal_session_matches: bool = False
 
 
 class AutoLoginBackoff:
@@ -100,6 +108,10 @@ class AutoLoginBackoff:
         self._failure_index = min(self._failure_index + 1, len(self._intervals) - 1)
         self._deadline = self._clock() + self.current_interval_seconds
 
+    def allow_immediate_attempt(self) -> None:
+        """Open one immediate attempt after the first verified offline transition."""
+        self._deadline = min(self._deadline, self._clock())
+
 
 class SzuDormWindowsApp:
     def __init__(self, root: tk.Tk) -> None:
@@ -115,6 +127,7 @@ class SzuDormWindowsApp:
         self._closing = False
         self._active_process: subprocess.Popen[str] | None = None
         self._last_status_result: DesktopStatusResult | None = None
+        self._last_portal_session_state = "unknown"
         self._status_after_id: str | None = None
         self._drain_after_id: str | None = None
         self._watchdog_after_id: str | None = None
@@ -193,12 +206,13 @@ class SzuDormWindowsApp:
         self._add_status_row(status_frame, 0, "自动登录", "run_state")
         self._add_status_row(status_frame, 1, "暂停状态", "pause_state")
         self._add_status_row(status_frame, 2, "网络环境", "environment")
-        self._add_status_row(status_frame, 3, "校园网出口", "internet")
-        self._add_status_row(status_frame, 4, "宿舍网关", "gateway")
-        self._add_status_row(status_frame, 5, "源 IP", "source_ip")
-        self._add_status_row(status_frame, 6, "配置文件", "config")
-        self._add_status_row(status_frame, 7, "开机自启", "startup")
-        self._add_status_row(status_frame, 8, "更新时间", "updated_at")
+        self._add_status_row(status_frame, 3, "门户会话", "portal_session")
+        self._add_status_row(status_frame, 4, "默认网络出口", "internet")
+        self._add_status_row(status_frame, 5, "宿舍网关", "gateway")
+        self._add_status_row(status_frame, 6, "源 IP", "source_ip")
+        self._add_status_row(status_frame, 7, "配置文件", "config")
+        self._add_status_row(status_frame, 8, "开机自启", "startup")
+        self._add_status_row(status_frame, 9, "更新时间", "updated_at")
 
         button_frame = ttk.LabelFrame(overview, text="快捷操作", padding=8)
         button_frame.grid(row=1, column=0, sticky="ew")
@@ -394,8 +408,30 @@ class SzuDormWindowsApp:
         try:
             paused = is_paused()
             config, config_error = self._load_config_for_status()
-            network_status = probe_network(config) if config else NetworkStatus(False, False)
+            network_status = probe_gateway(config) if config else NetworkStatus(False, False)
             environment = classify_network_environment(config, network_status)
+            portal_session_state = "unknown"
+            portal_session_matches = False
+            if config and environment.auto_login_available:
+                username = get_username(config)
+                if is_username_set(username):
+                    try:
+                        fact = DormDrcomClient(config).session_fact(
+                            username,
+                            network_status.source_ip,
+                        )
+                        portal_session_state = fact.state
+                        portal_session_matches = fact.matches(
+                            username,
+                            network_status.source_ip,
+                        )
+                        # Default-route reachability is display-only and runs
+                        # only after the campus portal confirms this session.
+                        # No VPN adapter enumeration or VPN-name heuristic is used.
+                        if portal_session_matches:
+                            network_status = probe_internet(config, network_status)
+                    except Exception as exc:
+                        self.logger.info("门户会话状态刷新失败：%s", exc)
             if self._closing:
                 return
             self._messages.put(
@@ -407,6 +443,8 @@ class SzuDormWindowsApp:
                         config_error,
                         environment_label=environment.label,
                         auto_login_available=environment.auto_login_available,
+                        portal_session_state=portal_session_state,
+                        portal_session_matches=portal_session_matches,
                     ),
                 )
             )
@@ -419,13 +457,20 @@ class SzuDormWindowsApp:
     def _apply_status_result(self, result: DesktopStatusResult) -> None:
         self._last_status_result = result
         run_label = auto_login_state_label(result.paused, result)
-        campus_label = "已连通" if result.network_status.campus_internet_ok else "未连通"
+        if result.portal_session_matches:
+            campus_label = "可用" if result.network_status.campus_internet_ok else "门户在线，出口待确认"
+        elif result.portal_session_state == "offline":
+            campus_label = "门户离线，未探测"
+        else:
+            campus_label = "未探测"
         gateway_label = "可达" if result.network_status.gateway_reachable else "不可达"
         config_label = str(DEFAULT_CONFIG_PATH) if not result.config_error else result.config_error
+        portal_label = portal_session_label(result)
 
         self._status_vars["run_state"].set(run_label)
         self._status_vars["pause_state"].set(describe_pause_state())
         self._status_vars["environment"].set(result.environment_label or "网络环境未知")
+        self._status_vars["portal_session"].set(portal_label)
         self._status_vars["internet"].set(campus_label)
         self._status_vars["gateway"].set(gateway_label)
         self._status_vars["source_ip"].set(result.network_status.source_ip or "-")
@@ -441,7 +486,12 @@ class SzuDormWindowsApp:
         )
         self._update_startup_ui()
 
-        if result.network_status.campus_internet_ok:
+        transition_state = "online" if result.portal_session_matches else result.portal_session_state
+        if transition_state == "offline" and self._last_portal_session_state != "offline":
+            self._auto_login_schedule.allow_immediate_attempt()
+        self._last_portal_session_state = transition_state
+
+        if result.portal_session_matches:
             self._auto_login_schedule.record_success()
 
         self._schedule_next_status_refresh()
@@ -832,6 +882,13 @@ class SzuDormWindowsApp:
         args: list[str],
         timeout: int,
     ) -> subprocess.CompletedProcess[str]:
+        if getattr(sys, "frozen", False):
+            # A PyInstaller --windowed executable has no console streams, and
+            # relaunching a one-file bundle for every button also re-extracts
+            # the runtime.  Run the serialized control action in this worker
+            # thread and capture its user-facing output for the GUI instead.
+            return run_frozen_control_action(args)
+
         PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
         command = [*build_control_command(), *args]
         process: subprocess.Popen[str] | None = None
@@ -991,6 +1048,21 @@ def build_control_command() -> list[str]:
     return [sys.executable, "-m", CONTROL_MODULE]
 
 
+def run_frozen_control_action(args: list[str]) -> subprocess.CompletedProcess[str]:
+    from src.szu_netlogin import control
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        returncode = control.main(args)
+    return subprocess.CompletedProcess(
+        [sys.executable, *args],
+        returncode,
+        stdout.getvalue(),
+        stderr.getvalue(),
+    )
+
+
 def build_control_env() -> dict[str, str]:
     env = os.environ.copy()
     env[PROJECT_HOME_ENV] = str(PROJECT_ROOT)
@@ -1033,7 +1105,7 @@ def should_start_auto_login(paused: bool, result: DesktopStatusResult | None) ->
         return False
     if not result.auto_login_available:
         return False
-    return result.network_status.maybe_need_login
+    return result.portal_session_state == "offline" and not result.portal_session_matches
 
 
 def is_non_campus_status(result: DesktopStatusResult | None) -> bool:
@@ -1049,7 +1121,25 @@ def auto_login_state_label(paused: bool, result: DesktopStatusResult) -> str:
         return "已暂停"
     if is_non_campus_status(result):
         return "非宿舍网络，自动登录停用"
+    if result.portal_session_matches:
+        return "门户已登录"
+    if result.portal_session_state == "online":
+        return "检测到其他门户会话，自动登录停用"
+    if result.portal_session_state == "unknown":
+        return "等待门户确认，不发送账号密码"
     return "运行中"
+
+
+def portal_session_label(result: DesktopStatusResult) -> str:
+    if not result.network_probe_enabled:
+        return "检测已关闭"
+    if result.portal_session_matches:
+        return "已登录（账号与 IP 已匹配）"
+    if result.portal_session_state == "online":
+        return "存在其他账号或 IP 的在线会话"
+    if result.portal_session_state == "offline":
+        return "已确认离线"
+    return "暂时无法确认"
 
 
 def mask_username(username: str) -> str:
@@ -1087,6 +1177,21 @@ def run_control_dispatch() -> int:
     from src.szu_netlogin import control
 
     return control.main(sys.argv[2:])
+
+
+def run_frozen_self_test() -> int:
+    """Exercise bundled data and imports without opening a window or network socket."""
+    try:
+        import keyring  # noqa: F401
+        import requests  # noqa: F401
+
+        template = bundled_path("config.example.yaml").read_text(encoding="utf-8")
+        config = _parse_yaml(template)
+        config["user"]["username"] = "123456"
+        validate_config(config)
+    except Exception:
+        return 1
+    return 0
 
 
 DEFAULT_CONFIG_TEMPLATE = """auth:
@@ -1129,6 +1234,8 @@ security:
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
+        raise SystemExit(run_frozen_self_test())
     if len(sys.argv) > 1 and sys.argv[1] == CONTROL_DISPATCH_ARG:
         raise SystemExit(run_control_dispatch())
 
