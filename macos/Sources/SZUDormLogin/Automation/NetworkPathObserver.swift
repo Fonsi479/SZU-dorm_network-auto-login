@@ -6,7 +6,8 @@ import Network
 /// The first snapshot is intentionally ignored because `AppModel.start()`
 /// already performs the startup probe. A later unavailable -> available
 /// transition covers Wi-Fi roaming and interface recovery without waiting for
-/// the 30-second periodic timer.
+/// the 30-second periodic timer. All path callbacks and mutable route state are
+/// confined to the private serial queue; the callback itself hops to MainActor.
 final class NetworkPathObserver: @unchecked Sendable {
     private let monitor: NWPathMonitor
     private let queue: DispatchQueue

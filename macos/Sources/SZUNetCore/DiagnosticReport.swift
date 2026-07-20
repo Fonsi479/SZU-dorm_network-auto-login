@@ -107,7 +107,7 @@ public final class DiagnosticReportBuilder {
             logger.tail(maxLines: 80).isEmpty ? "日志为空" : logger.tail(maxLines: 80),
             "",
         ]
-        return lines.joined(separator: "\n")
+        return AppLogger.redact(lines.joined(separator: "\n"))
     }
 
     public static func legacyLaunchAgents() -> [URL] {

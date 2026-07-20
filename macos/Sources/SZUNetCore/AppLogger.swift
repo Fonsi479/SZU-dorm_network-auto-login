@@ -1,3 +1,4 @@
+import CodexButlerSecurity
 import Foundation
 
 public final class AppLogger {
@@ -54,29 +55,10 @@ public final class AppLogger {
     }
 
     public static func redact(_ input: String, password: String? = nil) -> String {
-        var result = input
-        if let password, !password.isEmpty {
-            result = result.replacingOccurrences(of: password, with: "***")
-        }
-
-        let patterns = [
-            #"(?i)(user_password\s*[=:]\s*)[^&\s)\"']+"#,
-            #"(?i)(password\s*[=:]\s*)[^&\s)\"']+"#,
-            #"(?i)(user_account\s*[=:]\s*)[^&\s)\"']+"#,
-            #"(?i)https?://[^\s)]*/eportal/portal/login\?[^\s)]+"#,
-        ]
-        for (index, pattern) in patterns.enumerated() {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            let range = NSRange(result.startIndex..<result.endIndex, in: result)
-            let template = index == patterns.count - 1 ? "[login_url_redacted]" : "$1***"
-            result = regex.stringByReplacingMatches(
-                in: result,
-                options: [],
-                range: range,
-                withTemplate: template
-            )
-        }
-        return result
+        SensitiveDataRedactor.redact(
+            input,
+            explicitSecrets: password.map { [$0] } ?? []
+        )
     }
 
     private func write(_ level: Level, _ message: String, password: String?) {

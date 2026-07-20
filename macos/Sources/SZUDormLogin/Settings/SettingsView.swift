@@ -59,20 +59,23 @@ struct SettingsView: View {
             .padding(16)
         }
         .frame(minWidth: 580, idealWidth: 660, minHeight: 600, idealHeight: 720)
+        .background(.background)
     }
 
     private var header: some View {
         HStack(spacing: 14) {
             Image(systemName: "network.badge.shield.half.filled")
                 .font(.system(size: 34))
-                .foregroundStyle(.blue)
+                .foregroundStyle(.tint)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
-                Text("原生 macOS 设置")
+                Text("校园网设置")
                     .font(.title2.bold())
-                Text("Swift 网络核心 · Keychain 凭据 · Dr.COM / ePortal")
+                Text("管理账号、自动识别边界和 Dr.COM / ePortal 参数")
                     .foregroundStyle(.secondary)
             }
         }
+        .accessibilityElement(children: .combine)
     }
 
     private var accountSection: some View {
@@ -87,6 +90,7 @@ struct SettingsView: View {
                         text: $password
                     )
                     .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("校园网密码")
                 }
                 field("钥匙串服务", text: $configuration.security.keychainService)
             }
@@ -160,6 +164,7 @@ struct SettingsView: View {
                     ))
                     .font(.system(.body, design: .monospaced))
                     .frame(minHeight: 78)
+                    .accessibilityLabel("联网检测地址，每行一个")
                     .overlay(
                         RoundedRectangle(cornerRadius: 5)
                             .stroke(Color.secondary.opacity(0.25))
@@ -175,7 +180,7 @@ struct SettingsView: View {
             errorMessage = ""
             try onSave(configuration, password.isEmpty ? nil : password)
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = "请检查上方设置后重试：\(error.localizedDescription)"
         }
     }
 
@@ -189,6 +194,7 @@ struct SettingsView: View {
                 .frame(width: 105, alignment: .trailing)
             TextField(prompt, text: text)
                 .textFieldStyle(.roundedBorder)
+                .accessibilityLabel(label)
         }
     }
 

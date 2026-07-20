@@ -23,7 +23,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     init(model: AppModel) {
         self.model = model
         settingsWindow = SettingsWindowController(model: model)
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         configureStatusItem()
         configureMenu()
@@ -54,14 +54,20 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func configureStatusItem() {
+        statusItem.autosaveName = NSStatusItem.AutosaveName("SZUDormLoginStatusItem")
         if let button = statusItem.button {
             button.title = ""
-            button.image = NSImage(
+            let image = NSImage(
                 systemSymbolName: "network",
                 accessibilityDescription: "SZU Dorm 网络状态"
             )
+            image?.isTemplate = true
+            image?.size = NSSize(width: 17, height: 17)
+            button.image = image
             button.imagePosition = .imageLeading
+            button.imageScaling = .scaleProportionallyDown
             button.toolTip = "深圳大学宿舍区校园网自动登录"
+            button.setAccessibilityLabel("深圳大学宿舍区校园网状态")
         }
         statusItem.menu = menu
     }
@@ -70,7 +76,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.delegate = self
         statusMenuItem.isEnabled = false
         detailMenuItem.isEnabled = false
-        detailMenuItem.indentationLevel = 1
 
         for item in [
             loginMenuItem,
@@ -174,10 +179,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func updateStatus(text: String, tone: AppModel.StatusTone) {
         let color: NSColor
         switch tone {
-        case .success: color = .systemGreen
+        case .success: color = .labelColor
         case .warning: color = .systemOrange
         case .failure: color = .systemRed
-        case .checking: color = .systemBlue
+        case .checking: color = .secondaryLabelColor
         case .neutral: color = .secondaryLabelColor
         }
         statusMenuItem.attributedTitle = NSAttributedString(
@@ -188,6 +193,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             ]
         )
         statusItem.button?.toolTip = "\(text)\n\(model.statusDetail)"
+        statusItem.button?.setAccessibilityLabel("校园网：\(text)，\(model.statusDetail)")
     }
 
     private func updateStatusDetail(_ detail: String) {

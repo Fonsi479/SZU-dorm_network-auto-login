@@ -47,9 +47,11 @@ extension MenuBarController {
                 ? ""
                 : model.configuration.user.username
         )
-        field.placeholderString = "校园卡号"
+        field.placeholderString = "学号或校园网账号"
+        field.setAccessibilityLabel("校园网账号")
         field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
         alert.accessoryView = field
+        alert.window.initialFirstResponder = field
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do {
@@ -79,7 +81,9 @@ extension MenuBarController {
         alert.addButton(withTitle: "取消")
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
         field.placeholderString = "校园网密码"
+        field.setAccessibilityLabel("校园网密码")
         alert.accessoryView = field
+        alert.window.initialFirstResponder = field
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return false }
         do {

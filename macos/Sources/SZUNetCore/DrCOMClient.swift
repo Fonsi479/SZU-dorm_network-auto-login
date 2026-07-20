@@ -60,10 +60,6 @@ public final class DrCOMClient {
                 sourceIP: sourceIP.isEmpty ? nil : sourceIP
             )
             logger.info("宿舍区 Dr.COM 登录 HTTP 状态码=\(response.statusCode)")
-            logger.info(
-                "宿舍区 Dr.COM 登录响应前 200 字=\(String(response.bodyText.prefix(200)))",
-                password: password
-            )
             if response.statusCode >= 500 {
                 return LoginResult(
                     status: .unknown,

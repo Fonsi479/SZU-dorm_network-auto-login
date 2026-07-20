@@ -31,7 +31,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         )
         let window = existingOrNewWindow()
         window.contentViewController = hostingController
-        window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -51,6 +50,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         created.title = "SZU Dorm Login 设置"
         created.minSize = NSSize(width: 580, height: 600)
         created.isReleasedWhenClosed = false
+        let frameName = "SZUDormLoginSettingsWindow"
+        if !created.setFrameUsingName(frameName) {
+            created.center()
+        }
+        created.setFrameAutosaveName(frameName)
         created.delegate = self
         window = created
         return created
