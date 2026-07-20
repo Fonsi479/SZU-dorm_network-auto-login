@@ -30,6 +30,7 @@ class PasswordStoreTests(unittest.TestCase):
             "secret",
         )
 
+    @unittest.skipIf(os.name == "nt", "Windows intentionally requires the credential store")
     def test_set_password_writes_private_file_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             password_file = Path(temp_dir) / "password.yaml"
@@ -58,6 +59,7 @@ class PasswordStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "环境变量 SZU_NET_PASSWORD"):
             set_password(config, "secret")
 
+    @unittest.skipIf(os.name == "nt", "Windows intentionally requires the credential store")
     def test_private_file_does_not_replace_destination_when_permissions_cannot_be_set(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             password_file = Path(temp_dir) / "password.yaml"
@@ -67,6 +69,17 @@ class PasswordStoreTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     set_password(config, "secret")
             self.assertEqual(password_file.read_text(encoding="utf-8"), "password: old\n")
+
+    def test_windows_rejects_private_file_password_source(self) -> None:
+        config = {
+            "security": {
+                "password_source": "private_file",
+                "password_file": "password.yaml",
+            }
+        }
+        with patch("src.szu_netlogin.password_store.os.name", "nt"):
+            with self.assertRaisesRegex(ValueError, "Windows 不支持 private_file"):
+                set_password(config, "secret")
 
 
 if __name__ == "__main__":
