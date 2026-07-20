@@ -1066,6 +1066,7 @@ def run_frozen_control_action(args: list[str]) -> subprocess.CompletedProcess[st
 def build_control_env() -> dict[str, str]:
     env = os.environ.copy()
     env[PROJECT_HOME_ENV] = str(PROJECT_ROOT)
+    env["PYTHONUTF8"] = "1"
     pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = (
         str(PROJECT_ROOT)

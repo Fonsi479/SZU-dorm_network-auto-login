@@ -15,6 +15,7 @@ from apps.windows_desktop.szu_windows_desktop import (
     DEFAULT_CONFIG_TEMPLATE,
     DesktopStatusResult,
     SzuDormWindowsApp,
+    build_control_env,
     get_windows_startup_link,
     hidden_popen_options,
     is_windows_startup_enabled,
@@ -30,6 +31,9 @@ from src.szu_netlogin.portal_detect import NetworkStatus
 
 
 class WindowsStartupTests(unittest.TestCase):
+    def test_control_subprocess_forces_utf8_output(self) -> None:
+        self.assertEqual(build_control_env()["PYTHONUTF8"], "1")
+
     def test_startup_detection_and_removal_are_idempotent(self) -> None:
         with TemporaryDirectory() as temp_dir:
             startup_dir = Path(temp_dir)
