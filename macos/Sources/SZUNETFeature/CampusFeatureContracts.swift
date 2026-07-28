@@ -20,6 +20,36 @@ public enum SZUNETReachabilityState: String, Codable, Equatable, Sendable {
     case unknown
 }
 
+public enum SZUNETNetworkCategory: String, Codable, Equatable, Sendable {
+    case dorm
+    case teaching
+    case ambiguous
+    case nonCampus
+    case unknown
+}
+
+public struct SZUNETProviderStatus: Codable, Equatable, Sendable {
+    public var provider: String
+    public var enabled: Bool
+    public var accountLabel: String
+    public var lifecycle: String
+    public var errorCode: String?
+
+    public init(
+        provider: String,
+        enabled: Bool,
+        accountLabel: String,
+        lifecycle: String,
+        errorCode: String? = nil
+    ) {
+        self.provider = provider
+        self.enabled = enabled
+        self.accountLabel = accountLabel
+        self.lifecycle = lifecycle
+        self.errorCode = errorCode
+    }
+}
+
 public struct SZUNETStatus: Codable, Equatable, Sendable {
     public var featureEnabled: Bool
     public var autoLoginEnabled: Bool
@@ -29,6 +59,8 @@ public struct SZUNETStatus: Codable, Equatable, Sendable {
     public var lastSuccessAt: Date?
     public var lastFailureAt: Date?
     public var errorCode: String?
+    public var networkCategory: SZUNETNetworkCategory?
+    public var providers: [SZUNETProviderStatus]?
 
     public init(
         featureEnabled: Bool = false,
@@ -38,7 +70,9 @@ public struct SZUNETStatus: Codable, Equatable, Sendable {
         internet: SZUNETReachabilityState = .unknown,
         lastSuccessAt: Date? = nil,
         lastFailureAt: Date? = nil,
-        errorCode: String? = nil
+        errorCode: String? = nil,
+        networkCategory: SZUNETNetworkCategory? = nil,
+        providers: [SZUNETProviderStatus]? = nil
     ) {
         self.featureEnabled = featureEnabled
         self.autoLoginEnabled = autoLoginEnabled
@@ -48,5 +82,7 @@ public struct SZUNETStatus: Codable, Equatable, Sendable {
         self.lastSuccessAt = lastSuccessAt
         self.lastFailureAt = lastFailureAt
         self.errorCode = errorCode
+        self.networkCategory = networkCategory
+        self.providers = providers
     }
 }

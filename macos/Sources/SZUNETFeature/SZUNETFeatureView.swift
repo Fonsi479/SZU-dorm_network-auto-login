@@ -38,6 +38,7 @@ public struct SZUNETFeatureView: View {
 
                 if featureEnabled {
                     statusGrid
+                    providerCard
                     actionCard
                     accountCard
                     diagnosticsCard
@@ -159,7 +160,7 @@ public struct SZUNETFeatureView: View {
                 Button { store.manualLogout() } label: {
                     Label("手动退出", systemImage: "rectangle.portrait.and.arrow.right")
                 }
-                .disabled(store.isWorking)
+                .disabled(store.isWorking || store.snapshot.status.networkCategory != .dorm)
 
                 Button { store.refresh() } label: {
                     Label("刷新状态", systemImage: "arrow.clockwise")
@@ -183,6 +184,27 @@ public struct SZUNETFeatureView: View {
                 .foregroundStyle(lastAction.isSuccess ? .green : .orange)
                 .textSelection(.enabled)
             }
+        }
+        .campusCard()
+    }
+
+    private var providerCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Provider 状态")
+                .font(.title3.bold())
+            LabeledContent(
+                "网络分类",
+                value: store.snapshot.status.networkCategory?.rawValue ?? "unknown"
+            )
+            ForEach(store.snapshot.status.providers ?? [], id: \.provider) { provider in
+                LabeledContent(
+                    provider.provider == "dorm" ? "Dorm Dr.COM" : "Teaching SRun",
+                    value: "\(provider.enabled ? "启用" : "停用") · \(provider.lifecycle) · \(provider.accountLabel.isEmpty ? "未设置标签" : provider.accountLabel)"
+                )
+            }
+            Text("Teaching 退出操作不可用；自动登录仅在唯一、已验证的环境分类下执行。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .campusCard()
     }

@@ -1,191 +1,173 @@
-# SZU Dorm Login
+# SZU Campus Network
 
-深圳大学宿舍区 Dr.COM / ePortal 自动登录工具。仓库按平台和技术栈维护三条相互独立的版本线。
+深圳大学校园网本地客户端：保留宿舍区 Dr.COM / ePortal 基线，并新增教学区 SRun Provider。Dorm 与 Teaching 独立启用、独立保存凭据，由唯一 Coordinator 负责环境门控、互斥、取消、退避和 fatal 熔断。
 
-## 三个版本
+> 当前 Teaching SRun 仅通过合成向量、离线 Fixture 与本地自动化验证。真实教学区登录、动态 ACID、现场源路由、账号产品后缀以及 SRun 注销均为 `PENDING_CAMPUS_VALIDATION`。Teaching 默认关闭，未证实的注销不会发送请求。
 
-| 版本 | 适用平台 | Git 分支 | 技术栈 | 维护状态 |
-|---|---|---|---|---|
-| `macpython` | macOS | `macpython` | Python、rumps、PyObjC | 已停止维护 |
-| `macswift` | macOS | `macswift` | Swift、AppKit、SwiftUI、Security、ServiceManagement | 当前推荐 |
-| `winpython` | Windows | `winpython` | Python、Tkinter、requests、keyring | 独立维护 |
+## 下载与版本
 
-`macpython` 是旧版 macOS Python 客户端，仅保留用于历史兼容和迁移参考，不再接收新功能、缺陷修复或维护更新。macOS 用户建议使用 `macswift`：它是原生 Swift 版本，运行时不需要 Python，启动和状态栏集成也更稳定。Windows 用户使用 `winpython`。
+当前公开候选是 `2.0.0-beta.1`，不是生产稳定版。GitHub 自动生成的 `Source code` 包含完整双平台源码；普通用户应下载与系统对应的 ZIP，而不是源码包。
 
-三个版本拥有独立的界面、启动机制、构建脚本、测试和 Release，不会把旧 macOS Python 客户端、macOS Swift 客户端和 Windows 客户端混在同一发布物中。
+| 版本线 | macOS | Windows | 状态 |
+|---|---|---|---|
+| 2.0 Beta 1 | [`macos-v2.0.0-beta.1`](https://github.com/Fonsi479/SZU-dorm_network-auto-login/releases/tag/macos-v2.0.0-beta.1) | [`windows-v2.0.0-beta.1`](https://github.com/Fonsi479/SZU-dorm_network-auto-login/releases/tag/windows-v2.0.0-beta.1) | 双 Provider；Teaching 默认关闭；分平台 prerelease |
+| 1.x Legacy | [`macos-v1.1.0`](https://github.com/Fonsi479/SZU-dorm_network-auto-login/releases/tag/macos-v1.1.0) | [`windows-v1.0.0`](https://github.com/Fonsi479/SZU-dorm_network-auto-login/releases/tag/windows-v1.0.0) | Dorm-only 历史归档，不含 v2 安全修复 |
 
-如需开发 Windows 版：
+macOS 与 Windows 始终使用独立 Tag、Release 和资产，但 v2 源码统一由 `main` 维护。完整分支、版本号和晋级规则见 [版本与发行策略](docs/VERSIONING_AND_RELEASES.md)。
+
+注意：历史 `macos-v1.1.0` 实际是 Python/rumps 版本，不是当前 Swift App；它只为回滚与迁移保留。
+
+## 安全原则
+
+- `nonCampus`、`ambiguous`、`unknown`、Provider 关闭或会话状态未知时，读取凭据和认证请求均为 0。
+- 手动登录与自动登录执行相同的环境、Portal 身份、源路由和明确离线门控；手动按钮不是绕过入口。
+- macOS 使用 Keychain，Windows 使用 Credential Manager；配置、CLI、进程参数、日志和诊断中不保存密码。
+- 认证请求绑定目标路由选出的源 IP；SRun 使用 HTTPS 默认 TLS 校验、固定 Portal 主机、禁用系统代理继承和跨主机重定向。
+- 任意时刻最多一个认证操作。网络 generation 改变、暂停或退出会取消旧任务，旧结果不得继续发送后续请求。
+- 不需要管理员权限，不修改 DNS、路由、VPN 或代理，不安装系统级守护进程，也不开放 localhost HTTP 端口。
+
+完整说明见 [SECURITY.md](SECURITY.md) 与 [PRIVACY.md](PRIVACY.md)。
+
+## Provider 与默认值
+
+| Provider | 协议 | 默认 | 凭据 | 注销 |
+|---|---|---:|---|---|
+| Dorm | Dr.COM / ePortal | 开启 | 独立 credential reference | 保留已验证基线 |
+| Teaching | SRun BX1 | 关闭 | 独立 credential reference | 禁用，等待现场验证 |
+
+两个 Provider 可以分别关闭。两个都开启时，Coordinator 也只会选择唯一 verified Provider；若两者同时 verified，则返回 `ENV_AMBIGUOUS` 并停止。
+
+## 独立发行
+
+macOS 与 Windows 使用同一份协议契约、Fixture 和错误码，但构建物完全独立，不互相携带运行时或桌面代码。
+
+### macOS
+
+- macOS 13 或更新版本；原生 Swift、AppKit/SwiftUI、Network.framework、Security、ServiceManagement。
+- 为兼容 1.x 升级、Bundle ID、Keychain 与登录项，App Bundle 仍名为 `SZU Dorm Login.app`；这不表示 v2 仅支持 Dorm。
+- 最终 App 不依赖 Python，也不依赖 Codex 管家仓库或外部相对路径 Package。
+- 状态栏提供 Dorm/Teaching 状态与开关、暂停/恢复、立即检查、明确登录、设置、诊断和退出。
+- App 内附无密码 JSON CLI `szu-campus-netctl`，供脚本或 Codex 管家可选调用。
+
+开发与验证：
 
 ```bash
-git switch winpython
-```
-
-## macOS 功能
-
-- 自动检测宿舍区网关和校园网出口，网络已连接时不会重复登录
-- 只有网关可达且源 IP 落在配置的校园网段时，才允许后台发送账号密码
-- Dr.COM 登录请求使用 Swift BSD Socket，并显式绑定已检测的校园网源 IP
-- 支持登录、退出、暂停/恢复自动登录和关闭/开启联网探测
-- 登录失败后按 2/5/10/15 分钟退避重试，系统唤醒后立即补检
-- 使用 macOS Keychain 保存密码，配置文件和日志不保存密码
-- 使用 ServiceManagement 原生管理“登录时启动”，不再安装 Python LaunchAgent
-- 原生设置窗口、通知、诊断报告和脱敏轮转日志
-- 可自动导入 `1.x` 版 `config.yaml`，并提示移除旧 Python LaunchAgent
-
-本项目仅面向深圳大学宿舍区 Dr.COM / ePortal，不处理教学区网络或 srun。
-
-## 系统要求
-
-- macOS 13 或更新版本
-- 本地构建需要 Apple Swift 工具链；安装 Xcode Command Line Tools 即可
-- 运行打包后的 App 不需要 Python，也不需要额外安装依赖
-
-## 构建、验证和运行
-
-在仓库根目录执行：
-
-```bash
+cd macos
+swift test --disable-automatic-resolution
+swift build --configuration release --disable-automatic-resolution
+cd ..
 bash scripts/build_app.sh
 bash scripts/verify_app.sh
-bash scripts/open_menubar_app.sh
 ```
 
-生成结果：
+App 产物：
 
 ```text
 dist/SZU Dorm Login.app
 ```
 
-构建脚本默认生成当前 Mac 架构的 App。验证会检查：
+### Windows
 
-- Swift 核心行为检查
-- Bundle 元数据与版本
-- 代码签名完整性
-- 可执行架构
-- App 内没有 Python 文件或 `libpython` 链接
+- Windows 10/11；Python 源码通过 PyInstaller 生成两个独立 PE，最终用户无需安装 Python。
+- `SZU Campus Network.exe` 是 GUI；`szu-campus-netctl.exe` 是 JSON CLI。
+- 密码只通过 GUI 写入 Windows Credential Manager；CLI 不接受密码字段、参数、环境变量或配置值。
 
-源码开发时可直接运行：
+源码检查（可在非 Windows 开发机运行）：
 
 ```bash
-bash scripts/run_menubar.sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+python3 scripts/verify_windows_package.py --package-root .
 ```
 
-运行纯 Swift 核心检查：
+PE 必须在 Windows 或 Windows CI 中构建：
 
-```bash
-bash scripts/run_swift_checks.sh
+```powershell
+py -3 -m pip install --require-hashes -r requirements-windows.lock
+py -3 scripts\build_windows_exe.py --version 2.0.0
+py -3 scripts\build_windows_package.py --version 2.0.0 --release-label beta.1
 ```
 
-## 首次使用
+## JSON CLI 契约
 
-打开 App 后，从状态栏的“账号与凭据 → 打开设置…”填写校园网账号。密码在设置窗口或“修改密码…”中保存，实际写入 macOS Keychain。
+CLI 从 stdin 读取一个 JSON 对象，stdout 只写一个 JSON 结果对象；stderr 仅允许脱敏诊断。请求不允许包含 `password`、`secret`、`token`、`cookie` 或凭据值。
 
-原生配置文件位于：
+示例：
+
+```json
+{"schemaVersion":1,"requestId":"local-status-1","command":"status","provider":"auto","interactive":false,"timeoutSeconds":15}
+```
+
+支持的高层命令为：
+
+```text
+status check login logout pause resume open-settings diagnostics
+```
+
+`login` 仍须经过 Coordinator 授权后才读取对应系统凭据。Teaching `logout` 返回 `SRUN_LOGOUT_DISABLED`。
+
+## 配置与迁移
+
+配置仅保存 Provider 开关、账号标签、credential reference 与非敏感网络参数，不保存密码。Teaching 在 v2 迁移后仍默认关闭。
+
+macOS 配置与日志：
 
 ```text
 ~/Library/Application Support/szu-netlogin/config.json
-```
-
-日志位于：
-
-```text
 ~/Library/Logs/szu-netlogin/netlogin.log
 ```
 
-诊断报告位于：
+Windows 配置与日志位于当前用户的本地应用数据目录。迁移不会自动恢复旧客户端、复制明文密码或删除旧文件；发现旧 macOS Python 配置/LaunchAgent 时只提供显式导入与清理路径。
 
-```text
-~/Library/Logs/szu-netlogin/diagnostics/
-```
+操作前请阅读 [迁移与回滚](docs/MIGRATION_AND_ROLLBACK.md)。
 
-配置示例见 [`config.example.json`](config.example.json)。通常直接使用设置窗口即可，不需要手工编辑 JSON。
+## Codex 管家可选适配
 
-## 从 Python macOS 版迁移
+独立 SZUNET App 是认证和凭据的唯一所有者。Codex 管家只能读取脱敏状态并发送高层命令；它不能读取密码，也不拥有 Provider、Coordinator、设置或最终 SZUNET App。
 
-第一次启动 Swift App 时会按以下顺序处理旧数据：
+默认边界是稳定 JSON CLI。若本地 Swift Workspace 使用 `SZUNETFeature`，也只能复用公开契约和高层控制，认证实现仍位于本仓库。没有 localhost HTTP 服务。
 
-1. 如果尚无 `config.json`，读取 `~/Library/Application Support/szu-netlogin/config.yaml`。
-2. 兼容读取 `SZU_NETLOGIN_HOME/config.yaml` 或开发目录中的 `config.yaml`。
-3. 把账号、网关、网段、门户参数和 Keychain 服务名写入权限为 `0600` 的 `config.json`。
-4. 继续使用原有 `szu-netlogin` Keychain 项目，不复制或显示密码。
-5. 如果检测到旧 Python LaunchAgent，明确询问后再移除，并迁移为 ServiceManagement 登录项。
+详见 [Codex 管家适配边界](docs/CODEX_BUTLER_ADAPTER.md)。
 
-旧配置不会被自动删除，可以在确认新版本工作正常后自行备份或清理。
+## 现场验收边界
 
-## 状态栏结构
+本仓库不会在开发机上主动运行真实校园登录、注销或循环探测，也不会断开或重配 Shadowrocket/VPN。返校后应从 Teaching 默认关闭开始，人工、小流量、逐项验证并记录脱敏证据。
 
-- 当前网络状态和探测详情
-- 立即登录
-- 退出当前账号
-- 自动登录
-- 联网状态探测
-- 账号与凭据
-  - 打开设置
-  - 修改账号
-  - 修改密码
-- 诊断与维护
-  - 生成诊断报告
-  - 打开配置文件
-  - 打开日志目录
-  - 重置暂停状态
-  - 运行原生自检
-- 登录时启动
-- 退出应用
+- [返校验收清单](docs/CAMPUS_ACCEPTANCE_CHECKLIST.md)
+- [发行检查清单](docs/RELEASE_CHECKLIST.md)
+- [迁移与回滚](docs/MIGRATION_AND_ROLLBACK.md)
 
-## 命令行入口
-
-打包后的 Swift 可执行文件也提供只读或控制入口：
-
-```bash
-"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --version
-"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --self-test
-"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --ui-smoke-test
-"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --probe
-"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --session-status
-"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --login
-"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --check-and-login
-"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --logout
-"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --diagnostic-report
-"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --launch-at-login-status
-"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --auto-login-status
-"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --pause-auto-login
-"dist/SZU Dorm Login.app/Contents/MacOS/SZU Dorm Login" --resume-auto-login
-```
+任何未执行的真实网络、Windows Defender/SmartScreen、Authenticode、Apple notarization 或无障碍设备验收都必须继续标为 `PENDING_CAMPUS_VALIDATION` 或 `BLOCKED`，不得写成通过。
 
 ## 源码结构
 
 ```text
-macos/Package.swift                       Swift Package
-macos/Sources/SZUNetCore/                 配置、网络、Dr.COM、Keychain、状态和诊断核心
-macos/Sources/SZUDormLogin/                可测试的 AppKit/SwiftUI 应用层
-macos/Sources/SZUDormLoginExecutable/      极薄的应用启动入口
-macos/Tests/                               Swift Testing 自动化测试
-macos/Resources/Info.plist                 App Bundle 元数据
-scripts/build_app.sh                       Swift release 构建和 App 打包
-scripts/verify_app.sh                      App 完整性与无 Python 验证
-config.example.json                        可公开的原生配置示例
+macos/                         原生 Swift App、CLI、SZUNETFeature 与测试
+apps/windows_desktop/          Windows Tk GUI
+src/szu_netlogin/              Windows/Python Provider、Coordinator 与 CLI
+protocol-spec/                 双平台共享 Schema、Fixture、向量和错误码
+packaging/windows/             PyInstaller spec
+scripts/                       平台构建、验证、SBOM 与发行脚本
+docs/                          架构、验收、适配、迁移和发行说明
 ```
 
-## 安全边界
+`reports/` 仅保存在开发机且被 Git 忽略；公开仓库和 GitHub Source archive 不包含本机验收记录。
 
-- 后台自动登录必须同时满足“宿舍区网关可达”和“源 IP 位于配置的校园网段”
-- 手动点击登录由用户明确触发，不经过自动登录环境门控
-- 密码只从 Keychain 读取，并在 HTTP 参数构造后直接发送给配置的 Dr.COM 地址
-- 日志会隐藏账号、密码和完整登录 URL
-- App 不需要 `sudo`，也不安装系统级守护进程
+## 分支与历史版本
 
-公开仓库或 Release 中不要包含真实 `config.json`、旧 `config.yaml`、日志、诊断报告、账号密码、Token 或本机绝对路径。
+| 分支 | 用途 | 状态 |
+|---|---|---|
+| `main` | v2 唯一源码主线：共享协议、macOS、Windows 与可选适配 | 当前维护 |
+| `macswift` | macOS Swift 1.x Dorm-only | Legacy，只读保留 |
+| `winpython` | Windows Python 1.x Dorm-only | Legacy，只读保留 |
+| `macpython` | macOS Python 1.x | EOL 历史归档 |
 
-## Release 约定
+v2 不再创建长期 `macos-v2` / `windows-v2` 源码分支；平台边界由构建目录、Tag 和 Release 资产保证。历史 Tag 不删除、不重写。
 
-- `macpython` Release：仅提供旧版 macOS Python 客户端的历史归档，不再维护
-- `macswift` Release：只包含原生 Swift `.app` 和 macOS Swift 源码，macOS 用户优先选择此版本
-- `winpython` Release：只包含 Python Windows 客户端和独立 Windows 压缩包
-- 三个版本不复用安装包，也不把其他版本的桌面代码混入 Release
+## 开源与第三方事实
 
-## 致谢
+项目采用 [MIT License](LICENSE)。SRun 实现为 clean-room 实现；公开 MIT 项目只用于协议事实和黑盒向量交叉验证，没有复制第三方实现源码。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+历史 Dorm 参考：
 
 - [1136623363/SZU-Drcom](https://github.com/1136623363/SZU-Drcom)
 - [Sleepstars/SZU-login](https://github.com/Sleepstars/SZU-login)
-
-本项目采用 MIT License。

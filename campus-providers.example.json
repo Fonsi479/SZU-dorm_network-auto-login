@@ -1,0 +1,15 @@
+{
+  "automaticEnabled": true,
+  "dorm": {
+    "accountLabel": "student-label",
+    "credentialReference": "dorm-default",
+    "enabled": true
+  },
+  "schemaVersion": 2,
+  "teaching": {
+    "accountLabel": "student-label@hlw",
+    "credentialReference": "teaching-default",
+    "enabled": false
+  },
+  "teachingPortalURL": "https://net.szu.edu.cn/srun_portal_pc"
+}

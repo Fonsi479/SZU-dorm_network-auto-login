@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/szu-campus-network/command_result.schema.json",
+  "title": "SZU Campus Network Command Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "requestId",
+    "outcome",
+    "provider",
+    "networkContext",
+    "sessionState",
+    "errorCode",
+    "retryable",
+    "message",
+    "timestamp"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "outcome": {
+      "enum": [
+        "succeeded",
+        "unchanged",
+        "failed",
+        "cancelled",
+        "blocked"
+      ]
+    },
+    "provider": {
+      "enum": [
+        "none",
+        "auto",
+        "dorm",
+        "teaching"
+      ]
+    },
+    "networkContext": {
+      "enum": [
+        "dorm",
+        "teaching",
+        "otherCampus",
+        "nonCampus",
+        "ambiguous",
+        "unknown"
+      ]
+    },
+    "sessionState": {
+      "enum": [
+        "online",
+        "offline",
+        "unknown",
+        "blocked"
+      ]
+    },
+    "accountState": {
+      "enum": [
+        "matching",
+        "different",
+        "unknown",
+        "notApplicable"
+      ]
+    },
+    "clientIP": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 64
+    },
+    "acID": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 32
+    },
+    "errorCode": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 80
+    },
+    "serverCode": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 160
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "message": {
+      "type": "string",
+      "maxLength": 1000
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "sanitizedDiagnostics": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

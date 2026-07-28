@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/szu-campus-network/config.schema.json",
+  "title": "SZU Campus Network Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "general",
+    "providers",
+    "network"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "general": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "autoDetect",
+        "connectivityProbe",
+        "launchAtLogin"
+      ],
+      "properties": {
+        "autoDetect": {
+          "type": "boolean"
+        },
+        "connectivityProbe": {
+          "type": "boolean"
+        },
+        "launchAtLogin": {
+          "type": "boolean"
+        },
+        "paused": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dorm",
+        "teaching"
+      ],
+      "properties": {
+        "dorm": {
+          "$ref": "#/$defs/provider"
+        },
+        "teaching": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/provider"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "accountSuffixMode": {
+                  "type": "string",
+                  "enum": [
+                    "auto",
+                    "none",
+                    "hlw",
+                    "xyw",
+                    "custom"
+                  ]
+                },
+                "customSuffix": {
+                  "type": "string",
+                  "maxLength": 32
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "probeTimeoutSeconds",
+        "minimumProbeIntervalSeconds"
+      ],
+      "properties": {
+        "probeTimeoutSeconds": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 15
+        },
+        "minimumProbeIntervalSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3600
+        },
+        "allowPortalIPOverride": {
+          "type": "boolean",
+          "default": false
+        },
+        "portalHost": {
+          "type": "string",
+          "const": "net.szu.edu.cn"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "accountLabel",
+        "credentialRef"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "accountLabel": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "credentialRef": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{1,160}$"
+        }
+      }
+    }
+  }
+}

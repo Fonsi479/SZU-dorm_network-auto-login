@@ -10,17 +10,17 @@ struct CredentialResolver {
                 service: configuration.security.keychainService,
                 account: configuration.keychainAccount
             )
-            return password?.isEmpty == false
-                ? password
-                : Self.privateFilePassword(path: configuration.security.privateFilePath)
-        case .environment:
-            return ProcessInfo.processInfo.environment[configuration.security.passwordEnvironmentName]
-        case .privateFile:
-            return Self.privateFilePassword(path: configuration.security.privateFilePath)
+            if password?.isEmpty == false { return password }
+            if Self.legacyPrivateFileExists(path: configuration.security.privateFilePath) {
+                throw SZUNetError.credential("检测到旧密码文件；请在应用中明确迁移到 macOS 钥匙串。")
+            }
+            return nil
+        case .environment, .privateFile:
+            throw SZUNetError.credential("旧明文密码来源已停用；请明确迁移到 macOS 钥匙串。")
         }
     }
 
-    private static func privateFilePassword(path: String) -> String? {
+    private static func legacyPrivateFileExists(path: String) -> Bool {
         let expanded: String
         if path == "~" {
             expanded = FileManager.default.homeDirectoryForCurrentUser.path
@@ -30,25 +30,6 @@ struct CredentialResolver {
         } else {
             expanded = path
         }
-        guard let text = try? String(contentsOfFile: expanded, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !text.isEmpty else { return nil }
-        for line in text.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty, !trimmed.hasPrefix("#"),
-                  let colon = trimmed.firstIndex(of: ":"),
-                  trimmed[..<colon].trimmingCharacters(in: .whitespaces) == "password" else {
-                continue
-            }
-            var value = trimmed[trimmed.index(after: colon)...]
-                .trimmingCharacters(in: .whitespaces)
-            if value.count >= 2,
-               (value.first == "\"" || value.first == "'"),
-               value.last == value.first {
-                value = String(value.dropFirst().dropLast())
-            }
-            return value
-        }
-        return text.components(separatedBy: .newlines).first
+        return FileManager.default.fileExists(atPath: expanded)
     }
 }

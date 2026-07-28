@@ -1,0 +1,29 @@
+name: Repository source and history security
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  repository-secret-scan:
+    name: Source and Git history scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Reject credentials in source and reachable history
+        run: python3 scripts/scan_repository_secrets.py --source-root . --history
+
+      - name: Check patch whitespace
+        run: git diff --check HEAD^

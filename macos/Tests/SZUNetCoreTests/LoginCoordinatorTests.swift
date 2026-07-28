@@ -53,6 +53,7 @@ struct LoginCoordinatorTests {
         #expect(result.outcome == .unchanged)
         #expect(result.reason == "session_already_online")
         #expect(await fixture.client.loginRequests.isEmpty)
+        #expect(fixture.credentialStore.passwordReadCount == 0)
     }
 
     @Test("auto-login fails closed when session state is unknown")
@@ -65,6 +66,7 @@ struct LoginCoordinatorTests {
         #expect(result.outcome == .unchanged)
         #expect(result.reason == "session_unverified")
         #expect(await fixture.client.loginRequests.isEmpty)
+        #expect(fixture.credentialStore.passwordReadCount == 0)
     }
 
     @Test("pausing while a session check is running prevents the final credential send")
@@ -99,9 +101,9 @@ struct LoginCoordinatorTests {
         #expect(await fixture.client.loginRequests.isEmpty)
     }
 
-    @Test("manual login remains available while auto-login is paused")
-    func manualLoginWorksWhilePaused() async throws {
-        let fixture = try CoordinatorFixture(sessionOnline: nil)
+    @Test("manual login remains available while paused after verified offline gating")
+    func manualLoginWorksWhilePausedAfterVerifiedOffline() async throws {
+        let fixture = try CoordinatorFixture(sessionOnline: false)
         defer { fixture.removeTemporaryFiles() }
         try fixture.pauseStore.pause()
 
@@ -111,7 +113,38 @@ struct LoginCoordinatorTests {
         #expect(result.outcome == .authenticated)
         #expect(fixture.pauseStore.isPaused)
         #expect(requests.count == 1)
-        #expect(requests.first?.sourceIP.isEmpty == true)
+        #expect(requests.first?.sourceIP == fixture.sourceIP)
+        #expect(fixture.credentialStore.passwordReadCount == 1)
+    }
+
+    @Test("manual login reads no credential when session state is unknown")
+    func manualLoginSkipsUnknownSessionWithoutCredentialRead() async throws {
+        let fixture = try CoordinatorFixture(sessionOnline: nil)
+        defer { fixture.removeTemporaryFiles() }
+
+        let result = await fixture.coordinator.loginNow()
+
+        #expect(result.outcome == .unchanged)
+        #expect(result.reason == "session_unverified")
+        #expect(await fixture.client.loginRequests.isEmpty)
+        #expect(fixture.credentialStore.passwordReadCount == 0)
+    }
+
+    @Test("manual login reads no credential on a non-campus route")
+    func manualLoginSkipsNonCampusWithoutCredentialRead() async throws {
+        let fixture = try CoordinatorFixture(
+            sessionOnline: false,
+            sourceIP: "192.0.2.44",
+            autoLoginAvailable: false
+        )
+        defer { fixture.removeTemporaryFiles() }
+
+        let result = await fixture.coordinator.loginNow()
+
+        #expect(result.outcome == .unchanged)
+        #expect(result.reason == "unverified_source_ip")
+        #expect(await fixture.client.loginRequests.isEmpty)
+        #expect(fixture.credentialStore.passwordReadCount == 0)
     }
 
     @Test("manual logout pauses auto-login before mapping verified success")
@@ -210,13 +243,15 @@ private actor StubDrCOMService: DrCOMServicing {
 
 private final class StubCredentialStore: CredentialStoring {
     private let storedPassword: String?
+    private(set) var passwordReadCount = 0
 
     init(password: String?) {
         storedPassword = password
     }
 
     func password(service: String, account: String) throws -> String? {
-        storedPassword
+        passwordReadCount += 1
+        return storedPassword
     }
 
     func setPassword(_ password: String, service: String, account: String) throws {}
@@ -228,7 +263,7 @@ private final class StubNetworkProbe: NetworkProbing {
     let environment: NetworkEnvironment
     private(set) var internetProbeCalls = 0
 
-    init(sourceIP: String) {
+    init(sourceIP: String, autoLoginAvailable: Bool = true) {
         status = NetworkStatus(
             gatewayReachable: true,
             campusInternetOK: false,
@@ -239,9 +274,9 @@ private final class StubNetworkProbe: NetworkProbing {
             internetPortalRedirect: true
         )
         environment = NetworkEnvironment(
-            label: "宿舍网络",
-            isDormNetwork: true,
-            autoLoginAvailable: true,
+            label: autoLoginAvailable ? "宿舍网络" : "未验证网络",
+            isDormNetwork: autoLoginAvailable,
+            autoLoginAvailable: autoLoginAvailable,
             sourceIP: sourceIP,
             reason: "source_ip_verified"
         )
@@ -270,11 +305,18 @@ private struct CoordinatorFixture {
     let paths: AppPaths
     let pauseStore: PauseStore
     let client: StubDrCOMService
+    let credentialStore: StubCredentialStore
     let networkProbe: StubNetworkProbe
     let coordinator: LoginCoordinator
-    let sourceIP = "172.24.59.154"
+    let sourceIP: String
 
-    init(sessionOnline: Bool?, holdSessionCheck: Bool = false) throws {
+    init(
+        sessionOnline: Bool?,
+        holdSessionCheck: Bool = false,
+        sourceIP: String = "172.24.59.154",
+        autoLoginAvailable: Bool = true
+    ) throws {
+        self.sourceIP = sourceIP
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("szunet-coordinator-tests-\(UUID().uuidString)", isDirectory: true)
         paths = AppPaths(
@@ -297,11 +339,16 @@ private struct CoordinatorFixture {
             holdSessionCheck: holdSessionCheck
         )
         client = stubClient
-        let stubNetworkProbe = StubNetworkProbe(sourceIP: sourceIP)
+        let stubCredentialStore = StubCredentialStore(password: "test-secret")
+        credentialStore = stubCredentialStore
+        let stubNetworkProbe = StubNetworkProbe(
+            sourceIP: sourceIP,
+            autoLoginAvailable: autoLoginAvailable
+        )
         networkProbe = stubNetworkProbe
         coordinator = LoginCoordinator(
             configurationStore: configurationStore,
-            credentials: StubCredentialStore(password: "test-secret"),
+            credentials: stubCredentialStore,
             pauseStore: pauseStore,
             networkProbe: stubNetworkProbe,
             logger: AppLogger(fileURL: paths.logFile),

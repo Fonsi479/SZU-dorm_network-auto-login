@@ -29,6 +29,8 @@ final class AppModel: ObservableObject {
     @Published var networkProbeEnabled = true
     @Published var launchAtLoginState: LaunchAtLoginController.State = .disabled
     @Published var passwordSaved = false
+    @Published var campusProviderConfiguration = CampusProductConfiguration.default
+    @Published var campusSnapshot: CampusProductSnapshot?
 
     var onResult: ((LoginActionResult, Bool) -> Void)?
     var onConfigurationMigrated: ((URL) -> Void)?
@@ -37,9 +39,12 @@ final class AppModel: ObservableObject {
     let logger: AppLogger
     let launchAtLogin: LaunchAtLoginController
     let automation: AppAutomationScheduler
+    let campusSettingsStore: CampusProviderSettingsStore
+    let campusProductController: CampusProductController?
 
     var lastNetworkStatus: NetworkStatus?
     var lastEnvironment: NetworkEnvironment?
+    var lastCampusLifecycle: String?
 
     init(
         coordinator: LoginCoordinator? = nil,
@@ -52,6 +57,15 @@ final class AppModel: ObservableObject {
         self.coordinator = coordinator ?? LoginCoordinator(logger: logger)
         self.launchAtLogin = launchAtLogin
         self.automation = automation ?? AppAutomationScheduler()
+        let paths = self.coordinator.configurationStore.paths
+        campusSettingsStore = CampusProviderSettingsStore(
+            fileURL: paths.campusProviderConfigurationFile
+        )
+        let legacyConfiguration = try? self.coordinator.configurationStore.load().configuration
+        campusProviderConfiguration = (try? campusSettingsStore.load(
+            legacyConfiguration: legacyConfiguration
+        )) ?? .default
+        campusProductController = try? CampusProductRuntime.make(paths: paths)
 
         networkProbeEnabled = defaults.object(forKey: "networkProbeEnabled") == nil
             ? true
@@ -63,7 +77,7 @@ final class AppModel: ObservableObject {
 
     func start() {
         refreshStatus(allowAutoLogin: false)
-        automation.startTimers(periodicInterval: 30, initialDelay: 5) { [weak self] in
+        automation.startTimers(periodicInterval: 60, initialDelay: 5) { [weak self] in
             self?.refreshStatus()
         }
     }
@@ -78,6 +92,6 @@ final class AppModel: ObservableObject {
         logger.info("检测到系统唤醒，立即补做联网状态检查。")
         automation.cancelProbe()
         isRefreshing = false
-        refreshStatus()
+        notifyCampusNetworkChangedAndRefresh()
     }
 }

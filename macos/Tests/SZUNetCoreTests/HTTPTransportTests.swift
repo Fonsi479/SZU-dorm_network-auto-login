@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import SZUNetCore
@@ -74,6 +75,145 @@ struct HTTPTransportTests {
             #expect(error.localizedDescription.contains("cancelled"))
         }
         #expect(MockURLProtocol.wasStopped)
+    }
+
+    @Test("source-bound request reaches loopback from the requested local IP")
+    func sourceBoundRequestUsesRequestedLoopbackAddress() async throws {
+        let server = try LoopbackHTTPServer()
+        async let peerIP = server.serveOne()
+        let transport = URLSessionHTTPTransport()
+
+        let response = try await transport.get(
+            try #require(URL(string: "http://127.0.0.1:\(server.port)/bound")),
+            query: [:],
+            headers: [:],
+            timeout: 2,
+            sourceIP: "127.0.0.1"
+        )
+
+        #expect(response.statusCode == 200)
+        #expect(response.bodyText == "OK")
+        #expect(try await peerIP == "127.0.0.1")
+    }
+
+    @Test("unavailable source address fails closed without sending a request")
+    func unavailableSourceAddressFailsClosed() async throws {
+        let server = try LoopbackHTTPServer()
+        async let peerIP = server.serveOne(timeoutMilliseconds: 500)
+        let transport = URLSessionHTTPTransport()
+
+        do {
+            _ = try await transport.get(
+                try #require(URL(string: "http://127.0.0.1:\(server.port)/must-not-send")),
+                query: [:],
+                headers: [:],
+                timeout: 1,
+                sourceIP: "192.0.2.44"
+            )
+            Issue.record("transport ignored an unavailable required source address")
+        } catch {
+            #expect(error.localizedDescription.contains("source") || error.localizedDescription.contains("绑定"))
+        }
+        #expect(try await peerIP == nil)
+    }
+}
+
+private final class LoopbackHTTPServer: @unchecked Sendable {
+    private let descriptor: Int32
+    let port: UInt16
+
+    init() throws {
+        let socketDescriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard socketDescriptor >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        var reuse: Int32 = 1
+        guard setsockopt(
+            socketDescriptor,
+            SOL_SOCKET,
+            SO_REUSEADDR,
+            &reuse,
+            socklen_t(MemoryLayout.size(ofValue: reuse))
+        ) == 0 else {
+            Darwin.close(socketDescriptor)
+            throw POSIXError(.init(rawValue: errno) ?? .EIO)
+        }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0
+        guard inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1 else {
+            Darwin.close(socketDescriptor)
+            throw POSIXError(.EINVAL)
+        }
+        let bindResult = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(socketDescriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0, Darwin.listen(socketDescriptor, 1) == 0 else {
+            Darwin.close(socketDescriptor)
+            throw POSIXError(.init(rawValue: errno) ?? .EIO)
+        }
+        var bound = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameResult = withUnsafeMutablePointer(to: &bound) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(socketDescriptor, $0, &length)
+            }
+        }
+        guard nameResult == 0 else {
+            Darwin.close(socketDescriptor)
+            throw POSIXError(.init(rawValue: errno) ?? .EIO)
+        }
+        descriptor = socketDescriptor
+        port = UInt16(bigEndian: bound.sin_port)
+    }
+
+    deinit { Darwin.close(descriptor) }
+
+    func serveOne(timeoutMilliseconds: Int32 = 2_000) async throws -> String? {
+        let listener = descriptor
+        return try await Task.detached {
+            var readiness = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
+            let pollResult = Darwin.poll(&readiness, 1, timeoutMilliseconds)
+            guard pollResult > 0 else { return nil }
+            var peer = sockaddr_in()
+            var peerLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let client = withUnsafeMutablePointer(to: &peer) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.accept(listener, $0, &peerLength)
+                }
+            }
+            guard client >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+            defer { Darwin.close(client) }
+            var request = [UInt8](repeating: 0, count: 4_096)
+            let bytesRead = request.withUnsafeMutableBytes { buffer in
+                Darwin.read(client, buffer.baseAddress, buffer.count)
+            }
+            guard bytesRead > 0 else {
+                throw POSIXError(.init(rawValue: errno) ?? .EIO)
+            }
+            let response = Data("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK".utf8)
+            try response.withUnsafeBytes { bytes in
+                guard let baseAddress = bytes.baseAddress else { return }
+                var offset = 0
+                while offset < bytes.count {
+                    let written = Darwin.write(
+                        client,
+                        baseAddress.advanced(by: offset),
+                        bytes.count - offset
+                    )
+                    guard written > 0 else {
+                        throw POSIXError(.init(rawValue: errno) ?? .EIO)
+                    }
+                    offset += written
+                }
+            }
+            var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            guard inet_ntop(AF_INET, &peer.sin_addr, &buffer, socklen_t(INET_ADDRSTRLEN)) != nil else {
+                throw POSIXError(.init(rawValue: errno) ?? .EIO)
+            }
+            return String(cString: buffer)
+        }.value
     }
 }
 

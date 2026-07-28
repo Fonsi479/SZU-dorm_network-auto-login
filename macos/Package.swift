@@ -12,9 +12,9 @@ let package = Package(
         .library(name: "SZUNETFeature", targets: ["SZUNETFeature"]),
         .library(name: "SZUDormLoginApp", targets: ["SZUDormLoginApp"]),
         .executable(name: "SZUDormLogin", targets: ["SZUDormLogin"]),
+        .executable(name: "szu-campus-netctl", targets: ["SZUCampusNetctl"]),
     ],
     dependencies: [
-        .package(path: "../../Shared/CodexButlerSecurity"),
         // Command Line Tools installations do not always bundle XCTest/Testing.
         // Keep the official Swift Testing package test-only and version-pinned.
         .package(
@@ -25,9 +25,7 @@ let package = Package(
     targets: [
         .target(
             name: "SZUNetCore",
-            dependencies: [
-                .product(name: "CodexButlerSecurity", package: "CodexButlerSecurity"),
-            ],
+            dependencies: [],
             linkerSettings: [
                 .linkedFramework("CoreWLAN"),
                 .linkedFramework("Security"),
@@ -57,6 +55,12 @@ let package = Package(
             name: "SZUDormLogin",
             dependencies: ["SZUDormLoginApp"],
             path: "Sources/SZUDormLoginExecutable"
+        ),
+        .executableTarget(
+            name: "SZUCampusNetctl",
+            dependencies: ["SZUNetCore"],
+            path: "Sources/SZUCampusNetctl",
+            linkerSettings: [.linkedFramework("AppKit")]
         ),
         .testTarget(
             name: "SZUNetCoreTests",

@@ -4,7 +4,7 @@ import SZUNetCore
 @MainActor
 extension MenuBarController {
     @objc func loginNow() {
-        if !model.passwordSaved {
+        if model.campusProductController == nil, !model.passwordSaved {
             guard promptForPassword(title: "首次登录需要密码") else { return }
         }
         model.loginNow()
@@ -20,6 +20,14 @@ extension MenuBarController {
 
     @objc func toggleProbe() {
         model.setNetworkProbeEnabled(!model.networkProbeEnabled)
+    }
+
+    @objc func toggleDormProvider() {
+        model.setProviderEnabled(.dorm, enabled: !model.campusProviderConfiguration.dorm.enabled)
+    }
+
+    @objc func toggleTeachingProvider() {
+        model.setProviderEnabled(.teaching, enabled: !model.campusProviderConfiguration.teaching.enabled)
     }
 
     @objc func toggleLaunchAtLogin() {

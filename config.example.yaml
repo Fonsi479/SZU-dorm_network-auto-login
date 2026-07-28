@@ -1,0 +1,61 @@
+schemaVersion: 1
+
+general:
+  autoDetect: true
+  connectivityProbe: true
+  launchAtLogin: false
+  paused: false
+
+providers:
+  dorm:
+    enabled: true
+    accountLabel: "你的校园卡号，不要写密码"
+    credentialRef: "provider:dorm:primary"
+  teaching:
+    enabled: false
+    accountLabel: "你的校园卡号，不要写密码"
+    credentialRef: "provider:teaching:primary"
+    accountSuffixMode: "auto"
+    customSuffix: ""
+
+auth:
+  type: dorm_drcom
+  login_url: "http://172.30.255.42:801/eportal/portal/login"
+  # 留空时会默认把 login_url 末尾的 /login 推导为 /logout；如果学校接口变了，再抓包后填写真实地址。
+  logout_url: ""
+  # 留空时会从 login_url 主机推导为 http://网关/a79.htm；也可填写浏览器门户注销页完整地址。
+  logout_page_url: ""
+  # 留空时会从 logout_url 推导为 /mac/unbind。
+  unbind_url: ""
+  callback: "dr1003"
+  logout_callback: "dr1004"
+  logout_js_version: "4.1.3"
+  login_method: "1"
+  account_prefix: ",1,"
+  timeout_seconds: 8
+
+user:
+  username: "你的校园卡号，不要写密码"
+
+network:
+  portalHost: "net.szu.edu.cn"
+  dorm_gateway_hosts:
+    - "172.30.255.42"
+  # 状态栏会结合 Wi-Fi 名称和校园网源 IP 判断是否处于宿舍网络。
+  campus_wifi_names:
+    - "SZU_CTC&CMCC"
+  # 只有网关可达且本机源 IP 落在这些校园网段时，才会自动发送登录请求。
+  campus_source_networks:
+    - "172.16.0.0/12"
+  timeout_seconds: 3
+  max_test_urls: 3
+  test_urls:
+    - "http://captive.apple.com/hotspot-detect.html"
+    - "http://www.baidu.com/"
+    - "https://www.baidu.com/"
+
+security:
+  # Windows 固定使用 Credential Manager；配置中不保存密码。
+  password_source: "keychain"
+  keychain_service: "szu-netlogin"
+  keychain_account: ""

@@ -40,6 +40,28 @@ extension AppModel {
         }
     }
 
+    func setProviderEnabled(_ providerID: CampusProviderID, enabled: Bool) {
+        var updated = campusProviderConfiguration
+        if providerID == .dorm {
+            updated.dorm.enabled = enabled
+        } else {
+            updated.teaching.enabled = enabled
+        }
+        do {
+            try saveCampusProviderConfiguration(updated)
+        } catch {
+            onResult?(
+                LoginActionResult(
+                    outcome: .failed,
+                    title: "Provider 设置保存失败",
+                    detail: error.localizedDescription,
+                    reason: "provider_settings_error"
+                ),
+                true
+            )
+        }
+    }
+
     func setNetworkProbeEnabled(_ enabled: Bool) {
         networkProbeEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: "networkProbeEnabled")

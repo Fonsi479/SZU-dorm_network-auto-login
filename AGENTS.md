@@ -1,41 +1,45 @@
-# SZUNET 工作边界
+# SZU Campus Network 工作边界
 
 ## 职责
 
-- 只负责宿舍区 Dr.COM / ePortal 环境识别、状态读取、手动登录/退出、自动登录门控和凭据保存。
+- 负责宿舍区 Dr.COM / ePortal 与教学区 SRun 的环境识别、状态读取、显式登录、自动登录门控和凭据保存。
+- Teaching Provider 默认关闭；在现场契约完成验证前不得发送 Teaching 注销请求。
 - 不负责远程控制、Codex 用量、项目保护或 CodexButler 导航。
 - 当前不在校园网环境：默认只做 fake、mock、静态审计和离线 UI 测试，不执行真实 Portal 登录/退出。
 
 ## 目录
 
-- `macos/Sources/SZUNetCore/`：网络协议、状态机、持久化与 Keychain。
-- `macos/Sources/SZUNETFeature/`：公共接口 `SZUNETModule`、`SZUNETFeatureStore`、`SZUNETFeatureView`。
+- `macos/Sources/SZUNetCore/`：双 Provider、Coordinator、状态机、持久化与 Keychain。
+- `macos/Sources/SZUNETFeature/`：供可选宿主消费的高层状态与命令契约，不拥有认证生命周期。
 - `macos/Sources/SZUDormLogin/`：独立 macOS App 的薄入口和菜单栏 UI。
 - `macos/Tests/`：Core、App 与 Feature 测试。
+- `src/szu_netlogin/`：Windows/Python 双 Provider、Coordinator 与 JSON CLI。
+- `apps/windows_desktop/`：独立 Windows Tk GUI。
+- `protocol-spec/`：两平台共享的 Schema、Fixture 与合成向量。
 
 ## 构建与测试
 
 ```bash
-cd "/Users/fonsi/Documents/CodexProject/SZUNET/macos"
-swift build
-swift test
+cd macos
+swift build --disable-automatic-resolution
+swift test --disable-automatic-resolution
+cd ..
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 ```
 
 不要用真实账号或真实校园网请求作为自动化测试。
 
 ## 公共接口
 
-- `SZUNETModule`：configure、refresh、manualLogin、manualLogout、saveCredentials、runAutomaticLoginIfDue。
-- `SZUNETFeatureStore`：`@Published snapshot`、启动/停止、周期刷新和明确操作。
-- `SZUNETFeatureView`：可嵌入独立 App 或 CodexButler 的设置/详情页面。
-- `SZUNETSnapshot.status`：启用、自动登录、环境、Portal、互联网、最后成功/失败和错误码。
+- JSON CLI 与 `SZUNETFeature` 只能交换脱敏状态和高层命令，不接受或返回密码。
+- 独立 SZUNET App 是 Provider、Coordinator、凭据、设置与最终 Bundle 的唯一所有者。
+- CodexButler 只是可选消费者，不得复制 Provider 或创建第二套认证所有者。
 
 ## 数据兼容
 
 - 旧独立 App Bundle ID 保持 `com.szu-netlogin.dorm-login`。
-- 旧 Keychain service 保持 `szu-netlogin`；CodexButler 接管数据使用 `com.local.CodexQuotaBar.szu-netlogin`，不得静默改名或删除源项。
-- CodexButler 注入目录保持 `~/Library/Application Support/CodexQuotaBar/Campus`。
-- UserDefaults 键 `settings.campusFeatureEnabled` 与 `settings.campusAutoLoginEnabled` 由聚合壳保留。
+- 旧 Keychain service 保持 `szu-netlogin`，不得静默改名、复制或删除源项。
+- macOS App 名称与 Bundle ID 为升级兼容而保留；外层产品与 Release 名称使用 `SZU Campus Network`。
 
 ## 禁止边界
 
@@ -46,5 +50,5 @@ swift test
 
 ## 验证校园网功能
 
-- 默认运行 `swift test`，重点覆盖双重环境门控、手动退出抑制、取消和退避。
+- 默认运行两平台测试，重点覆盖环境门控、零凭据读取、Provider 互斥、取消、退避与脱敏。
 - 只有用户明确说明处于校园网且授权后，才可执行真实探测；登录或退出仍需再次确认。

@@ -1,0 +1,86 @@
+name: Windows v2 checks and package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHONUTF8: "1"
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run regression tests and Tk smoke test
+        env:
+          SZU_RUN_TK_SMOKE: "1"
+        run: python -m unittest discover -s tests -v
+
+      - name: Verify Windows-only source boundary
+        run: python scripts/verify_windows_package.py
+
+  build-windows-gui:
+    if: github.event_name != 'pull_request'
+    needs: test-windows
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install reproducible build dependencies
+        run: python -m pip install --require-hashes -r requirements-windows.lock
+
+      - name: Build standalone windowed executable
+        run: python scripts/build_windows_exe.py --version 2.0.0
+
+      - name: Verify PE file and frozen self-test
+        shell: pwsh
+        run: |
+          python scripts/verify_windows_package.py --executable "dist/windows-app/SZU Campus Network.exe"
+          $process = Start-Process -FilePath "dist/windows-app/SZU Campus Network.exe" -ArgumentList "--self-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Frozen GUI self-test failed with exit code $($process.ExitCode)"
+          }
+          python scripts/verify_windows_package.py --executable "dist/windows-app/szu-campus-netctl.exe"
+          $process = Start-Process -FilePath "dist/windows-app/szu-campus-netctl.exe" -ArgumentList "--self-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Frozen JSON CLI self-test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Assemble end-user double-click package
+        run: |
+          python scripts/build_windows_package.py --version 2.0.0 --release-label beta.1 --executable "dist/windows-app/SZU Campus Network.exe" --cli-executable "dist/windows-app/szu-campus-netctl.exe"
+          python scripts/verify_windows_package.py --release-root "dist/windows-staging/SZU-Campus-Network-Windows-v2.0.0-beta.1"
+
+      - name: Upload Windows GUI package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: SZU-Campus-Network-Windows-v2.0.0-beta.1
+          path: |
+            dist/release/SZU-Campus-Network-Windows-v2.0.0-beta.1.zip
+            dist/release/SZU-Campus-Network-Windows-v2.0.0-beta.1.zip.sha256
+            dist/windows-app/SZU Campus Network.exe
+            dist/windows-app/szu-campus-netctl.exe
+          if-no-files-found: error
+          retention-days: 30

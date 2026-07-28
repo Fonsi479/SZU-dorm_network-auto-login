@@ -86,6 +86,8 @@ public struct SZUNETProbeResult: Equatable, Sendable {
     public var gatewayReason: String
     public var internetReason: String
     public var autoLoginPaused: Bool
+    public var networkCategory: SZUNETNetworkCategory?
+    public var providers: [SZUNETProviderStatus]?
 
     public init(
         environment: SZUNETEnvironment,
@@ -95,7 +97,9 @@ public struct SZUNETProbeResult: Equatable, Sendable {
         environmentReason: String,
         gatewayReason: String,
         internetReason: String,
-        autoLoginPaused: Bool
+        autoLoginPaused: Bool,
+        networkCategory: SZUNETNetworkCategory? = nil,
+        providers: [SZUNETProviderStatus]? = nil
     ) {
         self.environment = environment
         self.portal = portal
@@ -105,6 +109,8 @@ public struct SZUNETProbeResult: Equatable, Sendable {
         self.gatewayReason = gatewayReason
         self.internetReason = internetReason
         self.autoLoginPaused = autoLoginPaused
+        self.networkCategory = networkCategory
+        self.providers = providers
     }
 }
 
@@ -148,6 +154,7 @@ public protocol SZUNETCoordinatorDriving: Sendable {
 
 public actor SZUNETCoordinatorDriver: SZUNETCoordinatorDriving {
     private let coordinator: LoginCoordinator
+    private let productController: CampusProductController?
 
     public init(paths: SZUNETFeaturePaths = .live) {
         if FileManager.default.fileExists(atPath: paths.unifiedConfigurationURL.path) {
@@ -159,12 +166,44 @@ public actor SZUNETCoordinatorDriver: SZUNETCoordinatorDriving {
             coordinator = LoginCoordinator(
                 configurationStore: ConfigurationStore(paths: unifiedPaths)
             )
+            productController = try? CampusProductRuntime.make(paths: unifiedPaths)
         } else {
             coordinator = LoginCoordinator()
+            productController = try? CampusProductRuntime.make()
         }
     }
 
     public func probe() async throws -> SZUNETProbeResult {
+        if let productController {
+            let snapshot = await productController.refresh()
+            let lifecycle: String = switch snapshot.category {
+            case .dorm: snapshot.dorm.lifecycle
+            case .teaching: snapshot.teaching.lifecycle
+            case .ambiguous, .nonCampus, .unknown: "unknown"
+            }
+            let portal: SZUNETPortalState = switch lifecycle {
+            case "online": .authenticated
+            case "offline": .unauthenticated
+            default: .unknown
+            }
+            let environment: SZUNETEnvironment = switch snapshot.category {
+            case .dorm, .teaching: .eligible
+            case .nonCampus: .ineligible
+            case .ambiguous, .unknown: .unknown
+            }
+            return SZUNETProbeResult(
+                environment: environment,
+                portal: portal,
+                internet: .unknown,
+                environmentLabel: snapshot.category.rawValue,
+                environmentReason: snapshot.lastErrorCode ?? snapshot.category.rawValue,
+                gatewayReason: "managed_by_campus_product_controller",
+                internetReason: "not_probed",
+                autoLoginPaused: coordinator.pauseStore.isPaused,
+                networkCategory: Self.category(from: snapshot.category),
+                providers: Self.providers(from: snapshot)
+            )
+        }
         let (_, status, environment) = try await coordinator.probe()
         let internet: SZUNETReachabilityState
         if status.campusInternetOK {
@@ -187,15 +226,28 @@ public actor SZUNETCoordinatorDriver: SZUNETCoordinatorDriving {
     }
 
     public func manualLogin() async -> SZUNETActionResult {
-        Self.map(await coordinator.loginNow())
+        if let productController { return Self.map(await productController.login()) }
+        return Self.map(await coordinator.loginNow())
     }
 
     public func automaticLogin() async -> SZUNETActionResult {
-        Self.map(await coordinator.checkAndLogin())
+        if let productController { return Self.map(await productController.login(automatic: true)) }
+        return Self.map(await coordinator.checkAndLogin())
     }
 
     public func manualLogout() async -> SZUNETActionResult {
-        Self.map(await coordinator.logout())
+        if let productController {
+            let snapshot = await productController.currentSnapshot()
+            guard snapshot.category == .dorm else {
+                return SZUNETActionResult(
+                    outcome: .unchanged,
+                    title: "当前 Provider 不支持退出",
+                    reason: "logout_disabled"
+                )
+            }
+            return Self.map(await productController.logout(providerID: .dorm))
+        }
+        return Self.map(await coordinator.logout())
     }
 
     public func setAutoLoginEnabled(_ enabled: Bool) async throws {
@@ -243,6 +295,49 @@ public actor SZUNETCoordinatorDriver: SZUNETCoordinatorDriving {
             detail: result.detail,
             reason: result.reason
         )
+    }
+
+    private static func map(_ result: ProviderAuthResult) -> SZUNETActionResult {
+        let outcome: SZUNETActionOutcome = switch result.outcome {
+        case .succeeded: result.sessionState == .offline ? .loggedOut : .authenticated
+        case .unchanged: .unchanged
+        case .failed, .blocked: .failed
+        case .cancelled: .cancelled
+        }
+        return SZUNETActionResult(
+            outcome: outcome,
+            title: outcome == .authenticated ? "校园网登录成功" : outcome == .loggedOut ? "已退出校园网" : "校园网操作完成",
+            reason: result.errorCode ?? result.outcome.rawValue
+        )
+    }
+
+    private static func category(from value: CampusNetworkCategory) -> SZUNETNetworkCategory {
+        switch value {
+        case .dorm: .dorm
+        case .teaching: .teaching
+        case .ambiguous: .ambiguous
+        case .nonCampus: .nonCampus
+        case .unknown: .unknown
+        }
+    }
+
+    private static func providers(from snapshot: CampusProductSnapshot) -> [SZUNETProviderStatus] {
+        [
+            SZUNETProviderStatus(
+                provider: "dorm",
+                enabled: snapshot.dorm.enabled,
+                accountLabel: snapshot.dorm.accountLabel,
+                lifecycle: snapshot.dorm.lifecycle,
+                errorCode: snapshot.dorm.errorCode
+            ),
+            SZUNETProviderStatus(
+                provider: "teaching",
+                enabled: snapshot.teaching.enabled,
+                accountLabel: snapshot.teaching.accountLabel,
+                lifecycle: snapshot.teaching.lifecycle,
+                errorCode: snapshot.teaching.errorCode
+            ),
+        ]
     }
 
     private static func environment(from value: NetworkEnvironment) -> SZUNETEnvironment {
@@ -353,6 +448,8 @@ public actor SZUNETModule {
             snapshot.environmentLabel = result.environmentLabel
             snapshot.detail = Self.probeDetail(result)
             snapshot.status.errorCode = nil
+            snapshot.status.networkCategory = result.networkCategory
+            snapshot.status.providers = result.providers
             snapshot.manualLogoutSuppressed = snapshot.status.autoLoginEnabled && result.autoLoginPaused
             if result.portal == .unauthenticated,
                previousPortal != .unauthenticated,
