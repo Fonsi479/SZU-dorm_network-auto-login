@@ -107,16 +107,37 @@ public final class LoginCoordinator {
         defer { lease.release() }
 
         do {
-            let configuration = try currentConfiguration().validatedForPortalAction()
+            let configuration = try currentConfiguration().validatedForLogin()
+            let status = networkProbe.probeGateway(configuration: configuration)
+            guard status.gatewayReachable else {
+                return unchanged("非宿舍网络", "宿舍区网关不可达，本轮未读取或发送账号密码。", "gateway_unreachable")
+            }
+            let environment = networkProbe.classify(configuration: configuration, status: status)
+            guard environment.autoLoginAvailable, !status.sourceIP.isEmpty else {
+                return unchanged("未验证的网络", "源路由未经验证，本轮未读取或发送账号密码。", "unverified_source_ip")
+            }
+            try Task.checkCancellation()
+            let client = clientFactory(configuration)
+            let online = await client.isSessionOnline(
+                username: configuration.user.username,
+                sourceIP: status.sourceIP
+            )
+            if online == true {
+                return unchanged("校园网会话已在线", "无需重复登录。", "session_already_online")
+            }
+            guard online == false else {
+                return unchanged("会话状态无法确认", "为避免误发凭据，本轮未登录。", "session_unverified")
+            }
+            try Task.checkCancellation()
             guard let password = try currentPassword(configuration: configuration), !password.isEmpty else {
                 return missingPassword(auto: false)
             }
             try Task.checkCancellation()
             logger.info("用户发起立即登录。")
-            let result = await clientFactory(configuration).login(
+            let result = await client.login(
                 username: configuration.user.username,
                 password: password,
-                knownSourceIP: ""
+                knownSourceIP: status.sourceIP
             )
             if Task.isCancelled { return cancelled() }
             return LoginActionMapper.login(result)

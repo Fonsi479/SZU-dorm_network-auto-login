@@ -19,11 +19,32 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let hostingController = NSHostingController(
             rootView: SettingsView(
                 configuration: model.configuration,
+                providerConfiguration: model.campusProviderConfiguration,
                 passwordSaved: model.passwordSaved,
                 configurationPath: model.coordinator.configurationStore.paths.configurationFile.path,
-                onSave: { [weak self, weak model] configuration, password in
+                onSave: {
+                    [weak self, weak model]
+                    configuration,
+                    providerConfiguration,
+                    dormPassword,
+                    teachingPassword in
                     guard let model else { return }
-                    try model.saveConfiguration(configuration, password: password)
+                    try model.saveConfiguration(configuration, password: nil)
+                    try model.saveCampusProviderConfiguration(providerConfiguration)
+                    if let dormPassword {
+                        try model.saveProviderPassword(
+                            dormPassword,
+                            providerID: .dorm,
+                            providerConfiguration: providerConfiguration
+                        )
+                    }
+                    if let teachingPassword {
+                        try model.saveProviderPassword(
+                            teachingPassword,
+                            providerID: .teaching,
+                            providerConfiguration: providerConfiguration
+                        )
+                    }
                     self?.close()
                 },
                 onCancel: { [weak self] in self?.close() }

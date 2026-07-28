@@ -31,6 +31,10 @@ public final class DiagnosticReportBuilder {
             .appendingPathComponent("diagnostic-report-\(formatter.string(from: Date())).txt")
         do {
             try Data(report.utf8).write(to: output, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: output.path
+            )
             return output
         } catch {
             throw SZUNetError.fileSystem("无法写入诊断报告：\(error.localizedDescription)")
@@ -57,7 +61,8 @@ public final class DiagnosticReportBuilder {
             lines.append("配置读取：通过")
             lines.append("账号：\(Self.mask(loaded.configuration.user.username))")
             lines.append("钥匙串服务：\(loaded.configuration.security.keychainService)")
-            let hasPassword = try coordinator.currentPassword(configuration: loaded.configuration)?.isEmpty == false
+            let savedPassword = try coordinator.currentPassword(configuration: loaded.configuration)
+            let hasPassword = savedPassword.map { !$0.isEmpty } ?? false
             lines.append("钥匙串密码：\(hasPassword ? "已保存" : "未保存")")
         } catch {
             lines.append("配置读取：失败，\(error.localizedDescription)")
@@ -78,7 +83,7 @@ public final class DiagnosticReportBuilder {
                     "== 网络探测 ==",
                     "网络环境：\(environment.label)",
                     "自动登录可用：\(environment.autoLoginAvailable ? "是" : "否")",
-                    "当前 Wi-Fi：\(environment.wifiSSID.isEmpty ? "-" : environment.wifiSSID)",
+                    "当前 Wi-Fi：\(environment.wifiSSID.isEmpty ? "-" : "已识别（名称已隐藏）")",
                     "宿舍区网关可达：\(status.gatewayReachable ? "是" : "否")",
                     "网关：\(status.gatewayHost.isEmpty ? "-" : status.gatewayHost)",
                     "源 IP：\(status.sourceIP.isEmpty ? "-" : status.sourceIP)",

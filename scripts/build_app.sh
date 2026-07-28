@@ -19,21 +19,33 @@ if ! command -v swift >/dev/null 2>&1; then
 fi
 
 echo "正在编译原生 Swift macOS 应用…"
-swift build --package-path "${PACKAGE_ROOT}" --configuration release --product SZUDormLogin
-BIN_DIR="$(swift build --package-path "${PACKAGE_ROOT}" --configuration release --show-bin-path)"
+swift build --package-path "${PACKAGE_ROOT}" --configuration release \
+  --disable-automatic-resolution --product SZUDormLogin
+swift build --package-path "${PACKAGE_ROOT}" --configuration release \
+  --disable-automatic-resolution --product szu-campus-netctl
+BIN_DIR="$(swift build --package-path "${PACKAGE_ROOT}" --configuration release \
+  --disable-automatic-resolution --show-bin-path)"
 SOURCE_EXECUTABLE="${BIN_DIR}/SZUDormLogin"
+SOURCE_CLI="${BIN_DIR}/szu-campus-netctl"
 
 if [[ ! -x "${SOURCE_EXECUTABLE}" ]]; then
   echo "Swift 编译完成，但找不到可执行文件：${SOURCE_EXECUTABLE}" >&2
+  exit 1
+fi
+if [[ ! -x "${SOURCE_CLI}" ]]; then
+  echo "Swift 编译完成，但找不到 JSON CLI：${SOURCE_CLI}" >&2
   exit 1
 fi
 
 rm -rf "${APP_BUNDLE}"
 mkdir -p "${CONTENTS}/MacOS" "${CONTENTS}/Resources"
 cp "${SOURCE_EXECUTABLE}" "${CONTENTS}/MacOS/${APP_NAME}"
+cp "${SOURCE_CLI}" "${CONTENTS}/MacOS/szu-campus-netctl"
 cp "${PACKAGE_ROOT}/Resources/Info.plist" "${CONTENTS}/Info.plist"
 cp "${PROJECT_ROOT}/config.example.json" "${CONTENTS}/Resources/config.example.json"
-chmod 755 "${CONTENTS}/MacOS/${APP_NAME}"
+cp "${PROJECT_ROOT}/campus-providers.example.json" \
+  "${CONTENTS}/Resources/campus-providers.example.json"
+chmod 755 "${CONTENTS}/MacOS/${APP_NAME}" "${CONTENTS}/MacOS/szu-campus-netctl"
 
 plutil -lint "${CONTENTS}/Info.plist" >/dev/null
 codesign --force --deep --sign - "${APP_BUNDLE}" >/dev/null

@@ -3,22 +3,36 @@ import SZUNetCore
 
 struct SettingsView: View {
     @State private var configuration: AppConfiguration
-    @State private var password = ""
+    @State private var providerConfiguration: CampusProductConfiguration
+    @State private var dormPassword = ""
+    @State private var teachingPassword = ""
     @State private var errorMessage = ""
 
     let passwordSaved: Bool
     let configurationPath: String
-    let onSave: (AppConfiguration, String?) throws -> Void
+    let onSave: (
+        AppConfiguration,
+        CampusProductConfiguration,
+        String?,
+        String?
+    ) throws -> Void
     let onCancel: () -> Void
 
     init(
         configuration: AppConfiguration,
+        providerConfiguration: CampusProductConfiguration,
         passwordSaved: Bool,
         configurationPath: String,
-        onSave: @escaping (AppConfiguration, String?) throws -> Void,
+        onSave: @escaping (
+            AppConfiguration,
+            CampusProductConfiguration,
+            String?,
+            String?
+        ) throws -> Void,
         onCancel: @escaping () -> Void
     ) {
         _configuration = State(initialValue: configuration)
+        _providerConfiguration = State(initialValue: providerConfiguration)
         self.passwordSaved = passwordSaved
         self.configurationPath = configurationPath
         self.onSave = onSave
@@ -31,6 +45,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     header
                     accountSection
+                    providerSection
                     portalSection
                     networkSection
                     if !errorMessage.isEmpty {
@@ -82,17 +97,10 @@ struct SettingsView: View {
         GroupBox("账号与钥匙串") {
             VStack(alignment: .leading, spacing: 10) {
                 field("校园网账号", text: $configuration.user.username)
-                HStack {
-                    Text("校园网密码")
-                        .frame(width: 105, alignment: .trailing)
-                    SecureField(
-                        passwordSaved ? "已保存；留空保持原密码" : "请输入校园网密码",
-                        text: $password
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("校园网密码")
-                }
                 field("钥匙串服务", text: $configuration.security.keychainService)
+                Text("Provider 密码在下方分别保存；此兼容配置不会读取或显示现有密码。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             .padding(.top, 6)
         }
@@ -123,6 +131,35 @@ struct SettingsView: View {
                     )
                     Spacer()
                 }
+            }
+            .padding(.top, 6)
+        }
+    }
+
+    private var providerSection: some View {
+        GroupBox("双 Provider") {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Dorm Dr.COM", isOn: $providerConfiguration.dorm.enabled)
+                field("Dorm 标签", text: $providerConfiguration.dorm.accountLabel)
+                field("Dorm 凭据引用", text: $providerConfiguration.dorm.credentialReference)
+                passwordField(
+                    "Dorm 新密码",
+                    text: $dormPassword,
+                    prompt: passwordSaved ? "已保存；留空保持原密码" : "留空则不修改"
+                )
+                Divider()
+                Toggle("Teaching SRun", isOn: $providerConfiguration.teaching.enabled)
+                field("Teaching 标签", text: $providerConfiguration.teaching.accountLabel)
+                field("Teaching 凭据引用", text: $providerConfiguration.teaching.credentialReference)
+                passwordField(
+                    "Teaching 新密码",
+                    text: $teachingPassword,
+                    prompt: "留空则不修改"
+                )
+                field("Teaching 入口", text: $providerConfiguration.teachingPortalURL)
+                Text("凭据引用仅定位钥匙串项；密码不会写入此配置。Teaching 退出操作默认禁用。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             .padding(.top, 6)
         }
@@ -178,9 +215,28 @@ struct SettingsView: View {
     private func save() {
         do {
             errorMessage = ""
-            try onSave(configuration, password.isEmpty ? nil : password)
+            try onSave(
+                configuration,
+                providerConfiguration,
+                dormPassword.isEmpty ? nil : dormPassword,
+                teachingPassword.isEmpty ? nil : teachingPassword
+            )
         } catch {
             errorMessage = "请检查上方设置后重试：\(error.localizedDescription)"
+        }
+    }
+
+    private func passwordField(
+        _ label: String,
+        text: Binding<String>,
+        prompt: String
+    ) -> some View {
+        HStack {
+            Text(label)
+                .frame(width: 105, alignment: .trailing)
+            SecureField(prompt, text: text)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel(label)
         }
     }
 

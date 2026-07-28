@@ -51,6 +51,7 @@ public final class URLSessionHTTPTransport: HTTPTransporting {
     private let redirectDelegate: RedirectBlockingDelegate
     private let cookieStorage: HTTPCookieStorage?
     private let session: URLSession
+    private let sourceBoundTransport = SourceBoundHTTPTransport()
 
     public init(configuration suppliedConfiguration: URLSessionConfiguration? = nil) {
         let configuration = suppliedConfiguration ?? URLSessionConfiguration.ephemeral
@@ -96,33 +97,34 @@ public final class URLSessionHTTPTransport: HTTPTransporting {
             }
         }
 
+        if let requiredSourceIP = sourceIP?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !requiredSourceIP.isEmpty {
+            let response = try await sourceBoundTransport.execute(
+                request,
+                sourceIP: requiredSourceIP,
+                timeout: timeout
+            )
+            storeCookies(from: response, requestURL: requestURL)
+            return response
+        }
+
         do {
             let (data, response) = try await session.data(for: request)
             try Task.checkCancellation()
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw SZUNetError.network("服务器没有返回 HTTP 响应。")
             }
-            let responseHeaders = httpResponse.allHeaderFields.reduce(into: [String: String]()) {
-                $0[String(describing: $1.key)] = String(describing: $1.value)
-            }
-            let responseCookies = HTTPCookie.cookies(
-                withResponseHeaderFields: responseHeaders,
-                for: httpResponse.url ?? requestURL
-            )
-            cookieStorage?.setCookies(
-                responseCookies,
-                for: httpResponse.url ?? requestURL,
-                mainDocumentURL: nil
-            )
             let normalizedHeaders = httpResponse.allHeaderFields.reduce(into: [String: String]()) {
                 $0[String(describing: $1.key).lowercased()] = String(describing: $1.value)
             }
-            return HTTPResponse(
+            let result = HTTPResponse(
                 statusCode: httpResponse.statusCode,
                 headers: normalizedHeaders,
                 body: data,
                 finalURL: httpResponse.url ?? requestURL
             )
+            storeCookies(from: result, requestURL: requestURL)
+            return result
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as SZUNetError {
@@ -130,6 +132,15 @@ public final class URLSessionHTTPTransport: HTTPTransporting {
         } catch {
             throw SZUNetError.network(Self.describe(error))
         }
+    }
+
+    private func storeCookies(from response: HTTPResponse, requestURL: URL) {
+        guard let setCookie = response.headers["set-cookie"] else { return }
+        let cookies = HTTPCookie.cookies(
+            withResponseHeaderFields: ["Set-Cookie": setCookie],
+            for: response.finalURL
+        )
+        cookieStorage?.setCookies(cookies, for: response.finalURL, mainDocumentURL: requestURL)
     }
 
     private static func describe(_ error: Error) -> String {

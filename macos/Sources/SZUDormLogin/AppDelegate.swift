@@ -3,10 +3,16 @@ import SZUNetCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let openSettingsOnLaunch: Bool
     private var model: AppModel?
     private var menuBarController: MenuBarController?
     private var networkPathObserver: NetworkPathObserver?
     private var wakeObserver: NSObjectProtocol?
+
+    init(openSettingsOnLaunch: Bool = false) {
+        self.openSettingsOnLaunch = openSettingsOnLaunch
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserNotificationPresenter.requestAuthorization()
@@ -39,6 +45,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         model.start()
+        if openSettingsOnLaunch {
+            DispatchQueue.main.async { [weak self] in
+                self?.menuBarController?.openSettings()
+            }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak model] in
             LegacyLaunchAgentMigrationPrompt.offerIfNeeded(model: model)
         }

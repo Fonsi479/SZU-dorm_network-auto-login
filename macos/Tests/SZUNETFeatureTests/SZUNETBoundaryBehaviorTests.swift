@@ -1,199 +1,407 @@
+import Darwin
 import Foundation
 import Testing
 @testable import SZUNETFeature
 
-@Suite("SZUNET switch and cancellation boundary")
+private actor RequestRecorder {
+    private var request: SZUNETCommandRequest?
+
+    func record(_ value: SZUNETCommandRequest) { request = value }
+    func current() -> SZUNETCommandRequest? { request }
+}
+
+@Suite("SZUNET CLI adapter boundary", .serialized)
 struct SZUNETBoundaryBehaviorTests {
-    @Test("disabled module performs no probe or portal action")
-    func disabledModuleIsStrongBoundary() async {
-        let driver = BoundaryFakeDriver()
-        let module = SZUNETModule(driverFactory: { driver })
-
-        _ = await module.configure(featureEnabled: false, autoLoginEnabled: true)
-        _ = await module.refresh()
-        _ = await module.runAutomaticLoginIfDue(at: .distantFuture)
-        _ = await module.manualLogin()
-        _ = await module.manualLogout()
-
-        #expect(await driver.currentCalls() == BoundaryFakeCalls())
-        let snapshot = await module.currentSnapshot()
-        #expect(!snapshot.status.featureEnabled)
-        #expect(snapshot.detail.contains("不会探测"))
-    }
-
-    @Test("automatic login off preserves manual login")
-    func childSwitchKeepsManualPath() async {
-        let driver = BoundaryFakeDriver()
-        let module = SZUNETModule(driverFactory: { driver })
-
-        _ = await module.configure(featureEnabled: true, autoLoginEnabled: false)
-        _ = await module.refresh()
-        _ = await module.runAutomaticLoginIfDue(at: .distantFuture)
-        let snapshot = await module.manualLogin()
-
-        let calls = await driver.currentCalls()
-        #expect(calls.manualLogin == 1)
-        #expect(calls.automaticLogin == 0)
-        #expect(snapshot.status.portal == .authenticated)
-    }
-
-    @Test("ineligible environment blocks automatic credential path")
-    func automaticLoginRequiresEnvironmentGate() async {
-        let driver = BoundaryFakeDriver(
-            probeResult: SZUNETProbeResult(
-                environment: .ineligible,
-                portal: .unauthenticated,
-                internet: .unreachable,
-                environmentLabel: "非校园网",
-                environmentReason: "source_ip_not_allowed",
-                gatewayReason: "gateway_unreachable",
-                internetReason: "skipped_session_offline",
-                autoLoginPaused: false
-            )
+    @Test("request encoding contains only the public command contract")
+    func requestHasExactFields() throws {
+        let request = SZUNETCommandRequest(
+            requestId: "fixture-request",
+            command: .login,
+            provider: .dorm,
+            interactive: true,
+            timeoutSeconds: 15
         )
-        let module = SZUNETModule(driverFactory: { driver })
-
-        _ = await module.configure(
-            featureEnabled: true,
-            autoLoginEnabled: true,
-            resumeAutoLogin: true
+        let data = try SZUNETCLIClient.encode(request)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
         )
-        _ = await module.refresh()
-        _ = await module.runAutomaticLoginIfDue(at: .distantFuture)
 
-        #expect(await driver.currentCalls().automaticLogin == 0)
-    }
-
-    @Test("manual logout suppression survives refresh")
-    func manualLogoutSuppressionPersists() async {
-        let driver = BoundaryFakeDriver()
-        let module = SZUNETModule(driverFactory: { driver })
-
-        _ = await module.configure(
-            featureEnabled: true,
-            autoLoginEnabled: true,
-            resumeAutoLogin: true
-        )
-        _ = await module.refresh()
-        _ = await module.manualLogout()
-        let refreshed = await module.refresh()
-        _ = await module.runAutomaticLoginIfDue(at: .distantFuture)
-
-        let calls = await driver.currentCalls()
-        #expect(calls.manualLogout == 1)
-        #expect(calls.automaticLogin == 0)
-        #expect(refreshed.manualLogoutSuppressed)
-    }
-
-    @Test("disabling the module cancels an active probe")
-    func totalSwitchCancelsWork() async {
-        let driver = BoundaryFakeDriver(probeDelay: .seconds(30))
-        let module = SZUNETModule(driverFactory: { driver })
-        _ = await module.configure(featureEnabled: true, autoLoginEnabled: false)
-
-        let refreshTask = Task { await module.refresh() }
-        while await driver.currentCalls().probe == 0 {
-            await Task.yield()
+        #expect(Set(object.keys) == [
+            "schemaVersion", "requestId", "command", "provider", "interactive", "timeoutSeconds",
+        ])
+        let serialized = String(decoding: data, as: UTF8.self).lowercased()
+        for forbidden in ["password", "secret", "token", "cookie", "authorization", "credentialvalue"] {
+            #expect(!serialized.contains(forbidden))
         }
-        let disabled = await module.configure(featureEnabled: false, autoLoginEnabled: false)
-        _ = await refreshTask.value
+    }
 
-        #expect(!disabled.status.featureEnabled)
-        #expect(disabled.status.portal == .unknown)
-        let calls = await driver.currentCalls()
-        #expect(calls.probe == 1)
-        #expect(calls.automaticLogin == 0)
+    @Test("typed client validates schema and request identity")
+    func clientValidatesResponseEnvelope() async throws {
+        let recorder = RequestRecorder()
+        let client = SZUNETCLIClient(
+            transport: { input, _ in
+                let request = try JSONDecoder().decode(SZUNETCommandRequest.self, from: input)
+                await recorder.record(request)
+                return try encodeWireResult(requestId: request.requestId)
+            },
+            requestIDFactory: { "typed-request" }
+        )
+
+        let result = try await client.execute(
+            .status,
+            provider: .auto,
+            interactive: false,
+            timeoutSeconds: 9
+        )
+
+        #expect(result.requestId == "typed-request")
+        #expect(result.sessionState == .online)
+        let request = await recorder.current()
+        #expect(request?.command == .status)
+        #expect(request?.timeoutSeconds == 9)
+    }
+
+    @Test("schema and request mismatch fail closed")
+    func mismatchedResponsesAreRejected() throws {
+        let wrongSchema = try encodeWireResult(
+            schemaVersion: 2,
+            requestId: "expected"
+        )
+        do {
+            _ = try SZUNETCLIClient.decode(wrongSchema, expectedRequestID: "expected")
+            Issue.record("unsupported schema unexpectedly decoded")
+        } catch let error as SZUNETAdapterError {
+            #expect(error == .unsupportedSchema)
+        }
+
+        let wrongRequest = try encodeWireResult(requestId: "other")
+        do {
+            _ = try SZUNETCLIClient.decode(wrongRequest, expectedRequestID: "expected")
+            Issue.record("mismatched request unexpectedly decoded")
+        } catch let error as SZUNETAdapterError {
+            #expect(error == .requestMismatch)
+        }
+    }
+
+    @Test("untrusted wire detail and unknown code never reach the public result")
+    func untrustedWireTextIsNotExposed() throws {
+        let rawMarker = "RAW_PRIVATE_FIXTURE_198_51_100_8"
+        let data = try encodeWireResult(
+            requestId: "sanitized-response",
+            errorCode: "UNRECOGNIZED_SERVER_DETAIL",
+            message: rawMarker
+        )
+
+        let result = try SZUNETCLIClient.decode(
+            data,
+            expectedRequestID: "sanitized-response"
+        )
+
+        #expect(result.errorCode == "ADAPTER_UNRECOGNIZED_CODE")
+        #expect(!String(describing: result).contains(rawMarker))
+        let publicLabels = Set(Mirror(reflecting: result).children.compactMap(\.label))
+        #expect(!publicLabels.contains("message"))
+        #expect(!publicLabels.contains("timestamp"))
+    }
+
+    @Test("process environment is an exact minimal allowlist")
+    func processEnvironmentIsMinimal() {
+        let environment = SZUNETProcessRunner.minimumEnvironment()
+        #expect(Set(environment.keys) == ["HOME", "TMPDIR", "PATH", "LANG", "LC_CTYPE"])
+        #expect(environment["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin")
+        #expect(environment.values.allSatisfy { !$0.isEmpty })
+    }
+
+    @Test("output limit is clamped at both security bounds")
+    func outputLimitIsClamped() {
+        #expect(SZUNETCLIClient.clampedOutputLimit(-1) == 4_096)
+        #expect(
+            SZUNETCLIClient.clampedOutputLimit(Int.max)
+                == SZUNETCLIClient.maximumAllowedOutputBytes
+        )
+    }
+
+    @Test("transport cancellation and timeout remain sanitized")
+    func transportFailuresStayTyped() async {
+        let cancelled = SZUNETCLIClient(
+            transport: { _, _ in throw CancellationError() },
+            requestIDFactory: { "cancelled" }
+        )
+        do {
+            _ = try await cancelled.execute(.status)
+            Issue.record("cancelled transport unexpectedly returned")
+        } catch let error as SZUNETAdapterError {
+            #expect(error == .cancelled)
+        } catch {
+            Issue.record("unexpected cancellation error type")
+        }
+
+        let timedOut = SZUNETCLIClient(
+            transport: { _, _ in throw SZUNETAdapterError.timedOut },
+            requestIDFactory: { "timeout" }
+        )
+        do {
+            _ = try await timedOut.execute(.status)
+            Issue.record("timed-out transport unexpectedly returned")
+        } catch let error as SZUNETAdapterError {
+            #expect(error == .timedOut)
+        } catch {
+            Issue.record("unexpected timeout error type")
+        }
+    }
+
+    @Test("live process transport uses one bounded JSON exchange")
+    func processTransportUsesJSONBoundary() async throws {
+        let response = try wireJSONString(requestId: "process-request")
+        let fixture = try makeExecutableFixture(
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '\(response)'\n"
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let client = SZUNETCLIClient(
+            executableURL: fixture.executable,
+            requestIDFactory: { "process-request" }
+        )
+
+        let result = try await client.execute(
+            .status,
+            provider: .auto,
+            interactive: false,
+            timeoutSeconds: 2
+        )
+
+        #expect(result.sessionState == .online)
+        #expect(result.networkContext == .dorm)
+    }
+
+    @Test("process timeout starts and then terminates the actual child")
+    func processTimeoutStopsStartedChild() async throws {
+        let fixture = try makeLongRunningFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let client = SZUNETCLIClient(
+            executableURL: fixture.executable,
+            requestIDFactory: { "process-timeout" }
+        )
+        let task = Task {
+            try await client.execute(.status, timeoutSeconds: 1)
+        }
+        let processID = try await waitForProcessMarker(fixture.marker)
+        let descendantID = try await waitForProcessMarker(fixture.descendantMarker)
+        defer {
+            terminateFixtureProcess(processID)
+            terminateFixtureProcess(descendantID)
+        }
+
+        do {
+            _ = try await task.value
+            Issue.record("process transport unexpectedly ignored timeout")
+        } catch let error as SZUNETAdapterError {
+            #expect(error == .timedOut)
+        } catch {
+            Issue.record("unexpected process timeout error type")
+        }
+        #expect(await waitUntilProcessStops(processID))
+        #expect(await waitUntilProcessStops(descendantID))
+    }
+
+    @Test("process cancellation waits for startup and confirms termination")
+    func processCancellationStopsStartedChild() async throws {
+        let fixture = try makeLongRunningFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let client = SZUNETCLIClient(
+            executableURL: fixture.executable,
+            requestIDFactory: { "process-cancel" }
+        )
+        let task = Task {
+            try await client.execute(.status, timeoutSeconds: 5)
+        }
+        let processID = try await waitForProcessMarker(fixture.marker)
+        let descendantID = try await waitForProcessMarker(fixture.descendantMarker)
+        defer {
+            terminateFixtureProcess(processID)
+            terminateFixtureProcess(descendantID)
+        }
+
+        task.cancel()
+        do {
+            _ = try await task.value
+            Issue.record("process transport unexpectedly ignored cancellation")
+        } catch let error as SZUNETAdapterError {
+            #expect(error == .cancelled)
+        } catch {
+            Issue.record("unexpected process cancellation error type")
+        }
+        #expect(await waitUntilProcessStops(processID))
+        #expect(await waitUntilProcessStops(descendantID))
+    }
+
+    @Test("source target cannot regain authentication ownership")
+    func sourceBoundaryIsEnforced() throws {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let packageRoot = testFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceRoot = packageRoot.appendingPathComponent("Sources/SZUNETFeature")
+        let sourceFiles = try FileManager.default.contentsOfDirectory(
+            at: sourceRoot,
+            includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension == "swift" }
+        let source = try sourceFiles
+            .map { try String(contentsOf: $0, encoding: .utf8) }
+            .joined(separator: "\n")
+
+        for forbidden in [
+            "import SZUNetCore",
+            "LoginCoordinator",
+            "CampusProductRuntime",
+            "saveCredentials",
+            "SecureField",
+            "CodexQuotaBar/Campus",
+            "automaticLogin",
+            "public let message",
+            "public let timestamp",
+        ] {
+            #expect(!source.contains(forbidden))
+        }
+        #expect(source.contains("process.arguments = [\"--json\"]"))
+
+        let manifest = try String(
+            contentsOf: packageRoot.appendingPathComponent("Package.swift"),
+            encoding: .utf8
+        )
+        let targetMarker = ".target(\n            name: \"SZUNETFeature\""
+        let start = try #require(manifest.range(of: targetMarker))
+        let suffix = manifest[start.lowerBound...]
+        let end = try #require(suffix.range(of: "        ),"))
+        let target = String(suffix[..<end.upperBound])
+        #expect(!target.contains("SZUNetCore"))
+        #expect(target.contains("dependencies: []"))
     }
 }
 
-private struct BoundaryFakeCalls: Equatable, Sendable {
-    var probe = 0
-    var manualLogin = 0
-    var automaticLogin = 0
-    var manualLogout = 0
-    var setAutoLogin = 0
-    var configuration = 0
-    var credentialWrites = 0
+private enum FixtureError: Error {
+    case invalidEncoding
+    case processDidNotStart
 }
 
-private actor BoundaryFakeDriver: SZUNETCoordinatorDriving {
-    private var calls = BoundaryFakeCalls()
-    private var probeResult: SZUNETProbeResult
-    private let probeDelay: Duration?
-    private var paused = false
+private func encodeWireResult(
+    schemaVersion: Int = 1,
+    requestId: String,
+    errorCode: String? = nil,
+    message: String = "fixture"
+) throws -> Data {
+    try JSONEncoder().encode(
+        SZUNETWireResult(
+            schemaVersion: schemaVersion,
+            requestId: requestId,
+            outcome: .unchanged,
+            provider: .dorm,
+            networkContext: .dorm,
+            sessionState: .online,
+            errorCode: errorCode,
+            retryable: false,
+            message: message,
+            timestamp: "2026-07-28T00:00:00Z"
+        )
+    )
+}
 
-    init(
-        probeResult: SZUNETProbeResult = SZUNETProbeResult(
-            environment: .eligible,
-            portal: .unauthenticated,
-            internet: .unreachable,
-            environmentLabel: "宿舍网络",
-            environmentReason: "verified_campus_source_ip",
-            gatewayReason: "gateway_reachable",
-            internetReason: "skipped_session_offline",
-            autoLoginPaused: false
-        ),
-        probeDelay: Duration? = nil
-    ) {
-        self.probeResult = probeResult
-        self.probeDelay = probeDelay
+private func wireJSONString(requestId: String) throws -> String {
+    let data = try encodeWireResult(requestId: requestId)
+    guard let value = String(data: data, encoding: .utf8) else {
+        throw FixtureError.invalidEncoding
     }
+    return value
+}
 
-    func currentCalls() -> BoundaryFakeCalls { calls }
+private func makeExecutableFixture(
+    _ contents: String
+) throws -> (directory: URL, executable: URL) {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("szunet-feature-fixture-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: directory,
+        withIntermediateDirectories: false
+    )
+    let executable = directory.appendingPathComponent("fixture-cli")
+    try contents.write(to: executable, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o700],
+        ofItemAtPath: executable.path
+    )
+    return (directory, executable)
+}
 
-    func probe() async throws -> SZUNETProbeResult {
-        calls.probe += 1
-        if let probeDelay {
-            try await Task.sleep(for: probeDelay)
+private func makeLongRunningFixture() throws -> (
+    directory: URL,
+    executable: URL,
+    marker: URL,
+    descendantMarker: URL
+) {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("szunet-feature-process-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: directory,
+        withIntermediateDirectories: false
+    )
+    let marker = directory.appendingPathComponent("started.pid")
+    let descendantMarker = directory.appendingPathComponent("descendant.pid")
+    let executable = directory.appendingPathComponent("fixture-cli")
+    let script = """
+    #!/bin/sh
+    printf '%s\n' "$$" > \(shellQuoted(marker.path))
+    trap '' TERM
+    /bin/sh -c 'trap "" TERM; printf "%s\\n" "$$" > "$1"; exec /bin/sleep 30' fixture-child \(shellQuoted(descendantMarker.path)) &
+    wait "$!"
+    """
+    try script.write(to: executable, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o700],
+        ofItemAtPath: executable.path
+    )
+    return (directory, executable, marker, descendantMarker)
+}
+
+private func waitForProcessMarker(
+    _ marker: URL,
+    timeout: Duration = .seconds(3)
+) async throws -> pid_t {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while true {
+        if let text = try? String(contentsOf: marker, encoding: .utf8),
+           let value = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+           value > 0 {
+            return value
         }
-        var result = probeResult
-        result.autoLoginPaused = paused
-        return result
+        guard clock.now < deadline else { break }
+        try await Task.sleep(for: .milliseconds(10))
     }
+    throw FixtureError.processDidNotStart
+}
 
-    func manualLogin() async -> SZUNETActionResult {
-        calls.manualLogin += 1
-        return SZUNETActionResult(
-            outcome: .authenticated,
-            title: "手动登录成功",
-            reason: "session_verified"
-        )
+private func waitUntilProcessStops(
+    _ processID: pid_t,
+    timeout: Duration = .seconds(3)
+) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while clock.now < deadline {
+        if !processExists(processID) { return true }
+        try? await Task.sleep(for: .milliseconds(10))
     }
+    return !processExists(processID)
+}
 
-    func automaticLogin() async -> SZUNETActionResult {
-        calls.automaticLogin += 1
-        return SZUNETActionResult(
-            outcome: .authenticated,
-            title: "自动登录成功",
-            reason: "session_verified"
-        )
-    }
+private func processExists(_ processID: pid_t) -> Bool {
+    if Darwin.kill(processID, 0) == 0 { return true }
+    return errno == EPERM
+}
 
-    func manualLogout() async -> SZUNETActionResult {
-        calls.manualLogout += 1
-        paused = true
-        return SZUNETActionResult(
-            outcome: .loggedOut,
-            title: "已退出",
-            reason: "session_verified"
-        )
-    }
+private func terminateFixtureProcess(_ processID: pid_t) {
+    if processExists(processID) { _ = Darwin.kill(processID, SIGKILL) }
+}
 
-    func setAutoLoginEnabled(_ enabled: Bool) async throws {
-        calls.setAutoLogin += 1
-        paused = !enabled
-    }
-
-    func configurationSummary() async throws -> SZUNETConfigurationSummary {
-        calls.configuration += 1
-        return SZUNETConfigurationSummary(
-            username: "student",
-            portalHost: "drcom.example.invalid",
-            sourceNetworkCount: 2
-        )
-    }
-
-    func saveCredentials(username _: String, password _: String?) async throws {
-        calls.credentialWrites += 1
-    }
+private func shellQuoted(_ value: String) -> String {
+    "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
 }

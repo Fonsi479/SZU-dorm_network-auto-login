@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "provenance": "Synthetic inputs generated for this project; no campus account, credential, or response.",
+  "base64Alphabet": "LVoJPiCN2R8G90yg+hmFHuacZ1OWMnrsSTXkYpUq/3dlbfKwv6xztjI7DeBE45QA",
+  "crossChecks": {
+    "base64": {
+      "inputUtf8": "E99p1ant",
+      "expected": "hFYeMJiTWq+="
+    },
+    "xencode": {
+      "messageUtf8": "aaaaaaaaaaaa",
+      "keyUtf8": "bbbbbbbbbbbb",
+      "expectedHex": "d4eb3234a6e57d455fdca5bcbefb3ad1"
+    }
+  },
+  "fullLoginVector": {
+    "username": "synthetic-user@sample",
+    "credentialInput": "not-a-real-secret",
+    "clientIP": "198.51.100.27",
+    "acid": "17",
+    "challenge": "0123456789abcdef0123456789abcdef",
+    "n": "200",
+    "type": "1",
+    "expectedInfoJSON": "{\"username\":\"synthetic-user@sample\",\"password\":\"not-a-real-secret\",\"ip\":\"198.51.100.27\",\"acid\":\"17\",\"enc_ver\":\"srun_bx1\"}",
+    "expectedHMACMD5Hex": "c984b5b09413df2c0e67c15a39c77f95",
+    "expectedPasswordField": "{MD5}c984b5b09413df2c0e67c15a39c77f95",
+    "expectedInfoField": "{SRBX1}rfBL7Bec5n9JL4BH/LOAc8OeehfNQdwWBw94Qo92FEncx/xj8XAvJnBwF5CFMtB2CKwoDe+APAnZPjF3/2LQ7dbaR6Ztcfk8KggrYCeTbrOgqfTbzBpbeZtwmP6pr88OhGjHgwJAGdA4mXy56ASCa2yRDXkaqZCJjQ8nNkoQnR9=",
+    "expectedChecksum": "cdb9ed22d7d305128d3071431eeaf157c053921b"
+  }
+}

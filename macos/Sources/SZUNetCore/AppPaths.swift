@@ -30,6 +30,10 @@ public struct AppPaths: Equatable {
         applicationSupportDirectory.appendingPathComponent("config.json")
     }
 
+    public var campusProviderConfigurationFile: URL {
+        applicationSupportDirectory.appendingPathComponent("campus-providers.json")
+    }
+
     public var legacyConfigurationFile: URL {
         applicationSupportDirectory.appendingPathComponent("config.yaml")
     }

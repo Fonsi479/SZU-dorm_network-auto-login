@@ -4,6 +4,23 @@ import Testing
 
 @Suite("Configuration and pause persistence", .serialized)
 struct PersistenceTests {
+    @Test("missing Keychain credential requires explicit legacy-file migration")
+    func keychainMissDoesNotReadPrivateFile() throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let legacyPasswordFile = root.appendingPathComponent("legacy-password.yaml")
+        try Data().write(to: legacyPasswordFile)
+        var configuration = AppConfiguration.default
+        configuration.user.username = "student"
+        configuration.security.passwordSource = .keychain
+        configuration.security.privateFilePath = legacyPasswordFile.path
+
+        #expect(throws: SZUNetError.self) {
+            _ = try CredentialResolver(store: MissingCredentialStore()).password(for: configuration)
+        }
+    }
+
     @Test("legacy YAML fields are mapped without losing quoted portal parameters")
     func legacyYAMLMapping() throws {
         let configuration = try LegacyYAMLConfigurationParser.parse(
@@ -118,6 +135,12 @@ struct PersistenceTests {
         #expect(finished.timeIntervalSince(started) >= 0.04)
         #expect(store.isPaused)
     }
+}
+
+private final class MissingCredentialStore: CredentialStoring {
+    func password(service: String, account: String) throws -> String? { nil }
+    func setPassword(_ password: String, service: String, account: String) throws {}
+    func deletePassword(service: String, account: String) throws {}
 }
 
 private func temporaryRoot() -> URL {

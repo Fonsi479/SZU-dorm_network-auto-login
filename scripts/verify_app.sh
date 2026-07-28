@@ -6,10 +6,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 APP_BUNDLE="${PROJECT_ROOT}/dist/${APP_NAME}.app"
 EXECUTABLE="${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+CLI_EXECUTABLE="${APP_BUNDLE}/Contents/MacOS/szu-campus-netctl"
 INFO_PLIST="${APP_BUNDLE}/Contents/Info.plist"
 
 [[ -d "${APP_BUNDLE}" ]] || { echo "找不到 App：${APP_BUNDLE}" >&2; exit 1; }
 [[ -x "${EXECUTABLE}" ]] || { echo "App 可执行文件不存在或不可执行。" >&2; exit 1; }
+[[ -x "${CLI_EXECUTABLE}" ]] || { echo "App 内 JSON CLI 不存在或不可执行。" >&2; exit 1; }
+[[ -f "${APP_BUNDLE}/Contents/Resources/campus-providers.example.json" ]] \
+  || { echo "App 缺少双 Provider 配置示例。" >&2; exit 1; }
 
 plutil -lint "${INFO_PLIST}" >/dev/null
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${INFO_PLIST}")"
@@ -28,9 +32,20 @@ VERSION_OUTPUT="$("${EXECUTABLE}" --version)"
 [[ "${VERSION_OUTPUT}" == *"native Swift"* ]] || { echo "可执行文件不是预期的 Swift 版本。" >&2; exit 1; }
 UI_SMOKE_OUTPUT="$("${EXECUTABLE}" --ui-smoke-test)"
 [[ "${UI_SMOKE_OUTPUT}" == *"初始化：正常"* ]] || { echo "状态栏 UI 初始化检查失败。" >&2; exit 1; }
+CLI_SELF_TEST_OUTPUT="$("${CLI_EXECUTABLE}" --self-test)"
+[[ "${CLI_SELF_TEST_OUTPUT}" == *'"schemaVersion":1'* ]] \
+  || { echo "JSON CLI 离线自检缺少 schemaVersion。" >&2; exit 1; }
+[[ "${CLI_SELF_TEST_OUTPUT}" == *'"outcome":"unchanged"'* ]] \
+  || { echo "JSON CLI 离线自检失败。" >&2; exit 1; }
+CLI_LINE_COUNT="$(printf '%s\n' "${CLI_SELF_TEST_OUTPUT}" | wc -l | tr -d ' ')"
+[[ "${CLI_LINE_COUNT}" == "1" ]] || { echo "JSON CLI stdout 不是单对象单行。" >&2; exit 1; }
 
 if otool -L "${EXECUTABLE}" | grep -Eiq 'python|libpython'; then
   echo "App 仍链接了 Python 运行时。" >&2
+  exit 1
+fi
+if otool -L "${CLI_EXECUTABLE}" | grep -Eiq 'python|libpython'; then
+  echo "JSON CLI 仍链接了 Python 运行时。" >&2
   exit 1
 fi
 for framework in AppKit Security ServiceManagement SwiftUI; do
@@ -45,6 +60,8 @@ if find "${APP_BUNDLE}/Contents" -iname '*python*' -print -quit | grep -q .; the
 fi
 
 codesign --verify --deep --strict "${APP_BUNDLE}"
+[[ "$(lipo -archs "${EXECUTABLE}")" == "$(lipo -archs "${CLI_EXECUTABLE}")" ]] \
+  || { echo "App 与 JSON CLI 架构不一致。" >&2; exit 1; }
 bash "${PROJECT_ROOT}/scripts/run_swift_checks.sh"
 
 SIZE="$(du -sh "${APP_BUNDLE}" | awk '{print $1}')"
@@ -53,3 +70,4 @@ echo "版本：${VERSION}（${BUILD}）"
 echo "架构：$(lipo -archs "${EXECUTABLE}")"
 echo "大小：${SIZE}"
 echo "Python 运行时：未包含"
+echo "JSON CLI：已内置并通过离线自检"

@@ -1,4 +1,3 @@
-import CodexButlerSecurity
 import Foundation
 
 public final class AppLogger {
@@ -55,10 +54,43 @@ public final class AppLogger {
     }
 
     public static func redact(_ input: String, password: String? = nil) -> String {
-        SensitiveDataRedactor.redact(
-            input,
-            explicitSecrets: password.map { [$0] } ?? []
-        )
+        var output = input
+        let patterns: [(String, String)] = [
+            (#"(?i)((?:challenge|info|chksum|checksum|ssid|source[_-]?ip)\s*[:=：]\s*)[^\s,;]+"#, "$1[REDACTED]"),
+            (#"(?i)\{(?:MD5|SRBX1)\}[^\s,;}&]+"#, "[REDACTED]"),
+            (#"(?i)\b(https?://[^\s?]+)\?[^\s]+"#, "$1?[REDACTED]"),
+            (#"\b(?:\d{1,3}\.){3}\d{1,3}\b"#, "[IP REDACTED]"),
+        ]
+        for (pattern, replacement) in patterns {
+            guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(output.startIndex..<output.endIndex, in: output)
+            output = expression.stringByReplacingMatches(
+                in: output,
+                range: range,
+                withTemplate: replacement
+            )
+        }
+        for secret in password.map({ [$0] }) ?? [] where secret.count >= 4 {
+            output = output.replacingOccurrences(of: secret, with: "[REDACTED]")
+        }
+        let genericPatterns: [(String, String)] = [
+            (#"(?i)((?:proxy-)?authorization\s*[:=]\s*)(?:bearer\s+)?[^\r\n]+"#, "$1[REDACTED]"),
+            (#"(?i)((?:set-)?cookie\s*[:=]\s*)[^\r\n]+"#, "$1[REDACTED]"),
+            (#"(?i)([\"']?(?:token|api[-_]?key|client[-_]?secret|user[-_]?password|password|user[-_]?account)[\"']?\s*[:=]\s*[\"']?)[^\"'\s,;}&]+"#, "$1[REDACTED]"),
+            (#"(?i)([?&](?:token|user_password|password|user_account)=)[^&#\s]+"#, "$1[REDACTED]"),
+            (#"(?i)((?:request[-_]?body|response[-_]?body|portal[-_]?response)\s*[:=]\s*)[^\r\n]+"#, "$1[REDACTED]"),
+            (#"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"#, "$1[REDACTED]"),
+        ]
+        for (pattern, replacement) in genericPatterns {
+            guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(output.startIndex..<output.endIndex, in: output)
+            output = expression.stringByReplacingMatches(in: output, range: range, withTemplate: replacement)
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if home != "/", !home.isEmpty {
+            output = output.replacingOccurrences(of: home, with: "~")
+        }
+        return String(output.prefix(2_000))
     }
 
     private func write(_ level: Level, _ message: String, password: String?) {
@@ -76,15 +108,21 @@ public final class AppLogger {
             let data = Data(line.utf8)
             if !fileManager.fileExists(atPath: fileURL.path) {
                 try data.write(to: fileURL, options: .atomic)
+                try secureLogFile()
                 return
             }
             let handle = try FileHandle(forWritingTo: fileURL)
             defer { try? handle.close() }
             try handle.seekToEnd()
             try handle.write(contentsOf: data)
+            try secureLogFile()
         } catch {
             // Logging must never prevent the menu-bar app from functioning.
         }
+    }
+
+    private func secureLogFile() throws {
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     }
 
     private func rotateIfNeeded() throws {

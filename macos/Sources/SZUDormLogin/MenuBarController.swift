@@ -15,6 +15,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     let logoutMenuItem = NSMenuItem(title: "退出当前账号", action: #selector(logout), keyEquivalent: "")
     let autoLoginMenuItem = ToggleMenuItem(title: "自动登录", action: #selector(toggleAutoLogin))
     let probeMenuItem = ToggleMenuItem(title: "联网状态探测", action: #selector(toggleProbe))
+    let dormProviderMenuItem = ToggleMenuItem(title: "Dorm Dr.COM", action: #selector(toggleDormProvider))
+    let teachingProviderMenuItem = ToggleMenuItem(title: "Teaching SRun", action: #selector(toggleTeachingProvider))
+    let campusCategoryMenuItem = NSMenuItem(title: "网络分类：未检查", action: nil, keyEquivalent: "")
+    let dormStatusMenuItem = NSMenuItem(title: "Dorm：待检查", action: nil, keyEquivalent: "")
+    let teachingStatusMenuItem = NSMenuItem(title: "Teaching：待检查", action: nil, keyEquivalent: "")
     let launchAtLoginMenuItem = ToggleMenuItem(
         title: "登录时启动",
         action: #selector(toggleLaunchAtLogin)
@@ -76,12 +81,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.delegate = self
         statusMenuItem.isEnabled = false
         detailMenuItem.isEnabled = false
+        campusCategoryMenuItem.isEnabled = false
+        dormStatusMenuItem.isEnabled = false
+        teachingStatusMenuItem.isEnabled = false
 
         for item in [
             loginMenuItem,
             logoutMenuItem,
             autoLoginMenuItem,
             probeMenuItem,
+            dormProviderMenuItem,
+            teachingProviderMenuItem,
             launchAtLoginMenuItem,
         ] {
             item.target = self
@@ -107,10 +117,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         [
             statusMenuItem,
             detailMenuItem,
+            campusCategoryMenuItem,
+            dormStatusMenuItem,
+            teachingStatusMenuItem,
             .separator(),
             loginMenuItem,
             logoutMenuItem,
             autoLoginMenuItem,
+            dormProviderMenuItem,
+            teachingProviderMenuItem,
             .separator(),
             probeMenuItem,
             accountItem,
@@ -131,6 +146,22 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         model.$statusDetail
             .receive(on: RunLoop.main)
             .sink { [weak self] detail in self?.updateStatusDetail(detail) }
+            .store(in: &cancellables)
+
+        model.$campusSnapshot
+            .combineLatest(model.$campusProviderConfiguration)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] snapshot, configuration in
+                guard let self else { return }
+                self.dormProviderMenuItem.update(isOn: configuration.dorm.enabled)
+                self.teachingProviderMenuItem.update(isOn: configuration.teaching.enabled)
+                self.campusCategoryMenuItem.title = "网络分类：\(snapshot?.category.rawValue ?? "unknown")"
+                let dormAccount = snapshot?.dorm.accountLabel ?? ""
+                let teachingAccount = snapshot?.teaching.accountLabel ?? ""
+                self.dormStatusMenuItem.title = "Dorm：\(snapshot?.dorm.lifecycle ?? "idle") · \(dormAccount.isEmpty ? "未设置标签" : dormAccount)"
+                self.teachingStatusMenuItem.title = "Teaching：\(snapshot?.teaching.lifecycle ?? "idle") · \(teachingAccount.isEmpty ? "未设置标签" : teachingAccount)"
+                self.logoutMenuItem.isEnabled = !self.model.isBusy && snapshot?.category == .dorm
+            }
             .store(in: &cancellables)
 
         Publishers.CombineLatest4(
@@ -172,7 +203,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             launchAtLoginMenuItem.update(isOn: false)
         }
         loginMenuItem.isEnabled = !busy
-        logoutMenuItem.isEnabled = !busy
+        logoutMenuItem.isEnabled = !busy && model.campusSnapshot?.category == .dorm
         loginMenuItem.title = busy ? "正在处理…" : "立即登录"
     }
 

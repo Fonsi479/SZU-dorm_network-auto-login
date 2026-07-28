@@ -1,6 +1,10 @@
 __pycache__/
 *.pyc
 .DS_Store
+.env
+.venv/
+.venv-windows-build-*/
+venv/
 
 macos/.build/
 macos/.swiftpm/
@@ -8,8 +12,16 @@ DerivedData/
 
 build/
 dist/
+reports/
 *.zip
 *.tar.gz
+
+# Signing credentials and provisioning material must never enter source control.
+*.key
+*.pem
+*.p12
+*.pfx
+*.mobileprovision
 
 logs/*
 !logs/.gitkeep
@@ -18,8 +30,3 @@ config.json
 config.yaml
 *.local.yaml
 *.private.yaml
-
-# Windows desktop files live only on the independent `windows` branch.
-apps/windows_desktop/
-one_click_install_and_run.bat
-start_szu_dorm_login.bat
