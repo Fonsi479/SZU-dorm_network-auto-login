@@ -18,6 +18,7 @@
 - Authentication transports require the verified local source address; SRun retains default TLS validation and bypasses system proxy settings.
 - Extended log/diagnostic redaction and permission checks for SRun-derived fields and authentication URLs.
 - Teaching logout remains disabled until a campus-safe contract is verified.
+- Optional `SZUNETFeature` integration is a password-free CLI consumer only; it cannot instantiate Core, Provider, Coordinator, Keychain/configuration ownership or its own automatic-login scheduler.
 
 ### Compatibility
 

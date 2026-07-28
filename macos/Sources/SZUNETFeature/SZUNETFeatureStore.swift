@@ -6,39 +6,32 @@ public final class SZUNETFeatureStore: ObservableObject {
     @Published public private(set) var snapshot = SZUNETSnapshot()
     @Published public private(set) var isWorking = false
 
-    private let adapter: SZUNETModule
+    private let module: SZUNETModule
     private let refreshInterval: Duration
     private var periodicTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
     private var started = false
 
     public init(
-        adapter: SZUNETModule = SZUNETModule(),
+        module: SZUNETModule = SZUNETModule(),
         refreshInterval: Duration = .seconds(30)
     ) {
-        self.adapter = adapter
+        self.module = module
         self.refreshInterval = refreshInterval
     }
 
-    public func start(featureEnabled: Bool, autoLoginEnabled: Bool) async {
+    public func start(adapterEnabled: Bool) async {
         guard !started else { return }
         started = true
-        snapshot = await adapter.configure(
-            featureEnabled: featureEnabled,
-            autoLoginEnabled: autoLoginEnabled
-        )
-        guard featureEnabled else { return }
-        restartPeriodicRefresh()
-        await refreshAndRunAutomaticLoginIfDue()
+        snapshot = await module.configure(adapterEnabled: adapterEnabled)
+        guard adapterEnabled else { return }
+        restartPeriodicStatus()
+        snapshot = await module.refresh()
     }
 
-    public func settingsDidChange(
-        featureEnabled: Bool,
-        autoLoginEnabled: Bool,
-        resumeAutoLogin: Bool
-    ) {
+    public func setAdapterEnabled(_ enabled: Bool) {
         operationTask?.cancel()
-        if !featureEnabled {
+        if !enabled {
             periodicTask?.cancel()
             periodicTask = nil
         }
@@ -49,62 +42,43 @@ public final class SZUNETFeatureStore: ObservableObject {
                 self.isWorking = false
                 self.operationTask = nil
             }
-            self.snapshot = await self.adapter.configure(
-                featureEnabled: featureEnabled,
-                autoLoginEnabled: autoLoginEnabled,
-                resumeAutoLogin: resumeAutoLogin
-            )
-            guard !Task.isCancelled, featureEnabled else { return }
-            self.restartPeriodicRefresh()
-            await self.refreshAndRunAutomaticLoginIfDue()
+            self.snapshot = await self.module.configure(adapterEnabled: enabled)
+            guard enabled, !Task.isCancelled else { return }
+            self.restartPeriodicStatus()
+            self.snapshot = await self.module.refresh()
         }
     }
 
     public func refresh() {
-        guard snapshot.status.featureEnabled else { return }
-        runOperation { store in
-            await store.refreshAndRunAutomaticLoginIfDue()
-        }
+        runOperation { module in await module.refresh() }
     }
 
-    public func manualLogin() {
-        guard snapshot.status.featureEnabled else { return }
-        runOperation { store in
-            store.snapshot = await store.adapter.manualLogin()
-            guard !Task.isCancelled else { return }
-            store.snapshot = await store.adapter.refresh()
-        }
+    public func check() {
+        runOperation { module in await module.check() }
+    }
+
+    public func manualLogin(provider: SZUNETCommandProvider = .auto) {
+        runOperation { module in await module.manualLogin(provider: provider) }
     }
 
     public func manualLogout() {
-        guard snapshot.status.featureEnabled else { return }
-        runOperation { store in
-            store.snapshot = await store.adapter.manualLogout()
-            guard !Task.isCancelled else { return }
-            store.snapshot = await store.adapter.refresh()
-        }
+        runOperation { module in await module.manualLogout() }
     }
 
-    public func saveCredentials(username: String, password: String?) {
-        guard snapshot.status.featureEnabled else { return }
-        runOperation { store in
-            store.snapshot = await store.adapter.saveCredentials(
-                username: username,
-                password: password
-            )
-        }
+    public func pause() {
+        runOperation { module in await module.pause() }
     }
 
-    @discardableResult
-    public func refreshSnapshot() async -> SZUNETSnapshot {
-        snapshot = await adapter.refresh()
-        return snapshot
+    public func resume() {
+        runOperation { module in await module.resume() }
     }
 
-    @discardableResult
-    public func runAutomaticLoginIfDue() async -> SZUNETSnapshot {
-        snapshot = await adapter.runAutomaticLoginIfDue()
-        return snapshot
+    public func openSettings() {
+        runOperation { module in await module.openSettings() }
+    }
+
+    public func diagnostics() {
+        runOperation { module in await module.diagnostics() }
     }
 
     public func shutdown() async {
@@ -112,13 +86,15 @@ public final class SZUNETFeatureStore: ObservableObject {
         operationTask?.cancel()
         periodicTask = nil
         operationTask = nil
-        await adapter.stop()
+        await module.stop()
+        snapshot = await module.currentSnapshot()
         isWorking = false
+        started = false
     }
 
-    private func restartPeriodicRefresh() {
+    private func restartPeriodicStatus() {
         periodicTask?.cancel()
-        guard snapshot.status.featureEnabled else {
+        guard snapshot.adapterEnabled else {
             periodicTask = nil
             return
         }
@@ -129,15 +105,16 @@ public final class SZUNETFeatureStore: ObservableObject {
                 } catch {
                     return
                 }
-                guard let self, self.snapshot.status.featureEnabled else { return }
-                await self.refreshAndRunAutomaticLoginIfDue()
+                guard let self, self.snapshot.adapterEnabled else { return }
+                self.snapshot = await self.module.refresh()
             }
         }
     }
 
     private func runOperation(
-        _ operation: @escaping @MainActor (SZUNETFeatureStore) async -> Void
+        _ operation: @escaping @Sendable (SZUNETModule) async -> SZUNETSnapshot
     ) {
+        guard snapshot.adapterEnabled else { return }
         operationTask?.cancel()
         operationTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -146,14 +123,7 @@ public final class SZUNETFeatureStore: ObservableObject {
                 self.isWorking = false
                 self.operationTask = nil
             }
-            await operation(self)
+            self.snapshot = await operation(self.module)
         }
-    }
-
-    private func refreshAndRunAutomaticLoginIfDue() async {
-        guard snapshot.status.featureEnabled else { return }
-        snapshot = await adapter.refresh()
-        guard !Task.isCancelled else { return }
-        snapshot = await adapter.runAutomaticLoginIfDue()
     }
 }

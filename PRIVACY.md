@@ -17,6 +17,8 @@ The project has no analytics, telemetry, advertising, remote crash upload or acc
 
 Status and diagnostic operations do not read credentials. The selected Provider may open its credential only after the Coordinator verifies the environment, source route, portal identity, enablement and explicit offline session state. Codex Butler receives only sanitized status and high-level command results.
 
+The optional Swift adapter does not receive account credentials or complete network identifiers. It launches the independent CLI with a fixed argument array and stdin JSON; it does not read SZUNET configuration, Keychain/Credential Manager data or authentication responses directly.
+
 ## Logs and diagnostics
 
 Logs are local, permission-restricted and rotated. Diagnostics are generated only on user request and must be previewed before sharing. They exclude passwords, tokens, cookies, full account values, complete IP/SSID identifiers and derived SRun authentication fields.

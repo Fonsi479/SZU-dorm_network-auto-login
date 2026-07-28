@@ -45,7 +45,7 @@ let package = Package(
         ),
         .target(
             name: "SZUNETFeature",
-            dependencies: ["SZUNetCore"],
+            dependencies: [],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("SwiftUI"),

@@ -124,7 +124,7 @@ Windows 配置与日志位于当前用户的本地应用数据目录。迁移不
 
 独立 SZUNET App 是认证和凭据的唯一所有者。Codex 管家只能读取脱敏状态并发送高层命令；它不能读取密码，也不拥有 Provider、Coordinator、设置或最终 SZUNET App。
 
-默认边界是稳定 JSON CLI。若本地 Swift Workspace 使用 `SZUNETFeature`，也只能复用公开契约和高层控制，认证实现仍位于本仓库。没有 localhost HTTP 服务。
+默认边界是稳定 JSON CLI。`SZUNETFeature` 只是这个 CLI 的 Swift 消费端：它不链接 `SZUNetCore`，不创建 Provider、Coordinator、凭据存储或自动登录任务，也不提供账号/密码或 Provider 设置界面。独立 App 未安装或 CLI 不可用时会失败关闭。没有 localhost HTTP 服务。
 
 详见 [Codex 管家适配边界](docs/CODEX_BUTLER_ADAPTER.md)。
 
@@ -141,7 +141,7 @@ Windows 配置与日志位于当前用户的本地应用数据目录。迁移不
 ## 源码结构
 
 ```text
-macos/                         原生 Swift App、CLI、SZUNETFeature 与测试
+macos/                         原生 Swift App、CLI、CLI-only SZUNETFeature 与测试
 apps/windows_desktop/          Windows Tk GUI
 src/szu_netlogin/              Windows/Python Provider、Coordinator 与 CLI
 protocol-spec/                 双平台共享 Schema、Fixture、向量和错误码

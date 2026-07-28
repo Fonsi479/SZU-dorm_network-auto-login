@@ -10,7 +10,7 @@
 ## 目录
 
 - `macos/Sources/SZUNetCore/`：双 Provider、Coordinator、状态机、持久化与 Keychain。
-- `macos/Sources/SZUNETFeature/`：供可选宿主消费的高层状态与命令契约，不拥有认证生命周期。
+- `macos/Sources/SZUNETFeature/`：CLI-only 可选消费端；不依赖 Core，不拥有认证、凭据、设置或自动登录生命周期。
 - `macos/Sources/SZUDormLogin/`：独立 macOS App 的薄入口和菜单栏 UI。
 - `macos/Tests/`：Core、App 与 Feature 测试。
 - `src/szu_netlogin/`：Windows/Python 双 Provider、Coordinator 与 JSON CLI。
@@ -34,6 +34,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 - JSON CLI 与 `SZUNETFeature` 只能交换脱敏状态和高层命令，不接受或返回密码。
 - 独立 SZUNET App 是 Provider、Coordinator、凭据、设置与最终 Bundle 的唯一所有者。
 - CodexButler 只是可选消费者，不得复制 Provider 或创建第二套认证所有者。
+- `SZUNETFeature` 只能通过已安装 App 内的 `szu-campus-netctl --json` 通信；不得回退到进程内 Core、配置路径或 Keychain。
 
 ## 数据兼容
 

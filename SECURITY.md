@@ -17,6 +17,7 @@ Do not attach real campus credentials, full authentication URLs, cookies, Challe
 - SRun uses HTTPS with default certificate validation, a fixed allowed host, no proxy inheritance, no TLS downgrade and no cross-host authentication redirect.
 - The application does not require administrator privileges, alter DNS/routes/proxies/VPNs, install a system daemon or expose a local HTTP listener.
 - Logs and diagnostics redact account identifiers, IP/SSID values, authentication URLs, request bodies, cookies, Challenge, Info, Password and Checksum fields.
+- Optional host integration is process-isolated: `SZUNETFeature` can only call the installed password-free JSON CLI and cannot link Core, create an authentication runtime, access credentials/settings or schedule automatic login.
 
 ## Out of scope
 

@@ -15,6 +15,7 @@
 - [ ] SHA-256 files, change log, privacy, security, rollback and provenance are included.
 - [ ] Release assets contain no source secrets, real config/logs, absolute developer paths or signing credentials.
 - [ ] `python3 scripts/scan_repository_secrets.py --source-root . --history` passes on a full-history checkout.
+- [ ] `SZUNETFeature` has no `SZUNetCore` dependency/import, credential API/UI, configuration takeover path or automatic-login scheduler; adapter tests use only a fake CLI executor.
 - [ ] Local `reports/`, raw executables, wheelhouses, installers and VM transfer files are excluded.
 - [ ] Apple notarization and Windows Authenticode/Defender/SmartScreen are either verified or explicitly marked blocked.
 - [ ] Maintainer manually reviews assets; build scripts never auto-publish.

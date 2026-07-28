@@ -1,637 +1,481 @@
+import Darwin
 import Foundation
-// SZUNetCore intentionally remains in Swift 5 language mode during the first
-// integration release. This actor is the single serialized compatibility
-// boundary; only immutable Sendable DTOs leave it. The adapter tests exercise
-// cancellation, feature gating, manual logout suppression and automatic-login
-// eligibility while the upstream package keeps its own state-machine tests.
-@preconcurrency import SZUNetCore
 
-public struct SZUNETFeaturePaths: Sendable {
-    public var unifiedConfigurationDirectory: URL
-
-    public init(unifiedConfigurationDirectory: URL) {
-        self.unifiedConfigurationDirectory = unifiedConfigurationDirectory
-    }
-
-    public static var live: SZUNETFeaturePaths {
-        SZUNETFeaturePaths(
-            unifiedConfigurationDirectory: FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(
-                    "Library/Application Support/CodexQuotaBar/Campus",
-                    isDirectory: true
-                )
-        )
-    }
-
-    public var unifiedConfigurationURL: URL {
-        unifiedConfigurationDirectory.appendingPathComponent("config.json")
-    }
+public protocol SZUNETCommandExecuting: Sendable {
+    func execute(
+        _ command: SZUNETCommand,
+        provider: SZUNETCommandProvider,
+        interactive: Bool,
+        timeoutSeconds: Int
+    ) async throws -> SZUNETCommandResult
 }
 
-public enum SZUNETActionOutcome: String, Codable, Equatable, Sendable {
-    case authenticated
-    case loggedOut
-    case unchanged
-    case failed
-    case uncertain
-    case cancelled
+struct SZUNETWireResult: Codable, Equatable, Sendable {
+    let schemaVersion: Int
+    let requestId: String
+    let outcome: SZUNETOutcome
+    let provider: SZUNETResultProvider
+    let networkContext: SZUNETNetworkContext
+    let sessionState: SZUNETSessionState
+    let errorCode: String?
+    let retryable: Bool
+    let message: String
+    let timestamp: String
 }
 
-public struct SZUNETActionResult: Codable, Equatable, Sendable {
-    public var outcome: SZUNETActionOutcome
-    public var title: String
-    public var detail: String
-    public var reason: String
-
-    public init(
-        outcome: SZUNETActionOutcome,
-        title: String,
-        detail: String = "",
-        reason: String = ""
-    ) {
-        self.outcome = outcome
-        self.title = title
-        self.detail = detail
-        self.reason = reason
-    }
-
-    public var isSuccess: Bool {
-        switch outcome {
-        case .authenticated, .loggedOut, .unchanged:
-            true
-        case .failed, .uncertain, .cancelled:
-            false
-        }
-    }
-}
-
-public struct SZUNETConfigurationSummary: Codable, Equatable, Sendable {
-    public var username: String
-    public var portalHost: String
-    public var sourceNetworkCount: Int
-
-    public init(username: String, portalHost: String, sourceNetworkCount: Int) {
-        self.username = username
-        self.portalHost = portalHost
-        self.sourceNetworkCount = max(sourceNetworkCount, 0)
-    }
-}
-
-public struct SZUNETProbeResult: Equatable, Sendable {
-    public var environment: SZUNETEnvironment
-    public var portal: SZUNETPortalState
-    public var internet: SZUNETReachabilityState
-    public var environmentLabel: String
-    public var environmentReason: String
-    public var gatewayReason: String
-    public var internetReason: String
-    public var autoLoginPaused: Bool
-    public var networkCategory: SZUNETNetworkCategory?
-    public var providers: [SZUNETProviderStatus]?
-
-    public init(
-        environment: SZUNETEnvironment,
-        portal: SZUNETPortalState,
-        internet: SZUNETReachabilityState,
-        environmentLabel: String,
-        environmentReason: String,
-        gatewayReason: String,
-        internetReason: String,
-        autoLoginPaused: Bool,
-        networkCategory: SZUNETNetworkCategory? = nil,
-        providers: [SZUNETProviderStatus]? = nil
-    ) {
-        self.environment = environment
-        self.portal = portal
-        self.internet = internet
-        self.environmentLabel = environmentLabel
-        self.environmentReason = environmentReason
-        self.gatewayReason = gatewayReason
-        self.internetReason = internetReason
-        self.autoLoginPaused = autoLoginPaused
-        self.networkCategory = networkCategory
-        self.providers = providers
-    }
-}
-
-public struct SZUNETSnapshot: Equatable, Sendable {
-    public var status: SZUNETStatus
-    public var configuration: SZUNETConfigurationSummary?
-    public var environmentLabel: String
-    public var detail: String
-    public var manualLogoutSuppressed: Bool
-    public var nextAutomaticAttemptAt: Date?
-    public var lastAction: SZUNETActionResult?
-
-    public init(
-        status: SZUNETStatus = SZUNETStatus(),
-        configuration: SZUNETConfigurationSummary? = nil,
-        environmentLabel: String = "未检查",
-        detail: String = "校园网模块已关闭，不会探测网络或读取校园网密码。",
-        manualLogoutSuppressed: Bool = false,
-        nextAutomaticAttemptAt: Date? = nil,
-        lastAction: SZUNETActionResult? = nil
-    ) {
-        self.status = status
-        self.configuration = configuration
-        self.environmentLabel = environmentLabel
-        self.detail = detail
-        self.manualLogoutSuppressed = manualLogoutSuppressed
-        self.nextAutomaticAttemptAt = nextAutomaticAttemptAt
-        self.lastAction = lastAction
-    }
-}
-
-public protocol SZUNETCoordinatorDriving: Sendable {
-    func probe() async throws -> SZUNETProbeResult
-    func manualLogin() async -> SZUNETActionResult
-    func automaticLogin() async -> SZUNETActionResult
-    func manualLogout() async -> SZUNETActionResult
-    func setAutoLoginEnabled(_ enabled: Bool) async throws
-    func configurationSummary() async throws -> SZUNETConfigurationSummary
-    func saveCredentials(username: String, password: String?) async throws
-}
-
-public actor SZUNETCoordinatorDriver: SZUNETCoordinatorDriving {
-    private let coordinator: LoginCoordinator
-    private let productController: CampusProductController?
-
-    public init(paths: SZUNETFeaturePaths = .live) {
-        if FileManager.default.fileExists(atPath: paths.unifiedConfigurationURL.path) {
-            let legacyPaths = AppPaths.standard
-            let unifiedPaths = AppPaths(
-                applicationSupportDirectory: paths.unifiedConfigurationDirectory,
-                logDirectory: legacyPaths.logDirectory
-            )
-            coordinator = LoginCoordinator(
-                configurationStore: ConfigurationStore(paths: unifiedPaths)
-            )
-            productController = try? CampusProductRuntime.make(paths: unifiedPaths)
-        } else {
-            coordinator = LoginCoordinator()
-            productController = try? CampusProductRuntime.make()
+public enum SZUNETCLIExecutableLocator {
+    public static func installed(fileManager: FileManager = .default) -> URL? {
+        candidates(fileManager: fileManager).first {
+            fileManager.isExecutableFile(atPath: $0.path)
         }
     }
 
-    public func probe() async throws -> SZUNETProbeResult {
-        if let productController {
-            let snapshot = await productController.refresh()
-            let lifecycle: String = switch snapshot.category {
-            case .dorm: snapshot.dorm.lifecycle
-            case .teaching: snapshot.teaching.lifecycle
-            case .ambiguous, .nonCampus, .unknown: "unknown"
-            }
-            let portal: SZUNETPortalState = switch lifecycle {
-            case "online": .authenticated
-            case "offline": .unauthenticated
-            default: .unknown
-            }
-            let environment: SZUNETEnvironment = switch snapshot.category {
-            case .dorm, .teaching: .eligible
-            case .nonCampus: .ineligible
-            case .ambiguous, .unknown: .unknown
-            }
-            return SZUNETProbeResult(
-                environment: environment,
-                portal: portal,
-                internet: .unknown,
-                environmentLabel: snapshot.category.rawValue,
-                environmentReason: snapshot.lastErrorCode ?? snapshot.category.rawValue,
-                gatewayReason: "managed_by_campus_product_controller",
-                internetReason: "not_probed",
-                autoLoginPaused: coordinator.pauseStore.isPaused,
-                networkCategory: Self.category(from: snapshot.category),
-                providers: Self.providers(from: snapshot)
-            )
-        }
-        let (_, status, environment) = try await coordinator.probe()
-        let internet: SZUNETReachabilityState
-        if status.campusInternetOK {
-            internet = .reachable
-        } else if status.internetReason == "not_probed" || status.internetReason.hasPrefix("skipped_") {
-            internet = .unknown
-        } else {
-            internet = .unreachable
-        }
-        return SZUNETProbeResult(
-            environment: Self.environment(from: environment),
-            portal: Self.portal(from: status.campusSessionState),
-            internet: internet,
-            environmentLabel: environment.label,
-            environmentReason: environment.reason,
-            gatewayReason: status.gatewayReason,
-            internetReason: status.internetReason,
-            autoLoginPaused: coordinator.pauseStore.isPaused
-        )
-    }
-
-    public func manualLogin() async -> SZUNETActionResult {
-        if let productController { return Self.map(await productController.login()) }
-        return Self.map(await coordinator.loginNow())
-    }
-
-    public func automaticLogin() async -> SZUNETActionResult {
-        if let productController { return Self.map(await productController.login(automatic: true)) }
-        return Self.map(await coordinator.checkAndLogin())
-    }
-
-    public func manualLogout() async -> SZUNETActionResult {
-        if let productController {
-            let snapshot = await productController.currentSnapshot()
-            guard snapshot.category == .dorm else {
-                return SZUNETActionResult(
-                    outcome: .unchanged,
-                    title: "当前 Provider 不支持退出",
-                    reason: "logout_disabled"
-                )
-            }
-            return Self.map(await productController.logout(providerID: .dorm))
-        }
-        return Self.map(await coordinator.logout())
-    }
-
-    public func setAutoLoginEnabled(_ enabled: Bool) async throws {
-        if enabled {
-            try coordinator.pauseStore.resume()
-        } else {
-            try coordinator.pauseStore.pause()
-        }
-    }
-
-    public func configurationSummary() async throws -> SZUNETConfigurationSummary {
-        let configuration = try coordinator.currentConfiguration()
-        let username = configuration.user.username == UserConfiguration.placeholder
-            ? ""
-            : configuration.user.username
-        return SZUNETConfigurationSummary(
-            username: username,
-            portalHost: URL(string: configuration.auth.loginURL)?.host ?? "未配置",
-            sourceNetworkCount: configuration.network.campusSourceNetworks.count
-        )
-    }
-
-    public func saveCredentials(username: String, password: String?) async throws {
-        let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedUsername.isEmpty else {
-            throw SZUNetError.configuration("校园网账号不能为空。")
-        }
-        let configuration = try coordinator.configurationStore.updateUsername(trimmedUsername)
-        if let password, !password.isEmpty {
-            try coordinator.savePassword(password, configuration: configuration)
-        }
-    }
-
-    private static func map(_ result: LoginActionResult) -> SZUNETActionResult {
-        let outcome: SZUNETActionOutcome = switch result.outcome {
-        case .authenticated: .authenticated
-        case .loggedOut: .loggedOut
-        case .unchanged: .unchanged
-        case .failed: .failed
-        case .uncertain: .uncertain
-        }
-        return SZUNETActionResult(
-            outcome: outcome,
-            title: result.title,
-            detail: result.detail,
-            reason: result.reason
-        )
-    }
-
-    private static func map(_ result: ProviderAuthResult) -> SZUNETActionResult {
-        let outcome: SZUNETActionOutcome = switch result.outcome {
-        case .succeeded: result.sessionState == .offline ? .loggedOut : .authenticated
-        case .unchanged: .unchanged
-        case .failed, .blocked: .failed
-        case .cancelled: .cancelled
-        }
-        return SZUNETActionResult(
-            outcome: outcome,
-            title: outcome == .authenticated ? "校园网登录成功" : outcome == .loggedOut ? "已退出校园网" : "校园网操作完成",
-            reason: result.errorCode ?? result.outcome.rawValue
-        )
-    }
-
-    private static func category(from value: CampusNetworkCategory) -> SZUNETNetworkCategory {
-        switch value {
-        case .dorm: .dorm
-        case .teaching: .teaching
-        case .ambiguous: .ambiguous
-        case .nonCampus: .nonCampus
-        case .unknown: .unknown
-        }
-    }
-
-    private static func providers(from snapshot: CampusProductSnapshot) -> [SZUNETProviderStatus] {
-        [
-            SZUNETProviderStatus(
-                provider: "dorm",
-                enabled: snapshot.dorm.enabled,
-                accountLabel: snapshot.dorm.accountLabel,
-                lifecycle: snapshot.dorm.lifecycle,
-                errorCode: snapshot.dorm.errorCode
-            ),
-            SZUNETProviderStatus(
-                provider: "teaching",
-                enabled: snapshot.teaching.enabled,
-                accountLabel: snapshot.teaching.accountLabel,
-                lifecycle: snapshot.teaching.lifecycle,
-                errorCode: snapshot.teaching.errorCode
-            ),
+    public static func candidates(fileManager: FileManager = .default) -> [URL] {
+        let suffix = "SZU Dorm Login.app/Contents/MacOS/szu-campus-netctl"
+        return [
+            fileManager.homeDirectoryForCurrentUser
+                .appendingPathComponent("Applications", isDirectory: true)
+                .appendingPathComponent(suffix),
+            URL(fileURLWithPath: "/Applications", isDirectory: true)
+                .appendingPathComponent(suffix),
         ]
     }
+}
 
-    private static func environment(from value: NetworkEnvironment) -> SZUNETEnvironment {
-        if value.autoLoginAvailable { return .eligible }
-        return value.isDormNetwork ? .unknown : .ineligible
+public actor SZUNETCLIClient: SZUNETCommandExecuting {
+    typealias Transport = @Sendable (Data, Int) async throws -> Data
+
+    static let maximumAllowedOutputBytes = 1_048_576
+
+    private let transport: Transport
+    private let requestIDFactory: @Sendable () -> String
+
+    public init(
+        executableURL: URL,
+        maximumOutputBytes: Int = 1_048_576,
+        requestIDFactory: @escaping @Sendable () -> String = { UUID().uuidString }
+    ) {
+        let runner = SZUNETProcessRunner(
+            executableURL: executableURL,
+            maximumOutputBytes: Self.clampedOutputLimit(maximumOutputBytes)
+        )
+        transport = { input, timeoutSeconds in
+            try await runner.run(input: input, timeoutSeconds: timeoutSeconds)
+        }
+        self.requestIDFactory = requestIDFactory
     }
 
-    private static func portal(from value: CampusSessionState) -> SZUNETPortalState {
-        switch value {
-        case .online: .authenticated
-        case .offline: .unauthenticated
-        case .unknown: .unknown
+    init(
+        transport: @escaping Transport,
+        requestIDFactory: @escaping @Sendable () -> String = { UUID().uuidString }
+    ) {
+        self.transport = transport
+        self.requestIDFactory = requestIDFactory
+    }
+
+    public static func installed() -> SZUNETCLIClient {
+        let executableURL = SZUNETCLIExecutableLocator.installed()
+            ?? SZUNETCLIExecutableLocator.candidates().first!
+        return SZUNETCLIClient(executableURL: executableURL)
+    }
+
+    public func execute(
+        _ command: SZUNETCommand,
+        provider: SZUNETCommandProvider = .auto,
+        interactive: Bool = false,
+        timeoutSeconds: Int = 15
+    ) async throws -> SZUNETCommandResult {
+        do {
+            try Task.checkCancellation()
+        } catch {
+            throw SZUNETAdapterError.cancelled
         }
+        let requestID = requestIDFactory()
+        guard (1...128).contains(requestID.count) else {
+            throw SZUNETAdapterError.invalidResponse
+        }
+        let request = SZUNETCommandRequest(
+            requestId: requestID,
+            command: command,
+            provider: provider,
+            interactive: interactive,
+            timeoutSeconds: timeoutSeconds
+        )
+        let input = try Self.encode(request)
+        let output: Data
+        do {
+            output = try await transport(input, request.timeoutSeconds)
+        } catch is CancellationError {
+            throw SZUNETAdapterError.cancelled
+        }
+        do {
+            try Task.checkCancellation()
+        } catch {
+            throw SZUNETAdapterError.cancelled
+        }
+        return try Self.decode(output, expectedRequestID: requestID)
+    }
+
+    static func encode(_ request: SZUNETCommandRequest) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        var data = try encoder.encode(request)
+        data.append(0x0A)
+        return data
+    }
+
+    static func clampedOutputLimit(_ value: Int) -> Int {
+        min(max(4_096, value), maximumAllowedOutputBytes)
+    }
+
+    static func decode(
+        _ data: Data,
+        expectedRequestID: String
+    ) throws -> SZUNETCommandResult {
+        guard !data.isEmpty else { throw SZUNETAdapterError.invalidResponse }
+        let decoder = JSONDecoder()
+        guard let wire = try? decoder.decode(SZUNETWireResult.self, from: data),
+              wire.message.utf8.count <= 1_000,
+              wire.timestamp.utf8.count <= 64 else {
+            throw SZUNETAdapterError.invalidResponse
+        }
+        guard wire.schemaVersion == 1 else {
+            throw SZUNETAdapterError.unsupportedSchema
+        }
+        guard wire.requestId == expectedRequestID else {
+            throw SZUNETAdapterError.requestMismatch
+        }
+        return SZUNETCommandResult(
+            schemaVersion: wire.schemaVersion,
+            requestId: wire.requestId,
+            outcome: wire.outcome,
+            provider: wire.provider,
+            networkContext: wire.networkContext,
+            sessionState: wire.sessionState,
+            errorCode: wire.errorCode,
+            retryable: wire.retryable
+        )
     }
 }
 
 public actor SZUNETModule {
-    public typealias DriverFactory = @Sendable () -> any SZUNETCoordinatorDriving
-
-    private let driverFactory: DriverFactory
-    private var driver: (any SZUNETCoordinatorDriving)?
+    private let executor: any SZUNETCommandExecuting
     private var snapshot = SZUNETSnapshot()
-    private var backoff = AutoLoginBackoff()
     private var generation: UInt64 = 0
-    private var probeTask: Task<SZUNETProbeResult, Error>?
-    private var manualTask: Task<SZUNETActionResult, Never>?
-    private var automaticTask: Task<SZUNETActionResult, Never>?
+    private var activeTask: Task<SZUNETCommandResult, Error>?
 
-    public init(driverFactory: @escaping DriverFactory = { SZUNETCoordinatorDriver() }) {
-        self.driverFactory = driverFactory
+    public init(executor: any SZUNETCommandExecuting = SZUNETCLIClient.installed()) {
+        self.executor = executor
     }
 
     public func currentSnapshot() -> SZUNETSnapshot {
         snapshot
     }
 
-    public func configure(
-        featureEnabled: Bool,
-        autoLoginEnabled: Bool,
-        resumeAutoLogin: Bool = false
-    ) async -> SZUNETSnapshot {
+    public func configure(adapterEnabled: Bool) -> SZUNETSnapshot {
         generation &+= 1
-        cancelOperations()
-        snapshot.status.featureEnabled = featureEnabled
-        snapshot.status.autoLoginEnabled = autoLoginEnabled
-        snapshot.status.errorCode = nil
-        snapshot.nextAutomaticAttemptAt = nil
-
-        guard featureEnabled else {
-            // Releasing the driver also releases its configuration path. A
-            // completed SZUNET takeover can therefore switch from the legacy
-            // config to the unified private copy without restarting the App.
-            driver = nil
-            snapshot.status.environment = .unknown
-            snapshot.status.portal = .unknown
-            snapshot.status.internet = .unknown
-            snapshot.configuration = nil
-            snapshot.environmentLabel = "模块已关闭"
-            snapshot.detail = "不会探测 Portal、读取校园网密码、运行退避任务或发送登录请求。"
-            snapshot.manualLogoutSuppressed = false
-            return snapshot
-        }
-
-        let driver = resolveDriver()
-        do {
-            if !autoLoginEnabled {
-                try await driver.setAutoLoginEnabled(false)
-                snapshot.manualLogoutSuppressed = false
-            } else if resumeAutoLogin {
-                try await driver.setAutoLoginEnabled(true)
-                snapshot.manualLogoutSuppressed = false
-                backoff.allowImmediateAttempt()
-            }
-            snapshot.configuration = try await driver.configurationSummary()
-            snapshot.environmentLabel = "等待检查"
-            snapshot.detail = autoLoginEnabled
-                ? "模块已启用；自动登录仍需通过宿舍网关与校园网源 IP 双重门控。"
-                : "模块已启用；自动登录已关闭，手动登录和退出仍可使用。"
-        } catch {
-            record(error: error, code: "campus_configuration_error")
+        activeTask?.cancel()
+        activeTask = nil
+        snapshot.adapterEnabled = adapterEnabled
+        if adapterEnabled {
+            snapshot.detail = "适配已启用；认证与设置仍由独立 SZUNET App 管理。"
+        } else {
+            snapshot.status = nil
+            snapshot.lastAction = nil
+            snapshot.detail = "适配已关闭；不会启动独立校园网 CLI。"
         }
         return snapshot
     }
 
     public func refresh() async -> SZUNETSnapshot {
-        guard snapshot.status.featureEnabled else { return snapshot }
-        let operationGeneration = generation
-        probeTask?.cancel()
-        let driver = resolveDriver()
-        let task = Task<SZUNETProbeResult, Error> {
-            try Task.checkCancellation()
-            return try await driver.probe()
-        }
-        probeTask = task
-        let previousPortal = snapshot.status.portal
-        snapshot.status.environment = .unknown
-        snapshot.status.portal = .checking
-        snapshot.status.internet = .checking
-        snapshot.detail = "正在检查校园网环境与 Portal 会话…"
-
-        do {
-            let result = try await task.value
-            guard operationGeneration == generation, !Task.isCancelled else { return snapshot }
-            probeTask = nil
-            snapshot.status.environment = result.environment
-            snapshot.status.portal = result.portal
-            snapshot.status.internet = result.internet
-            snapshot.environmentLabel = result.environmentLabel
-            snapshot.detail = Self.probeDetail(result)
-            snapshot.status.errorCode = nil
-            snapshot.status.networkCategory = result.networkCategory
-            snapshot.status.providers = result.providers
-            snapshot.manualLogoutSuppressed = snapshot.status.autoLoginEnabled && result.autoLoginPaused
-            if result.portal == .unauthenticated,
-               previousPortal != .unauthenticated,
-               snapshot.status.autoLoginEnabled,
-               !snapshot.manualLogoutSuppressed {
-                backoff.allowImmediateAttempt()
-            }
-            snapshot.nextAutomaticAttemptAt = snapshot.status.autoLoginEnabled
-                ? backoff.nextAttempt
-                : nil
-        } catch is CancellationError {
-            if operationGeneration == generation {
-                probeTask = nil
-                snapshot.detail = "校园网检查已取消。"
-            }
-        } catch {
-            if operationGeneration == generation {
-                probeTask = nil
-                record(error: error, code: "campus_probe_failed")
-            }
-        }
-        return snapshot
+        await perform(.status)
     }
 
-    public func runAutomaticLoginIfDue(at now: Date = Date()) async -> SZUNETSnapshot {
-        guard snapshot.status.featureEnabled,
-              snapshot.status.autoLoginEnabled,
-              !snapshot.manualLogoutSuppressed,
-              snapshot.status.environment == .eligible,
-              snapshot.status.portal == .unauthenticated,
-              manualTask == nil,
-              automaticTask == nil else { return snapshot }
-        guard backoff.consumeIfDue(at: now) else {
-            snapshot.nextAutomaticAttemptAt = backoff.nextAttempt
-            return snapshot
-        }
-
-        let operationGeneration = generation
-        let driver = resolveDriver()
-        let task = Task { await driver.automaticLogin() }
-        automaticTask = task
-        snapshot.detail = "已通过环境门控，正在执行受控自动登录…"
-        let result = await task.value
-        guard operationGeneration == generation, !Task.isCancelled else { return snapshot }
-        automaticTask = nil
-        apply(result, at: now, automatic: true)
-        return snapshot
+    public func check() async -> SZUNETSnapshot {
+        await perform(.check)
     }
 
-    public func manualLogin() async -> SZUNETSnapshot {
-        guard snapshot.status.featureEnabled else { return snapshot }
-        generation &+= 1
-        probeTask?.cancel()
-        manualTask?.cancel()
-        automaticTask?.cancel()
-        let operationGeneration = generation
-        let driver = resolveDriver()
-        let task = Task { await driver.manualLogin() }
-        manualTask = task
-        snapshot.detail = "正在执行你明确发起的校园网登录…"
-        let result = await task.value
-        guard operationGeneration == generation, !Task.isCancelled else { return snapshot }
-        manualTask = nil
-        apply(result, at: Date(), automatic: false)
-        return snapshot
+    public func manualLogin(provider: SZUNETCommandProvider = .auto) async -> SZUNETSnapshot {
+        await perform(.login, provider: provider, interactive: true)
     }
 
     public func manualLogout() async -> SZUNETSnapshot {
-        guard snapshot.status.featureEnabled else { return snapshot }
-        generation &+= 1
-        probeTask?.cancel()
-        manualTask?.cancel()
-        automaticTask?.cancel()
-        let operationGeneration = generation
-        let driver = resolveDriver()
-        let task = Task { await driver.manualLogout() }
-        manualTask = task
-        snapshot.detail = "正在执行你明确发起的校园网退出…"
-        let result = await task.value
-        guard operationGeneration == generation, !Task.isCancelled else { return snapshot }
-        manualTask = nil
-        if result.reason != "pause_failed" {
-            snapshot.manualLogoutSuppressed = true
-        }
-        apply(result, at: Date(), automatic: false)
-        return snapshot
+        await perform(.logout, provider: .dorm, interactive: true)
     }
 
-    public func saveCredentials(username: String, password: String?) async -> SZUNETSnapshot {
-        guard snapshot.status.featureEnabled else { return snapshot }
-        let driver = resolveDriver()
-        do {
-            try await driver.saveCredentials(username: username, password: password)
-            snapshot.configuration = try await driver.configurationSummary()
-            snapshot.lastAction = SZUNETActionResult(
-                outcome: .unchanged,
-                title: "账号设置已保存",
-                detail: password?.isEmpty == false
-                    ? "密码已写入当前受管 Keychain 项，不会保存到配置或日志。"
-                    : "账号已更新；当前 Keychain 密码保持不变。",
-                reason: "credentials_saved"
-            )
-            snapshot.detail = snapshot.lastAction?.detail ?? "账号设置已保存。"
-            snapshot.status.errorCode = nil
-        } catch {
-            record(error: error, code: "campus_credentials_save_failed")
-        }
-        return snapshot
+    public func pause() async -> SZUNETSnapshot {
+        await perform(.pause)
+    }
+
+    public func resume() async -> SZUNETSnapshot {
+        await perform(.resume)
+    }
+
+    public func openSettings() async -> SZUNETSnapshot {
+        await perform(.openSettings, interactive: true)
+    }
+
+    public func diagnostics() async -> SZUNETSnapshot {
+        await perform(.diagnostics)
     }
 
     public func stop() {
         generation &+= 1
-        cancelOperations()
-        snapshot.nextAutomaticAttemptAt = nil
+        activeTask?.cancel()
+        activeTask = nil
+        snapshot = SZUNETSnapshot()
     }
 
-    private func resolveDriver() -> any SZUNETCoordinatorDriving {
-        if let driver { return driver }
-        let newDriver = driverFactory()
-        driver = newDriver
-        return newDriver
-    }
-
-    private func cancelOperations() {
-        probeTask?.cancel()
-        manualTask?.cancel()
-        automaticTask?.cancel()
-        probeTask = nil
-        manualTask = nil
-        automaticTask = nil
-    }
-
-    private func apply(_ result: SZUNETActionResult, at date: Date, automatic: Bool) {
-        snapshot.lastAction = result
-        snapshot.detail = [result.title, result.detail].filter { !$0.isEmpty }.joined(separator: "：")
-        switch result.outcome {
-        case .authenticated:
-            snapshot.status.portal = .authenticated
-            snapshot.status.internet = .checking
-            snapshot.status.lastSuccessAt = date
-            snapshot.status.errorCode = nil
-            backoff.recordSuccess(at: date)
-        case .loggedOut:
-            snapshot.status.portal = .unauthenticated
-            snapshot.status.lastSuccessAt = date
-            snapshot.status.errorCode = nil
-        case .unchanged:
-            if result.reason == "session_already_online" {
-                snapshot.status.portal = .authenticated
-                snapshot.status.lastSuccessAt = date
-                backoff.recordSuccess(at: date)
-            } else if result.reason == "paused" {
-                snapshot.manualLogoutSuppressed = true
-            }
-            snapshot.status.errorCode = nil
-        case .failed, .uncertain:
-            snapshot.status.lastFailureAt = date
-            snapshot.status.errorCode = result.reason.isEmpty ? "campus_action_failed" : result.reason
-            if automatic { backoff.recordFailure(at: date) }
-        case .cancelled:
-            break
+    private func perform(
+        _ command: SZUNETCommand,
+        provider: SZUNETCommandProvider = .auto,
+        interactive: Bool = false
+    ) async -> SZUNETSnapshot {
+        guard snapshot.adapterEnabled else { return snapshot }
+        generation &+= 1
+        activeTask?.cancel()
+        let operationGeneration = generation
+        let task = Task {
+            try await executor.execute(
+                command,
+                provider: provider,
+                interactive: interactive,
+                timeoutSeconds: command == .status ? 10 : 30
+            )
         }
-        snapshot.nextAutomaticAttemptAt = snapshot.status.autoLoginEnabled && !snapshot.manualLogoutSuppressed
-            ? backoff.nextAttempt
-            : nil
+        activeTask = task
+        do {
+            let result = try await task.value
+            guard generation == operationGeneration, snapshot.adapterEnabled else {
+                return snapshot
+            }
+            activeTask = nil
+            if command == .status || command == .check || command == .diagnostics {
+                snapshot.status = result
+            } else {
+                snapshot.lastAction = result
+            }
+            snapshot.detail = Self.detail(for: result)
+        } catch {
+            guard generation == operationGeneration, snapshot.adapterEnabled else {
+                return snapshot
+            }
+            activeTask = nil
+            let code = Self.code(for: error)
+            let result = SZUNETCommandResult.blocked(
+                requestId: "adapter-error",
+                code: code
+            )
+            if command == .status || command == .check || command == .diagnostics {
+                snapshot.status = result
+            } else {
+                snapshot.lastAction = result
+            }
+            snapshot.detail = result.errorCode ?? result.outcome.rawValue
+        }
+        return snapshot
     }
 
-    private func record(error: Error, code: String) {
-        snapshot.status.lastFailureAt = Date()
-        snapshot.status.errorCode = code
-        snapshot.detail = "校园网模块失败：\(error.localizedDescription)。Codex 与远程服务不会因此停止。"
-        snapshot.lastAction = SZUNETActionResult(
-            outcome: .failed,
-            title: "校园网模块失败",
-            detail: error.localizedDescription,
-            reason: code
+    private static func detail(for result: SZUNETCommandResult) -> String {
+        if let code = result.errorCode, !code.isEmpty { return code }
+        return result.outcome.rawValue
+    }
+
+    private static func code(for error: Error) -> String {
+        guard let adapterError = error as? SZUNETAdapterError else {
+            return "ADAPTER_INTERNAL"
+        }
+        return switch adapterError {
+        case .executableUnavailable: "ADAPTER_CLI_UNAVAILABLE"
+        case .launchFailed: "ADAPTER_CLI_LAUNCH_FAILED"
+        case .outputTooLarge: "ADAPTER_OUTPUT_TOO_LARGE"
+        case .timedOut: "ADAPTER_TIMEOUT"
+        case .cancelled: "OPERATION_CANCELLED"
+        case .invalidResponse: "ADAPTER_INVALID_RESPONSE"
+        case .unsupportedSchema: "ADAPTER_SCHEMA_MISMATCH"
+        case .requestMismatch: "ADAPTER_REQUEST_MISMATCH"
+        }
+    }
+}
+
+final class SZUNETProcessRunner: @unchecked Sendable {
+    private let executableURL: URL
+    private let maximumOutputBytes: Int
+
+    init(executableURL: URL, maximumOutputBytes: Int) {
+        self.executableURL = executableURL
+        self.maximumOutputBytes = maximumOutputBytes
+    }
+
+    func run(input: Data, timeoutSeconds: Int) async throws -> Data {
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            throw SZUNETAdapterError.executableUnavailable
+        }
+
+        let process = Process()
+        let standardInput = Pipe()
+        let standardOutput = Pipe()
+        let standardError = Pipe()
+        process.executableURL = executableURL
+        process.arguments = ["--json"]
+        process.environment = Self.minimumEnvironment()
+        process.standardInput = standardInput
+        process.standardOutput = standardOutput
+        process.standardError = standardError
+
+        let state = SZUNETChildProcessState(
+            process,
+            handles: [
+                standardInput.fileHandleForReading,
+                standardInput.fileHandleForWriting,
+                standardOutput.fileHandleForReading,
+                standardOutput.fileHandleForWriting,
+                standardError.fileHandleForReading,
+                standardError.fileHandleForWriting,
+            ]
         )
+        defer { state.closeHandles() }
+        do {
+            try process.run()
+            state.isolateProcessGroupIfPossible()
+            try standardInput.fileHandleForWriting.write(contentsOf: input)
+            try standardInput.fileHandleForWriting.close()
+        } catch {
+            state.forceStop()
+            throw SZUNETAdapterError.launchFailed
+        }
+
+        return try await withTaskCancellationHandler {
+            do {
+                return try await withThrowingTaskGroup(of: Data.self) { group in
+                    group.addTask { [maximumOutputBytes] in
+                        async let output = Self.drain(
+                            standardOutput.fileHandleForReading,
+                            maximumBytes: maximumOutputBytes
+                        )
+                        async let errors = Self.drain(
+                            standardError.fileHandleForReading,
+                            maximumBytes: 65_536
+                        )
+                        await Task.detached {
+                            process.waitUntilExit()
+                        }.value
+                        let (outputResult, errorResult) = await (output, errors)
+                        guard !outputResult.exceeded, !errorResult.exceeded else {
+                            throw SZUNETAdapterError.outputTooLarge
+                        }
+                        return outputResult.data
+                    }
+                    group.addTask {
+                        try await Task.sleep(for: .seconds(timeoutSeconds))
+                        throw SZUNETAdapterError.timedOut
+                    }
+                    defer { group.cancelAll() }
+                    do {
+                        guard let first = try await group.next() else {
+                            throw SZUNETAdapterError.invalidResponse
+                        }
+                        return first
+                    } catch {
+                        state.forceStop()
+                        throw error
+                    }
+                }
+            } catch is CancellationError {
+                state.forceStop()
+                throw SZUNETAdapterError.cancelled
+            }
+        } onCancel: {
+            state.forceStop()
+        }
     }
 
-    private static func probeDetail(_ result: SZUNETProbeResult) -> String {
-        let parts = [result.environmentReason, result.gatewayReason, result.internetReason]
-            .filter { !$0.isEmpty && $0 != "not_probed" }
-        return parts.isEmpty ? "校园网状态已更新。" : parts.joined(separator: " · ")
+    static func minimumEnvironment(
+        fileManager: FileManager = .default
+    ) -> [String: String] {
+        [
+            "HOME": fileManager.homeDirectoryForCurrentUser.path,
+            "TMPDIR": fileManager.temporaryDirectory.path,
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "LANG": "en_US.UTF-8",
+            "LC_CTYPE": "UTF-8",
+        ]
+    }
+
+    private static func drain(
+        _ handle: FileHandle,
+        maximumBytes: Int
+    ) async -> (data: Data, exceeded: Bool) {
+        await Task.detached {
+            var collected = Data()
+            var exceeded = false
+            while true {
+                let chunk: Data
+                do {
+                    guard let next = try handle.read(upToCount: 65_536), !next.isEmpty else {
+                        break
+                    }
+                    chunk = next
+                } catch {
+                    break
+                }
+                let remaining = max(0, maximumBytes - collected.count)
+                if chunk.count > remaining { exceeded = true }
+                if remaining > 0 { collected.append(chunk.prefix(remaining)) }
+            }
+            return (collected, exceeded)
+        }.value
+    }
+}
+
+private final class SZUNETChildProcessState: @unchecked Sendable {
+    private let lock = NSLock()
+    private let process: Process
+    private let handles: [FileHandle]
+    private var isolatedProcessGroup = false
+    private var handlesClosed = false
+
+    init(_ process: Process, handles: [FileHandle]) {
+        self.process = process
+        self.handles = handles
+    }
+
+    func isolateProcessGroupIfPossible() {
+        lock.lock()
+        defer { lock.unlock() }
+        let processID = process.processIdentifier
+        guard processID > 0 else { return }
+        if Darwin.setpgid(processID, processID) == 0 || Darwin.getpgid(processID) == processID {
+            isolatedProcessGroup = true
+        }
+    }
+
+    func forceStop() {
+        lock.lock()
+        let processID = process.processIdentifier
+        let shouldStop = processID > 0 && process.isRunning
+        let stopGroup = isolatedProcessGroup
+        closeHandlesLocked()
+        if shouldStop {
+            process.terminate()
+            if stopGroup {
+                _ = Darwin.kill(-processID, SIGKILL)
+            } else {
+                _ = Darwin.kill(processID, SIGKILL)
+            }
+        }
+        lock.unlock()
+    }
+
+    func closeHandles() {
+        lock.lock()
+        closeHandlesLocked()
+        lock.unlock()
+    }
+
+    private func closeHandlesLocked() {
+        guard !handlesClosed else { return }
+        handlesClosed = true
+        for handle in handles { try? handle.close() }
     }
 }
