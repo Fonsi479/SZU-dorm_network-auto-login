@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import ANY, Mock, patch
@@ -16,6 +18,7 @@ from src.szu_netlogin.contracts import (
 )
 from src.szu_netlogin.windows_product import (
     EnvironmentSnapshot,
+    ProcessAuthenticationLock,
     WindowsEnvironmentDetector,
     WindowsCampusService,
     get_process_service,
@@ -118,6 +121,21 @@ class WindowsProductTests(unittest.TestCase):
         get_password.assert_not_called()
         self.assertEqual(status["networkContext"], "dorm")
         self.assertFalse(status["providers"]["teaching"]["enabled"])
+
+    def test_service_source_cannot_regain_provider_selection_or_status_ownership(self):
+        source = inspect.getsource(WindowsCampusService)
+        for forbidden in (
+            "_selected_provider",
+            ".probe_environment(",
+            ".session_status(",
+        ):
+            self.assertNotIn(forbidden, source)
+        for required in (
+            "coordinator.status(",
+            "coordinator.login(",
+            "coordinator.logout(",
+        ):
+            self.assertIn(required, source)
 
     def test_process_service_is_reused(self):
         service = self.service()
@@ -232,12 +250,57 @@ class WindowsProductTests(unittest.TestCase):
         self.assertEqual(result.error_code, "AUTH_BAD_PASSWORD")
         self.assertEqual(provider.login_calls, 1)
 
-    def test_process_lock_rejects_login_and_logout(self):
+    def test_process_lock_rejects_status_login_and_logout(self):
         lock = FakeProcessLock(allowed=False)
         service = self.service(process_lock=lock)
+        self.assertEqual(
+            service.status()["providers"]["dorm"]["errorCode"],
+            "OPERATION_IN_PROGRESS",
+        )
         self.assertEqual(service.login("auto").error_code, "OPERATION_IN_PROGRESS")
         self.assertEqual(service.logout("dorm").error_code, "OPERATION_IN_PROGRESS")
         self.assertEqual(lock.releases, 0)
+
+    def test_status_is_rejected_while_authentication_holds_process_lock(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingProvider(FakeProvider):
+            def login(self, context, probe, username, credential):
+                started.set()
+                release.wait(timeout=2)
+                return super().login(context, probe, username, credential)
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = self.service(
+                providers={
+                    "dorm": BlockingProvider("dorm"),
+                    "teaching": FakeProvider("teaching"),
+                },
+                process_lock=ProcessAuthenticationLock(
+                    Path(directory) / "campus-auth-operation.lock"
+                ),
+            )
+            results = []
+            with patch(
+                "src.szu_netlogin.windows_product.get_provider_password",
+                return_value="synthetic-only",
+            ):
+                thread = threading.Thread(target=lambda: results.append(service.login("auto")))
+                thread.start()
+                try:
+                    self.assertTrue(started.wait(timeout=1))
+                    status = service.status()
+                finally:
+                    release.set()
+                    thread.join(timeout=2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(results[0].outcome, AuthOutcome.SUCCEEDED)
+        self.assertEqual(
+            status["providers"]["dorm"]["errorCode"],
+            "OPERATION_IN_PROGRESS",
+        )
 
     def test_generation_change_cancels_old_provider_and_suppresses_stale_status(self):
         dorm = FakeProvider("dorm")

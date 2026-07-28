@@ -17,7 +17,7 @@ from .config import (
     provider_configuration,
     teaching_account,
 )
-from .contracts import AuthOutcome, AuthResult, CredentialHandle, NetworkContext, SessionState, Support
+from .contracts import AuthOutcome, AuthResult, CredentialHandle, NetworkContext, SessionState
 from .coordinator import CampusNetworkCoordinator, CoordinatorSettings
 from .password_store import get_provider_password
 from .portal_detect import classify_network_environment, probe_gateway
@@ -189,57 +189,45 @@ class WindowsCampusService:
         self._coordinator: CampusNetworkCoordinator | None = None
         self._config_fingerprint = ""
         self._runtime_lock = threading.RLock()
-        self._status_lock = threading.Lock()
 
     def status(self) -> dict[str, Any]:
-        if not self._status_lock.acquire(blocking=False):
+        if not self.process_lock.acquire():
             return self._stale_status("OPERATION_IN_PROGRESS")
         try:
             return self._status_locked()
         finally:
-            self._status_lock.release()
+            self.process_lock.release()
 
     def _status_locked(self) -> dict[str, Any]:
         start_generation = self.generation
         config = self.config_loader()
-        providers, _coordinator = self._runtime(config)
         snapshot = self.detector.detect(config, start_generation)
-        provider_status: dict[str, dict[str, Any]] = {}
-        eligible: list[str] = []
-        for provider_id in ("dorm", "teaching"):
-            configured = provider_configuration(config, provider_id)
-            provider = providers[provider_id]
-            context = snapshot.contexts[provider_id]
-            probe = provider.probe_environment(context)
-            state = SessionState.BLOCKED if not configured["enabled"] else SessionState.UNKNOWN
-            error_code = "PROVIDER_DISABLED" if not configured["enabled"] else probe.error_code
-            if configured["enabled"] and probe.support == Support.VERIFIED:
-                username = self._username(config, provider_id)
-                session = provider.session_status(context, probe, username)
-                state = session.state
-                error_code = session.error_code
-                account_match = session.account_match
-                if state == SessionState.OFFLINE:
-                    eligible.append(provider_id)
-            else:
-                account_match = None
-            provider_status[provider_id] = {
-                "enabled": configured["enabled"],
-                "state": state.value,
-                "errorCode": error_code or None,
-                "account": self._mask_account(self._username(config, provider_id)),
-                "accountMatch": account_match,
-            }
-        if start_generation != self.generation:
+        _providers, coordinator = self._runtime(config)
+        status = coordinator.status(snapshot.contexts, self._usernames(config))
+        if status.error_code:
+            return self._stale_status(status.error_code)
+        if status.generation != self.generation:
             return self._stale_status("ENV_NETWORK_CHANGED")
-        auto_provider = eligible[0] if len(eligible) == 1 and snapshot.category == eligible[0] else None
+
+        provider_status: dict[str, dict[str, Any]] = {}
+        for provider_id in ("dorm", "teaching"):
+            item = status.providers.get(provider_id)
+            if item is None:
+                return self._stale_status("INTERNAL_ERROR")
+            provider_status[provider_id] = {
+                "enabled": item.enabled,
+                "state": item.session.state.value,
+                "errorCode": item.session.error_code or None,
+                "account": self._mask_account(self._username(config, provider_id)),
+                "accountMatch": item.session.account_match,
+            }
         return {
-            "networkContext": snapshot.category,
+            "networkContext": status.network_context,
             "paused": is_paused(),
             "pauseDescription": describe_pause_state(),
             "providers": provider_status,
-            "generation": self.generation,
-            "autoLoginProvider": auto_provider,
+            "generation": status.generation,
+            "autoLoginProvider": status.auto_login_provider,
         }
 
     def check(self) -> dict[str, Any]:
@@ -256,21 +244,22 @@ class WindowsCampusService:
     def _login_locked(self, requested_provider: str, *, manual: bool) -> AuthResult:
         config = self.config_loader()
         snapshot = self.detector.detect(config, self.generation)
-        providers, coordinator = self._runtime(config)
+        _providers, coordinator = self._runtime(config)
 
-        selected_id = self._selected_provider(providers, snapshot, requested_provider)
-        username = self._username(config, selected_id or requested_provider)
+        def credential_loader(provider_id: str):
+            def open_credential() -> CredentialHandle | None:
+                secret = get_provider_password(config, provider_id)
+                return CredentialHandle(secret) if secret else None
 
-        def open_credential() -> CredentialHandle | None:
-            if selected_id not in {"dorm", "teaching"}:
-                return None
-            secret = get_provider_password(config, selected_id)
-            return CredentialHandle(secret) if secret else None
+            return open_credential
 
         return coordinator.login(
             snapshot.contexts,
-            username,
-            open_credential,
+            self._usernames(config),
+            {
+                provider_id: credential_loader(provider_id)
+                for provider_id in ("dorm", "teaching")
+            },
             requested_provider=requested_provider,
             manual=manual,
         )
@@ -286,16 +275,11 @@ class WindowsCampusService:
     def _logout_locked(self, requested_provider: str) -> AuthResult:
         config = self.config_loader()
         snapshot = self.detector.detect(config, self.generation)
-        providers, coordinator = self._runtime(config)
-        provider_id = requested_provider
-        if provider_id == "auto":
-            provider_id = self._selected_provider(providers, snapshot, "auto") or "auto"
-        if provider_id not in providers:
-            return AuthResult(AuthOutcome.BLOCKED, provider_id, error_code="ENV_AMBIGUOUS")
+        _providers, coordinator = self._runtime(config)
         return coordinator.logout(
             snapshot.contexts,
-            self._username(config, provider_id),
-            requested_provider=provider_id,
+            self._usernames(config),
+            requested_provider=requested_provider,
         )
 
     def network_changed(self) -> int:
@@ -382,25 +366,19 @@ class WindowsCampusService:
         }
 
     @staticmethod
-    def _selected_provider(providers, snapshot, requested_provider):
-        verified = [
-            provider_id
-            for provider_id, provider in providers.items()
-            if provider.probe_environment(snapshot.contexts[provider_id]).support == Support.VERIFIED
-        ]
-        if len(verified) != 1:
-            return None
-        if requested_provider not in {"auto", verified[0]}:
-            return None
-        return verified[0]
-
-    @staticmethod
     def _username(config: dict[str, Any], provider_id: str) -> str:
         if provider_id == "teaching":
             return teaching_account(config)
         if provider_id == "dorm":
             return provider_configuration(config, "dorm")["account_label"]
         return ""
+
+    @classmethod
+    def _usernames(cls, config: dict[str, Any]) -> dict[str, str]:
+        return {
+            provider_id: cls._username(config, provider_id)
+            for provider_id in ("dorm", "teaching")
+        }
 
     @staticmethod
     def _mask_account(account: str) -> str:

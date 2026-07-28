@@ -35,6 +35,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 - 独立 SZUNET App 是 Provider、Coordinator、凭据、设置与最终 Bundle 的唯一所有者。
 - CodexButler 只是可选消费者，不得复制 Provider 或创建第二套认证所有者。
 - `SZUNETFeature` 只能通过已安装 App 内的 `szu-campus-netctl --json` 通信；不得回退到进程内 Core、配置路径或 Keychain。
+- 双平台 product service 的 status/check/login/logout 与 Provider 选择必须经唯一 Coordinator；service 不得直接调用 Provider 的 probe/session/auth API。
 
 ## 数据兼容
 

@@ -16,7 +16,7 @@ DormDrCOMProvider  TeachingSRunProvider
 source-bound transport + system credential broker
 ```
 
-The Coordinator is the only authentication scheduler. It owns provider selection, global mutual exclusion, network generation, cancellation, provider-specific backoff and fatal-error fuses. UI and adapters cannot call a Provider or credential store directly.
+The Coordinator is the only Provider decision owner and authentication scheduler. Credential-free status/check, provider selection, login and logout all pass through its global mutual exclusion, network generation and cancellation gates; authentication additionally uses the cross-process lease. UI, product services and adapters cannot call a Provider or credential store directly.
 
 Dorm and Teaching have separate enablement, account labels and credential references. Status probes are credential-free. Exactly one Provider must be verified before a credential is opened; two verified Providers are an ambiguous environment and fail closed.
 
