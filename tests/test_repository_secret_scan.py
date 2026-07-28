@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from scripts.scan_repository_secrets import render, scan_history, scan_source
+from scripts.scan_repository_secrets import read_only_flags, render, scan_history, scan_source
 
 
 class RepositorySecretScanTests(unittest.TestCase):
     def run_git(self, root: Path, *arguments: str) -> None:
         subprocess.run(["git", *arguments], cwd=root, check=True, capture_output=True)
+
+    def test_read_only_flags_degrade_safely_when_posix_flags_are_unavailable(self):
+        with (
+            mock.patch.object(os, "O_NOFOLLOW", 0, create=True),
+            mock.patch.object(os, "O_CLOEXEC", 0, create=True),
+        ):
+            self.assertEqual(read_only_flags(), os.O_RDONLY)
 
     def test_source_scan_reports_path_without_echoing_value(self):
         with tempfile.TemporaryDirectory() as directory:

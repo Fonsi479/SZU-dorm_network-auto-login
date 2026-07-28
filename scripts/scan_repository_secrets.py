@@ -68,6 +68,13 @@ def scan_data(data: bytes, label: str) -> list[Finding]:
     return findings
 
 
+def read_only_flags() -> int:
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    return flags
+
+
 def file_bytes(path: Path) -> bytes | None:
     try:
         metadata = path.lstat()
@@ -75,7 +82,7 @@ def file_bytes(path: Path) -> bytes | None:
             return os.fsencode(os.readlink(path))
         if not stat.S_ISREG(metadata.st_mode):
             return None
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        descriptor = os.open(path, read_only_flags())
         with os.fdopen(descriptor, "rb") as handle:
             return handle.read()
     except OSError:
