@@ -63,7 +63,8 @@ struct HTTPTransportTests {
                 sourceIP: nil
             )
         }
-        try await Task.sleep(nanoseconds: 50_000_000)
+        let didStart = await waitUntil { MockURLProtocol.didStart }
+        #expect(didStart)
         task.cancel()
 
         do {
@@ -74,7 +75,8 @@ struct HTTPTransportTests {
         } catch {
             #expect(error.localizedDescription.contains("cancelled"))
         }
-        #expect(MockURLProtocol.wasStopped)
+        let wasStopped = await waitUntil { MockURLProtocol.wasStopped }
+        #expect(wasStopped)
     }
 
     @Test("source-bound request reaches loopback from the requested local IP")
@@ -116,6 +118,14 @@ struct HTTPTransportTests {
         }
         #expect(try await peerIP == nil)
     }
+}
+
+private func waitUntil(_ predicate: () -> Bool) async -> Bool {
+    for _ in 0..<100 {
+        if predicate() { return true }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    return predicate()
 }
 
 private final class LoopbackHTTPServer: @unchecked Sendable {
@@ -220,15 +230,43 @@ private final class LoopbackHTTPServer: @unchecked Sendable {
 private final class MockURLProtocol: URLProtocol {
     typealias Handler = (URLRequest) async throws -> (HTTPURLResponse, Data)
 
-    static var handler: Handler?
-    static var wasStopped = false
+    private static let stateLock = NSLock()
+    private static var handlerStorage: Handler?
+    private static var didStartStorage = false
+    private static var wasStoppedStorage = false
     private var work: Task<Void, Never>?
+
+    static var handler: Handler? {
+        get {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            return handlerStorage
+        }
+        set {
+            stateLock.lock()
+            handlerStorage = newValue
+            stateLock.unlock()
+        }
+    }
+
+    static var didStart: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return didStartStorage
+    }
+
+    static var wasStopped: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return wasStoppedStorage
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
 
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        Self.recordStart()
         guard let handler = Self.handler else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
@@ -248,13 +286,28 @@ private final class MockURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {
-        Self.wasStopped = true
+        Self.recordStop()
         work?.cancel()
     }
 
     static func reset() {
-        handler = nil
-        wasStopped = false
+        stateLock.lock()
+        handlerStorage = nil
+        didStartStorage = false
+        wasStoppedStorage = false
+        stateLock.unlock()
+    }
+
+    private static func recordStart() {
+        stateLock.lock()
+        didStartStorage = true
+        stateLock.unlock()
+    }
+
+    private static func recordStop() {
+        stateLock.lock()
+        wasStoppedStorage = true
+        stateLock.unlock()
     }
 
     static func reply(
