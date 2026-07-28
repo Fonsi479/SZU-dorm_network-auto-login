@@ -368,12 +368,13 @@ private func waitForProcessMarker(
 ) async throws -> pid_t {
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)
-    while clock.now < deadline {
+    while true {
         if let text = try? String(contentsOf: marker, encoding: .utf8),
            let value = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
            value > 0 {
             return value
         }
+        guard clock.now < deadline else { break }
         try await Task.sleep(for: .milliseconds(10))
     }
     throw FixtureError.processDidNotStart

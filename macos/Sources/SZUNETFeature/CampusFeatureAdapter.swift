@@ -1,4 +1,5 @@
 import Darwin
+import Dispatch
 import Foundation
 
 public protocol SZUNETCommandExecuting: Sendable {
@@ -357,9 +358,7 @@ final class SZUNETProcessRunner: @unchecked Sendable {
                             standardError.fileHandleForReading,
                             maximumBytes: 65_536
                         )
-                        await Task.detached {
-                            process.waitUntilExit()
-                        }.value
+                        await Self.waitUntilExit(process)
                         let (outputResult, errorResult) = await (output, errors)
                         guard !outputResult.exceeded, !errorResult.exceeded else {
                             throw SZUNETAdapterError.outputTooLarge
@@ -406,25 +405,55 @@ final class SZUNETProcessRunner: @unchecked Sendable {
         _ handle: FileHandle,
         maximumBytes: Int
     ) async -> (data: Data, exceeded: Bool) {
-        await Task.detached {
-            var collected = Data()
-            var exceeded = false
-            while true {
-                let chunk: Data
-                do {
-                    guard let next = try handle.read(upToCount: 65_536), !next.isEmpty else {
+        let blockingHandle = SZUNETBlockingFileHandle(handle)
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                var collected = Data()
+                var exceeded = false
+                while true {
+                    let chunk: Data
+                    do {
+                        guard let next = try blockingHandle.handle.read(upToCount: 65_536),
+                              !next.isEmpty else {
+                            break
+                        }
+                        chunk = next
+                    } catch {
                         break
                     }
-                    chunk = next
-                } catch {
-                    break
+                    let remaining = max(0, maximumBytes - collected.count)
+                    if chunk.count > remaining { exceeded = true }
+                    if remaining > 0 { collected.append(chunk.prefix(remaining)) }
                 }
-                let remaining = max(0, maximumBytes - collected.count)
-                if chunk.count > remaining { exceeded = true }
-                if remaining > 0 { collected.append(chunk.prefix(remaining)) }
+                continuation.resume(returning: (collected, exceeded))
             }
-            return (collected, exceeded)
-        }.value
+        }
+    }
+
+    private static func waitUntilExit(_ process: Process) async {
+        let blockingProcess = SZUNETBlockingProcess(process)
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                blockingProcess.process.waitUntilExit()
+                continuation.resume()
+            }
+        }
+    }
+}
+
+private final class SZUNETBlockingFileHandle: @unchecked Sendable {
+    let handle: FileHandle
+
+    init(_ handle: FileHandle) {
+        self.handle = handle
+    }
+}
+
+private final class SZUNETBlockingProcess: @unchecked Sendable {
+    let process: Process
+
+    init(_ process: Process) {
+        self.process = process
     }
 }
 
