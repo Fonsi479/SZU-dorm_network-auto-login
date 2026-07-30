@@ -164,6 +164,7 @@ public actor SZUNETModule {
     private var snapshot = SZUNETSnapshot()
     private var generation: UInt64 = 0
     private var activeTask: Task<SZUNETCommandResult, Error>?
+    private var diagnostics = SZUNETModuleDiagnostics()
 
     public init(executor: any SZUNETCommandExecuting = SZUNETCLIClient.installed()) {
         self.executor = executor
@@ -227,6 +228,10 @@ public actor SZUNETModule {
         snapshot = SZUNETSnapshot()
     }
 
+    public func diagnosticSnapshot() -> SZUNETModuleDiagnostics {
+        diagnostics
+    }
+
     private func perform(
         _ command: SZUNETCommand,
         provider: SZUNETCommandProvider = .auto,
@@ -236,6 +241,7 @@ public actor SZUNETModule {
         generation &+= 1
         activeTask?.cancel()
         let operationGeneration = generation
+        diagnostics.commandExecutions[command, default: 0] += 1
         let task = Task {
             try await executor.execute(
                 command,
@@ -259,6 +265,7 @@ public actor SZUNETModule {
             snapshot.detail = Self.detail(for: result)
         } catch {
             guard generation == operationGeneration, snapshot.adapterEnabled else {
+                diagnostics.cancelledExecutions += 1
                 return snapshot
             }
             activeTask = nil

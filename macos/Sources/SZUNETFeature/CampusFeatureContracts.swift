@@ -1,6 +1,6 @@
 import Foundation
 
-public enum SZUNETCommand: String, Codable, CaseIterable, Sendable {
+public enum SZUNETCommand: String, Codable, CaseIterable, Hashable, Sendable {
     case status
     case check
     case login
@@ -205,6 +205,89 @@ public enum SZUNETAdapterError: Error, Equatable, Sendable {
     case unsupportedSchema
     case requestMismatch
 }
+
+public enum SZUNETPresentationActivity: Int, Codable, CaseIterable, Comparable, Sendable {
+    case inactive = 0
+    case summaryVisible = 1
+    case detailVisible = 2
+
+    public static func < (lhs: Self, rhs: Self) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+}
+
+public enum SZUNETRefreshReason: String, Codable, CaseIterable, Hashable, Sendable {
+    case launch
+    case user
+    case becameVisible
+    case networkChanged
+    case wake
+    case dependencyChanged
+    case lowPowerChanged
+    case timerFallback
+}
+
+public struct SZUNETModuleDiagnostics: Equatable, Sendable {
+    public var commandExecutions: [SZUNETCommand: Int]
+    public var cancelledExecutions: Int
+
+    public init(
+        commandExecutions: [SZUNETCommand: Int] = [:],
+        cancelledExecutions: Int = 0
+    ) {
+        self.commandExecutions = commandExecutions
+        self.cancelledExecutions = cancelledExecutions
+    }
+}
+
+public struct SZUNETRefreshDiagnostics: Equatable, Sendable {
+    public var requested: Int
+    public var coalesced: Int
+    public var executed: Int
+    public var presentationActivity: SZUNETPresentationActivity
+    public var requestsByReason: [SZUNETRefreshReason: Int]
+    public var module: SZUNETModuleDiagnostics
+
+    public init(
+        requested: Int = 0,
+        coalesced: Int = 0,
+        executed: Int = 0,
+        presentationActivity: SZUNETPresentationActivity = .inactive,
+        requestsByReason: [SZUNETRefreshReason: Int] = [:],
+        module: SZUNETModuleDiagnostics = SZUNETModuleDiagnostics()
+    ) {
+        self.requested = requested
+        self.coalesced = coalesced
+        self.executed = executed
+        self.presentationActivity = presentationActivity
+        self.requestsByReason = requestsByReason
+        self.module = module
+    }
+}
+
+public struct SZUNETRefreshPolicy: Equatable, Sendable {
+    public var detailFallback: Duration
+    public var summaryFallback: Duration
+    public var inactiveFallback: Duration
+    public var constrainedFallback: Duration
+    public var tolerance: Duration
+
+    public init(
+        detailFallback: Duration = .seconds(30),
+        summaryFallback: Duration = .seconds(300),
+        inactiveFallback: Duration = .seconds(600),
+        constrainedFallback: Duration = .seconds(900),
+        tolerance: Duration = .seconds(15)
+    ) {
+        self.detailFallback = detailFallback
+        self.summaryFallback = summaryFallback
+        self.inactiveFallback = inactiveFallback
+        self.constrainedFallback = constrainedFallback
+        self.tolerance = tolerance
+    }
+}
+
+public typealias SZUNETRefreshSleeper = @Sendable (Duration, Duration) async throws -> Void
 
 extension SZUNETAdapterError: LocalizedError {
     public var errorDescription: String? {

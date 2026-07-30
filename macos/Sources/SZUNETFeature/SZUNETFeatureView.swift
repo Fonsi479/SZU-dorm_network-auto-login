@@ -1,6 +1,8 @@
 import SwiftUI
 
 public struct SZUNETFeatureView: View {
+    private static let presentationConsumerID = "SZUNETFeatureView.detail"
+
     @ObservedObject private var store: SZUNETFeatureStore
     @Binding private var adapterEnabled: Bool
     private let onAdapterEnabledChanged: (Bool) -> Void
@@ -36,6 +38,16 @@ public struct SZUNETFeatureView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .task {
             await store.start(adapterEnabled: adapterEnabled)
+            store.setPresentationActivity(
+                .detailVisible,
+                consumerID: Self.presentationConsumerID
+            )
+        }
+        .onDisappear {
+            store.setPresentationActivity(
+                .inactive,
+                consumerID: Self.presentationConsumerID
+            )
         }
         .onChange(of: adapterEnabled) { value in
             store.setAdapterEnabled(value)
@@ -136,16 +148,19 @@ public struct SZUNETFeatureView: View {
     }
 
     private var boundaryCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("所有权边界")
-                .font(.title3.bold())
-            Text("独立 SZUNET App/CLI 是唯一认证与设置所有者。此视图不链接认证 Core，不保存账号材料，不创建 Provider/Coordinator，也不自行调度登录。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            Text("Teaching 退出仍由独立 CLI 拒绝，直到校园现场契约完成验证。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        DisclosureGroup("技术与安全边界") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("独立 SZUNET App/CLI 是唯一认证与设置所有者。此视图不链接认证 Core，不保存账号材料，不创建 Provider/Coordinator，也不自行调度登录。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text("Teaching 退出仍由独立 CLI 拒绝，直到校园现场契约完成验证。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 8)
         }
+        .font(.headline)
+        .accessibilityHint("展开查看认证所有权、凭据和 Teaching 退出限制")
         .featureCard()
     }
 
