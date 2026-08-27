@@ -24,6 +24,10 @@ szu-campus-netctl --json
 - `login` 仍受环境安全门控。
 - `interactive=false` 时，缺凭据或需用户确认直接返回错误，不弹窗。
 - `diagnostics` 默认只返回摘要；导出文件需要用户交互。
+- `status` 与 `diagnostics` 在一次性 CLI 进程内执行只读刷新，不能复用空的进程内缓存。
+- 响应可选字段 `automaticEnabled` 与 `ownerAppRunning` 分别表示自动登录总门和独立 App 当前运行态；旧客户端可忽略它们。
+- `resume` 同时恢复自动登录总门、清除暂停状态并确认独立 App 已启动，启动失败不得返回 `succeeded`。
+- `open-settings` 只有在系统接受独立 App 的启动或设置路由后才返回成功。
 
 ## 退出码
 

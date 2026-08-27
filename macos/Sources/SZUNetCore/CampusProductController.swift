@@ -180,7 +180,14 @@ public actor CampusProductController {
         try pauseStore.pause()
     }
 
-    public func resume() throws {
+    public func resume() async throws {
+        if !configuration.automaticEnabled {
+            var updated = configuration
+            updated.automaticEnabled = true
+            try settingsStore.save(updated)
+            configuration = updated
+            await coordinator.updateSettings(updated.coordinatorSettings)
+        }
         try pauseStore.resume()
     }
 

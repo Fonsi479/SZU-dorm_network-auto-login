@@ -155,8 +155,34 @@ struct CampusProductTests {
         ])
         #expect(required.isSubset(of: Set(object.keys)))
         #expect(object["errorCode"] is NSNull)
+        #expect(object["automaticEnabled"] as? Bool == true)
+        #expect(object["ownerAppRunning"] as? Bool == true)
+        #expect(object["networkProbeEnabled"] as? Bool == true)
+        #expect(object["probeIntervalSeconds"] as? Int == 120)
         #expect(await handler.calls == 1)
         #expect(String(decoding: encoded, as: UTF8.self).split(separator: "\n").count == 1)
+    }
+
+    @Test("automation preferences expose only bounded probe controls")
+    func automationPreferencesAreBounded() throws {
+        let suiteName = "SZUNetCoreTests.AutomationPreferences.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        #expect(CampusAutomationPreferences.networkProbeEnabled(in: defaults))
+        #expect(
+            CampusAutomationPreferences.probeIntervalSeconds(in: defaults)
+                == CampusAutomationPreferences.defaultProbeIntervalSeconds
+        )
+
+        CampusAutomationPreferences.setNetworkProbeEnabled(false, in: defaults)
+        #expect(!CampusAutomationPreferences.networkProbeEnabled(in: defaults))
+        #expect(CampusAutomationPreferences.setProbeIntervalSeconds(120, in: defaults) == 120)
+        #expect(CampusAutomationPreferences.probeIntervalSeconds(in: defaults) == 120)
+        #expect(
+            CampusAutomationPreferences.setProbeIntervalSeconds(7, in: defaults)
+                == CampusAutomationPreferences.defaultProbeIntervalSeconds
+        )
     }
 
     @Test("product snapshots mask full account labels before CLI or Feature export")
@@ -195,6 +221,45 @@ struct CampusProductTests {
         let encoded = String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self)
         #expect(snapshot.dorm.accountLabel == "s***r@hlw")
         #expect(!encoded.contains("synthetic-user"))
+    }
+
+    @Test("resume restores both the persisted automatic switch and pause gate")
+    func resumeRestoresAutomaticLoginState() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var configuration = CampusProductConfiguration.default
+        configuration.automaticEnabled = false
+        let store = CampusProviderSettingsStore(
+            fileURL: root.appendingPathComponent("providers.json")
+        )
+        try store.save(configuration)
+        let pauseStore = PauseStore(
+            fileURL: root.appendingPathComponent("pause.json"),
+            lockFileURL: root.appendingPathComponent("pause.lock"),
+            legacyFileURL: root.appendingPathComponent("legacy-pause"),
+            migrationFileURL: root.appendingPathComponent("pause-migrated")
+        )
+        try pauseStore.pause()
+        let coordinator = CampusNetworkCoordinator(
+            providers: [],
+            credentialBroker: CampusCredentialBrokerStub(),
+            settings: configuration.coordinatorSettings,
+            authenticationLockURL: root.appendingPathComponent("auth.lock")
+        )
+        let controller = CampusProductController(
+            detector: CampusDetectorStub(),
+            coordinator: coordinator,
+            settingsStore: store,
+            pauseStore: pauseStore,
+            configuration: configuration
+        )
+
+        #expect(!(await controller.currentSnapshot()).automaticEnabled)
+        try await controller.resume()
+
+        #expect((await controller.currentSnapshot()).automaticEnabled)
+        #expect(!pauseStore.isPaused)
+        #expect(try store.load().automaticEnabled)
     }
 
     @Test("product refresh reports the selected Provider session without reading credentials")
@@ -303,6 +368,10 @@ private actor CampusCLIHandlerSpy: CampusCLIHandling {
             requestId: request.requestId,
             outcome: .unchanged,
             provider: request.provider.rawValue,
+            automaticEnabled: true,
+            ownerAppRunning: true,
+            networkProbeEnabled: true,
+            probeIntervalSeconds: 120,
             message: "unchanged"
         )
     }

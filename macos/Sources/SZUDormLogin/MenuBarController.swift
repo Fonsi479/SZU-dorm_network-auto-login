@@ -15,6 +15,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     let logoutMenuItem = NSMenuItem(title: "退出当前账号", action: #selector(logout), keyEquivalent: "")
     let autoLoginMenuItem = ToggleMenuItem(title: "自动登录", action: #selector(toggleAutoLogin))
     let probeMenuItem = ToggleMenuItem(title: "联网状态探测", action: #selector(toggleProbe))
+    let probeIntervalMenuItem = NSMenuItem(title: "探测间隔", action: nil, keyEquivalent: "")
+    let probeInterval30MenuItem = ToggleMenuItem(title: "30 秒", action: #selector(setProbeInterval30))
+    let probeInterval60MenuItem = ToggleMenuItem(title: "1 分钟", action: #selector(setProbeInterval60))
+    let probeInterval120MenuItem = ToggleMenuItem(title: "2 分钟", action: #selector(setProbeInterval120))
+    let probeInterval300MenuItem = ToggleMenuItem(title: "5 分钟", action: #selector(setProbeInterval300))
     let dormProviderMenuItem = ToggleMenuItem(title: "Dorm Dr.COM", action: #selector(toggleDormProvider))
     let teachingProviderMenuItem = ToggleMenuItem(title: "Teaching SRun", action: #selector(toggleTeachingProvider))
     let campusCategoryMenuItem = NSMenuItem(title: "网络分类：未检查", action: nil, keyEquivalent: "")
@@ -43,7 +48,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         var issues: [String] = []
         let titles = Set(menu.items.map(\.title))
         for required in [
-            "立即登录", "退出当前账号", "自动登录", "联网状态探测",
+            "立即登录", "退出当前账号", "自动登录", "联网状态探测", "探测间隔",
             "账号与凭据", "诊断与维护", "登录时启动", "退出 SZU Dorm Login",
         ] where !titles.contains(required) {
             issues.append("缺少菜单项：\(required)")
@@ -90,6 +95,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             logoutMenuItem,
             autoLoginMenuItem,
             probeMenuItem,
+            probeInterval30MenuItem,
+            probeInterval60MenuItem,
+            probeInterval120MenuItem,
+            probeInterval300MenuItem,
             dormProviderMenuItem,
             teachingProviderMenuItem,
             launchAtLoginMenuItem,
@@ -114,6 +123,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         diagnosticsMenu.addItem(actionItem("运行原生自检", #selector(runSelfCheck)))
         diagnosticsItem.submenu = diagnosticsMenu
 
+        let probeIntervalMenu = NSMenu(title: "探测间隔")
+        [
+            probeInterval30MenuItem,
+            probeInterval60MenuItem,
+            probeInterval120MenuItem,
+            probeInterval300MenuItem,
+        ].forEach(probeIntervalMenu.addItem)
+        probeIntervalMenuItem.submenu = probeIntervalMenu
+
         [
             statusMenuItem,
             detailMenuItem,
@@ -128,6 +146,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             teachingProviderMenuItem,
             .separator(),
             probeMenuItem,
+            probeIntervalMenuItem,
             accountItem,
             diagnosticsItem,
             launchAtLoginMenuItem,
@@ -181,6 +200,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
         .store(in: &cancellables)
 
+        model.$networkProbeIntervalSeconds
+            .receive(on: RunLoop.main)
+            .sink { [weak self] seconds in self?.updateProbeInterval(seconds) }
+            .store(in: &cancellables)
+
         model.onResult = { [weak self] result, showAlert in
             self?.present(result: result, showAlert: showAlert)
         }
@@ -225,6 +249,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         )
         statusItem.button?.toolTip = "\(text)\n\(model.statusDetail)"
         statusItem.button?.setAccessibilityLabel("校园网：\(text)，\(model.statusDetail)")
+    }
+
+    private func updateProbeInterval(_ seconds: Int) {
+        probeInterval30MenuItem.update(isOn: seconds == 30)
+        probeInterval60MenuItem.update(isOn: seconds == 60)
+        probeInterval120MenuItem.update(isOn: seconds == 120)
+        probeInterval300MenuItem.update(isOn: seconds == 300)
     }
 
     private func updateStatusDetail(_ detail: String) {

@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 
 import requests
 
+from .config import ConfigError, normalize_gateway_host, validate_portal_endpoint
 from .logger import get_logger, redact_sensitive_text
 from .portal_detect import SourceAddressAdapter, is_campus_source_ip
 
@@ -166,8 +167,11 @@ class DormDrcomClient:
     ) -> LoginResult:
         params = self.build_login_params(username, password)
         timeout_seconds = int(self.auth["timeout_seconds"])
+        login_url = self._safe_portal_url(str(self.auth.get("login_url") or ""), "login_url")
+        if not login_url:
+            return LoginResult("failed", "portal_url_invalid")
         source_ip = _normalize_ip(known_source_ip) or _get_source_ip(
-            str(self.auth["login_url"]),
+            login_url,
             timeout_seconds,
         )
         if not is_campus_source_ip(self.config, source_ip):
@@ -188,9 +192,10 @@ class DormDrcomClient:
 
         try:
             response = self.session.get(
-                str(self.auth["login_url"]),
+                login_url,
                 params=params,
                 timeout=timeout_seconds,
+                allow_redirects=False,
                 headers={
                     "User-Agent": USER_AGENT,
                     "Referer": "http://172.30.255.42:801/",
@@ -339,8 +344,10 @@ class DormDrcomClient:
     def logout(self, username: str) -> LogoutResult:
         logout_url = self._get_logout_url()
         if not logout_url:
-            self.logger.info("宿舍区 Dr.COM 退出接口未配置，且无法从 login_url 推导")
-            return LogoutResult("failed", "logout_url_not_configured")
+            configured = str(self.auth.get("logout_url") or "").strip()
+            reason = "logout_url_invalid" if configured else "logout_url_not_configured"
+            self.logger.info("宿舍区 Dr.COM 退出接口不可用：%s", reason)
+            return LogoutResult("failed", reason)
 
         if not logout_url.startswith(("http://", "https://")):
             self.logger.info("宿舍区 Dr.COM 退出接口配置无效：auth.logout_url 不是 HTTP 地址")
@@ -406,6 +413,7 @@ class DormDrcomClient:
                 logout_url,
                 params=params,
                 timeout=timeout_seconds,
+                allow_redirects=False,
                 headers=self._portal_headers(terminal.page_url),
             )
         except requests.RequestException as exc:
@@ -485,10 +493,35 @@ class DormDrcomClient:
             js_version=str(self.auth.get("logout_js_version") or self.auth.get("js_version") or "4.1.3"),
         )
 
+    def _safe_portal_url(self, value: str, field_name: str) -> str:
+        try:
+            expected_origin = None
+            if field_name != "login_url":
+                login = validate_portal_endpoint(
+                    self.config,
+                    str(self.auth.get("login_url") or ""),
+                    "login_url",
+                )
+                expected_origin = (
+                    login.scheme.lower(),
+                    normalize_gateway_host(login.hostname or ""),
+                    login.port or 0,
+                )
+            validate_portal_endpoint(
+                self.config,
+                value,
+                field_name,
+                expected_origin=expected_origin,
+            )
+        except ConfigError:
+            self.logger.warning("宿舍区 Dr.COM %s 配置不安全，拒绝请求", field_name)
+            return ""
+        return value.strip()
+
     def _get_logout_url(self) -> str:
         configured_url = str(self.auth.get("logout_url") or "").strip()
         if configured_url:
-            return configured_url
+            return self._safe_portal_url(configured_url, "logout_url")
 
         login_url = str(self.auth.get("login_url") or "").strip()
         parsed = urlparse(login_url)
@@ -501,13 +534,15 @@ class DormDrcomClient:
 
         logout_path = f"{path.removesuffix('/login')}/logout"
         inferred_url = urlunparse(parsed._replace(path=logout_path, query="", fragment=""))
-        self.logger.info("宿舍区 Dr.COM 退出接口未显式配置，已从 login_url 推导：%s", inferred_url)
-        return inferred_url
+        validated = self._safe_portal_url(inferred_url, "logout_url")
+        if validated:
+            self.logger.info("宿舍区 Dr.COM 退出接口未显式配置，已从 login_url 推导：%s", validated)
+        return validated
 
     def _get_unbind_url(self, logout_url: str) -> str:
         configured_url = str(self.auth.get("unbind_url") or "").strip()
         if configured_url:
-            return configured_url
+            return self._safe_portal_url(configured_url, "unbind_url")
 
         parsed = urlparse(logout_url)
         if not parsed.scheme or not parsed.netloc:
@@ -516,21 +551,27 @@ class DormDrcomClient:
         path = parsed.path.rstrip("/")
         if path.endswith("/logout"):
             unbind_path = f"{path.removesuffix('/logout')}/mac/unbind"
-            return urlunparse(parsed._replace(path=unbind_path, query="", fragment=""))
+            return self._safe_portal_url(
+                urlunparse(parsed._replace(path=unbind_path, query="", fragment="")),
+                "unbind_url",
+            )
 
         return ""
 
     def _get_logout_page_url(self) -> str:
         configured_url = str(self.auth.get("logout_page_url") or "").strip()
         if configured_url:
-            return configured_url
+            return self._safe_portal_url(configured_url, "logout_page_url")
 
         login_url = str(self.auth.get("login_url") or "").strip()
         parsed = urlparse(login_url)
         if not parsed.scheme or not parsed.hostname:
             return ""
 
-        return urlunparse((parsed.scheme, parsed.hostname, "/a79.htm", "", "", ""))
+        return self._safe_portal_url(
+            urlunparse((parsed.scheme, parsed.netloc, "/a79.htm", "", "", "")),
+            "logout_page_url",
+        )
 
     def _fetch_logout_page(self, page_url: str) -> str:
         if not page_url:
@@ -540,6 +581,7 @@ class DormDrcomClient:
             response = self.session.get(
                 page_url,
                 timeout=int(self.auth["timeout_seconds"]),
+                allow_redirects=False,
                 headers=self._portal_headers(page_url),
             )
         except requests.RequestException as exc:
@@ -566,6 +608,7 @@ class DormDrcomClient:
                 status_url,
                 params={"callback": "dr1002"},
                 timeout=int(self.auth["timeout_seconds"]),
+                allow_redirects=False,
                 headers=self._portal_headers(),
             )
         except requests.RequestException as exc:
@@ -613,6 +656,7 @@ class DormDrcomClient:
                 f"{portal_api}online_list",
                 params={"callback": "dr9999"},
                 timeout=int(self.auth["timeout_seconds"]),
+                allow_redirects=False,
                 headers=self._portal_headers(self._get_logout_page_url()),
             )
         except requests.RequestException as exc:
@@ -654,12 +698,24 @@ class DormDrcomClient:
         path = parsed.path.rstrip("/")
         if path.endswith("/login"):
             api_path = f"{path.removesuffix('/login')}/"
-            return urlunparse(parsed._replace(path=api_path, query="", fragment=""))
+        elif path.endswith("/"):
+            api_path = path
+        else:
+            return ""
+        return self._safe_portal_url(
+            urlunparse(parsed._replace(path=api_path, query="", fragment="")),
+            "portal_api_url",
+        )
 
-        if path.endswith("/"):
-            return urlunparse(parsed._replace(query="", fragment=""))
-
-        return ""
+    def _get_status_url(self) -> str:
+        page_url = self._get_logout_page_url()
+        parsed = urlparse(page_url)
+        if not parsed.scheme or not parsed.netloc:
+            return ""
+        return self._safe_portal_url(
+            urlunparse(parsed._replace(path="/drcom/chkstatus", query="", fragment="")),
+            "status_url",
+        )
 
     def _get_status_url(self) -> str:
         page_url = self._get_logout_page_url()
@@ -687,6 +743,7 @@ class DormDrcomClient:
                 unbind_url,
                 params=params,
                 timeout=timeout_seconds,
+                allow_redirects=False,
                 headers=self._portal_headers(),
             )
         except requests.RequestException as exc:

@@ -27,6 +27,7 @@ final class AppModel: ObservableObject {
     @Published var isRefreshing = false
     @Published var autoLoginEnabled = true
     @Published var networkProbeEnabled = true
+    @Published var networkProbeIntervalSeconds = CampusAutomationPreferences.defaultProbeIntervalSeconds
     @Published var launchAtLoginState: LaunchAtLoginController.State = .disabled
     @Published var passwordSaved = false
     @Published var campusProviderConfiguration = CampusProductConfiguration.default
@@ -41,10 +42,12 @@ final class AppModel: ObservableObject {
     let automation: AppAutomationScheduler
     let campusSettingsStore: CampusProviderSettingsStore
     let campusProductController: CampusProductController?
+    let defaults: UserDefaults
 
     var lastNetworkStatus: NetworkStatus?
     var lastEnvironment: NetworkEnvironment?
     var lastCampusLifecycle: String?
+    var automationStarted = false
 
     init(
         coordinator: LoginCoordinator? = nil,
@@ -54,6 +57,7 @@ final class AppModel: ObservableObject {
         defaults: UserDefaults = .standard
     ) {
         self.logger = logger
+        self.defaults = defaults
         self.coordinator = coordinator ?? LoginCoordinator(logger: logger)
         self.launchAtLogin = launchAtLogin
         self.automation = automation ?? AppAutomationScheduler()
@@ -67,22 +71,26 @@ final class AppModel: ObservableObject {
         )) ?? .default
         campusProductController = try? CampusProductRuntime.make(paths: paths)
 
-        networkProbeEnabled = defaults.object(forKey: "networkProbeEnabled") == nil
-            ? true
-            : defaults.bool(forKey: "networkProbeEnabled")
-        autoLoginEnabled = !self.coordinator.pauseStore.isPaused
+        networkProbeEnabled = CampusAutomationPreferences.networkProbeEnabled(in: defaults)
+        networkProbeIntervalSeconds = CampusAutomationPreferences.probeIntervalSeconds(in: defaults)
+        autoLoginEnabled = campusProviderConfiguration.automaticEnabled
+            && !self.coordinator.pauseStore.isPaused
         launchAtLoginState = launchAtLogin.state
         loadConfiguration()
     }
 
     func start() {
-        refreshStatus(allowAutoLogin: false)
-        automation.startTimers(periodicInterval: 60, initialDelay: 5) { [weak self] in
-            self?.refreshStatus()
+        automationStarted = true
+        guard networkProbeEnabled else {
+            clearNetworkStatus()
+            return
         }
+        refreshStatus(allowAutoLogin: false)
+        startProbeTimer(initialDelay: 5)
     }
 
     func stop() {
+        automationStarted = false
         automation.stop()
         isRefreshing = false
         isBusy = false
@@ -93,5 +101,15 @@ final class AppModel: ObservableObject {
         automation.cancelProbe()
         isRefreshing = false
         notifyCampusNetworkChangedAndRefresh()
+    }
+
+    func startProbeTimer(initialDelay: TimeInterval) {
+        guard automationStarted, networkProbeEnabled else { return }
+        automation.startTimers(
+            periodicInterval: TimeInterval(networkProbeIntervalSeconds),
+            initialDelay: initialDelay
+        ) { [weak self] in
+            self?.refreshStatus()
+        }
     }
 }

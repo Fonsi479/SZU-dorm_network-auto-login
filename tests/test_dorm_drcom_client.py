@@ -118,6 +118,16 @@ class DormDrcomResponseTests(unittest.TestCase):
         self.assertEqual(result.status, "unknown")
         self.assertEqual(result.reason, "server_response_uncertain")
 
+    @patch("src.szu_netlogin.dorm_drcom_client._get_source_ip", return_value="172.24.182.13")
+    def test_login_rejects_redirect_without_following_or_external_request(self, _get_source_ip) -> None:
+        client = DormDrcomClient(_test_config())
+        with patch.object(client.session, "get", return_value=_Response("redirect", status_code=302)) as get:
+            result = client.login_with_result("student-id", "password", known_source_ip="172.24.182.13")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.reason, "portal_interface_changed")
+        self.assertEqual(get.call_count, 1)
+        self.assertFalse(get.call_args.kwargs["allow_redirects"])
+
 
 class PortalSessionTests(unittest.TestCase):
     def test_session_fact_uses_exact_server_identity(self) -> None:
@@ -290,6 +300,7 @@ class PortalLogoutTests(unittest.TestCase):
         )
         self.assertEqual(get.call_args_list[0].kwargs["params"]["wlan_user_mac"], "9eb56a2011e4")
         self.assertEqual(get.call_args_list[1].kwargs["params"]["wlan_user_mac"], "000000000000")
+        self.assertTrue(all(not call.kwargs["allow_redirects"] for call in get.call_args_list))
 
 
 class _Response:

@@ -22,6 +22,22 @@ extension MenuBarController {
         model.setNetworkProbeEnabled(!model.networkProbeEnabled)
     }
 
+    @objc func setProbeInterval30() {
+        model.setNetworkProbeIntervalSeconds(30)
+    }
+
+    @objc func setProbeInterval60() {
+        model.setNetworkProbeIntervalSeconds(60)
+    }
+
+    @objc func setProbeInterval120() {
+        model.setNetworkProbeIntervalSeconds(120)
+    }
+
+    @objc func setProbeInterval300() {
+        model.setNetworkProbeIntervalSeconds(300)
+    }
+
     @objc func toggleDormProvider() {
         model.setProviderEnabled(.dorm, enabled: !model.campusProviderConfiguration.dorm.enabled)
     }

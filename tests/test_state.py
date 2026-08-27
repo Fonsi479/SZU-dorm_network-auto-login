@@ -11,14 +11,43 @@ from src.szu_netlogin import state
 
 
 class PauseStateTests(unittest.TestCase):
-    def test_legacy_pause_file_stays_paused(self) -> None:
+    def test_legacy_pause_file_is_explicitly_stale(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             pause_file = Path(temp_dir) / "paused"
             pause_file.write_text("2026-07-02T12:00:00+08:00\n", encoding="utf-8")
 
             with patch("src.szu_netlogin.state.PAUSE_FLAG_FILE", pause_file):
                 self.assertTrue(state.is_paused())
-                self.assertIn("手动恢复", state.describe_pause_state())
+                self.assertIn("状态损坏", state.describe_pause_state())
+
+    def test_malformed_json_is_stale_and_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pause_file = Path(temp_dir) / "paused"
+            pause_file.write_text("{not-json", encoding="utf-8")
+            with patch("src.szu_netlogin.state.PAUSE_FLAG_FILE", pause_file):
+                self.assertTrue(state.is_paused())
+                self.assertIn("invalid_json", state.describe_pause_state())
+
+    def test_invalid_timed_pause_is_stale_and_repairable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pause_file = Path(temp_dir) / "paused"
+            pause_file.write_text(json.dumps({"mode": "until", "resume_after": "not-a-date"}), encoding="utf-8")
+            with patch("src.szu_netlogin.state.PAUSE_FLAG_FILE", pause_file):
+                self.assertTrue(state.is_paused())
+                self.assertIn("invalid_resume_after", state.describe_pause_state())
+                state.resume()
+                self.assertFalse(pause_file.exists())
+
+    def test_next_boot_pause_is_stale_when_marker_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pause_file = Path(temp_dir) / "paused"
+            pause_file.write_text(json.dumps({"mode": "until_next_boot", "boot_marker": "old-boot"}), encoding="utf-8")
+            with (
+                patch("src.szu_netlogin.state.PAUSE_FLAG_FILE", pause_file),
+                patch("src.szu_netlogin.state._current_boot_marker", return_value=""),
+            ):
+                self.assertTrue(state.is_paused())
+                self.assertIn("boot_marker_unavailable", state.describe_pause_state())
 
     def test_expired_timed_pause_auto_resumes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -69,6 +98,19 @@ class PauseStateTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     state.pause(until_next_boot=True)
                 self.assertFalse(pause_file.exists())
+
+    def test_lock_acquisition_failure_is_stale_without_unlock_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pause_file = Path(temp_dir) / "paused"
+            pause_file.write_text(json.dumps({"mode": "manual"}), encoding="utf-8")
+            with (
+                patch("src.szu_netlogin.state.PAUSE_FLAG_FILE", pause_file),
+                patch.object(state.fcntl, "flock", side_effect=OSError("lock unavailable")) as flock,
+            ):
+                self.assertTrue(state.is_paused())
+                self.assertIn("lock_or_read_error", state.describe_pause_state())
+                self.assertEqual(flock.call_count, 2)
+                self.assertTrue(all(call.args[1] == state.fcntl.LOCK_EX for call in flock.call_args_list))
 
 
 if __name__ == "__main__":

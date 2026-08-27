@@ -37,6 +37,7 @@ from src.szu_netlogin.config import (  # noqa: E402
 )
 from src.szu_netlogin.logger import LOG_FILE, get_logger, redact_sensitive_text  # noqa: E402
 from src.szu_netlogin.dorm_drcom_client import DormDrcomClient  # noqa: E402
+from src.szu_netlogin.offline_fixture import run_offline_portal_self_test  # noqa: E402
 from src.szu_netlogin.password_store import (  # noqa: E402
     credential_backend_status,
     describe_password_source,
@@ -1227,7 +1228,7 @@ def run_control_dispatch() -> int:
 
 
 def run_frozen_self_test() -> int:
-    """Exercise bundled data and imports without opening a window or network socket."""
+    """Exercise bundled data and portal lifecycle fixtures without a socket."""
     try:
         import keyring  # noqa: F401
         import requests  # noqa: F401
@@ -1236,6 +1237,24 @@ def run_frozen_self_test() -> int:
         config = _parse_yaml(template)
         config["user"]["username"] = "123456"
         validate_config(config)
+        if not run_offline_portal_self_test():
+            return 1
+
+        # Keep the retry policy deterministic in the frozen self-test too;
+        # this catches accidental eager retries and failed backoff resets.
+        now = [100.0]
+        schedule = AutoLoginBackoff((120, 300), 60, clock=lambda: now[0])
+        if schedule.consume_if_due():
+            return 1
+        now[0] = 160.0
+        if not schedule.consume_if_due():
+            return 1
+        schedule.record_failure()
+        if schedule.current_interval_seconds != 300:
+            return 1
+        schedule.record_success()
+        if schedule.current_interval_seconds != 120:
+            return 1
     except Exception:
         return 1
     return 0

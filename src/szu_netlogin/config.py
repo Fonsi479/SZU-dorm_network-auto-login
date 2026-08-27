@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any, NamedTuple
+from urllib.parse import SplitResult, urlsplit
 
 from .platform_paths import get_default_app_project_root
 
@@ -47,6 +48,137 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 
 class ConfigError(ValueError):
     """Raised when config.yaml is missing or not usable."""
+
+
+DEFAULT_DORM_GATEWAY_PORT = 801
+DEFAULT_DORM_GATEWAY_HOSTS = ("172.30.255.42",)
+_FORBIDDEN_URL_ESCAPES = re.compile(r"%(?:2f|2F|5c|5C|2e|2E)")
+_PORTAL_ENDPOINT_PATHS = {
+    "login_url": ("/eportal/portal/login",),
+    "logout_url": ("/eportal/portal/logout",),
+    "logout_page_url": ("/a79.htm",),
+    "unbind_url": ("/eportal/portal/mac/unbind",),
+    "portal_api_url": ("/eportal/portal/",),
+    "status_url": ("/drcom/chkstatus",),
+}
+
+
+def normalize_gateway_host(value: str) -> str:
+    """Return one unambiguous gateway host representation or raise."""
+    raw = str(value).strip()
+    if not raw or "@" in raw or "%" in raw or raw.endswith("."):
+        raise ConfigError("network.dorm_gateway_hosts 含有不安全主机名。")
+    if raw.startswith("[") or raw.endswith("]"):
+        raw = raw.strip("[]")
+    try:
+        return ipaddress.ip_address(raw).compressed
+    except ValueError:
+        if any(char.isspace() or ord(char) < 0x20 for char in raw):
+            raise ConfigError("network.dorm_gateway_hosts 含有不安全主机名。") from None
+        try:
+            normalized = raw.encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            raise ConfigError("network.dorm_gateway_hosts 含有不安全主机名。") from None
+        if not normalized or "/" in normalized or ":" in normalized:
+            raise ConfigError("network.dorm_gateway_hosts 含有不安全主机名。")
+        return normalized
+
+
+def gateway_hosts(config: dict[str, Any] | None) -> tuple[str, ...]:
+    network = (config or {}).get("network") or {}
+    values = network.get("dorm_gateway_hosts") or DEFAULT_DORM_GATEWAY_HOSTS
+    if isinstance(values, str):
+        values = [values]
+    normalized = tuple(normalize_gateway_host(str(value)) for value in values)
+    # The config is untrusted input.  It may select among built-in aliases,
+    # but it must not be able to authorize a new host together with a new URL.
+    trusted = {normalize_gateway_host(value) for value in DEFAULT_DORM_GATEWAY_HOSTS}
+    if not normalized or not set(normalized).issubset(trusted):
+        raise ConfigError("network.dorm_gateway_hosts 必须匹配内建宿舍网关主机。")
+    return normalized
+
+
+def validate_portal_endpoint(
+    config: dict[str, Any] | None,
+    value: str,
+    field_name: str,
+    *,
+    expected_origin: tuple[str, str, int] | None = None,
+) -> SplitResult:
+    """Validate a portal URL against the configured gateway origin.
+
+    Portal endpoints carry account credentials in query parameters, so their
+    authority, scheme, port and path must be explicit and stable.  Redirects
+    are rejected separately by the HTTP caller; this function only validates
+    configuration and derived endpoint URLs.
+    """
+    raw = str(value).strip()
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        raise ConfigError(f"auth.{field_name} 地址格式不安全。") from None
+
+    # ``SplitResult.port`` normalizes ``:0801`` to ``801``.  Keep the
+    # authority spelling canonical as well, otherwise an alternate textual
+    # authority can bypass config reviews and fixture allowlists.
+    authority_port = ""
+    if parsed.hostname and ":" in parsed.hostname:
+        if parsed.netloc.startswith("["):
+            close_bracket = parsed.netloc.rfind("]")
+            authority_port = parsed.netloc[close_bracket + 1 :]
+    else:
+        colon = parsed.netloc.rfind(":")
+        if colon >= 0:
+            authority_port = parsed.netloc[colon:]
+    canonical_port = f":{DEFAULT_DORM_GATEWAY_PORT}"
+
+    if (
+        parsed.scheme.lower() != "http"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or "@" in parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or port != DEFAULT_DORM_GATEWAY_PORT
+        or authority_port != canonical_port
+        or field_name not in _PORTAL_ENDPOINT_PATHS
+        or parsed.path not in _PORTAL_ENDPOINT_PATHS[field_name]
+        or not parsed.path.startswith("/")
+        or not parsed.path
+        or "//" in parsed.path
+        or _FORBIDDEN_URL_ESCAPES.search(parsed.path)
+        or any(component in {".", ".."} for component in parsed.path.split("/"))
+    ):
+        raise ConfigError(f"auth.{field_name} 地址必须是无用户信息的网关 HTTP 地址。")
+
+    try:
+        host = normalize_gateway_host(parsed.hostname or "")
+    except ConfigError as exc:
+        raise ConfigError(f"auth.{field_name} 地址主机不安全。") from exc
+    if host not in gateway_hosts(config):
+        raise ConfigError(f"auth.{field_name} 地址必须绑定已配置的宿舍网关主机。")
+
+    origin = (parsed.scheme.lower(), host, port)
+    if expected_origin is not None and origin != expected_origin:
+        raise ConfigError(f"auth.{field_name} 地址不得跨主机、端口或协议。")
+    return parsed
+
+
+def validate_portal_urls(config: dict[str, Any]) -> None:
+    auth = _section(config, "auth")
+    login = validate_portal_endpoint(config, str(auth["login_url"]), "login_url")
+    login_origin = (login.scheme.lower(), normalize_gateway_host(login.hostname or ""), login.port or 0)
+    for field_name in ("logout_url", "logout_page_url", "unbind_url"):
+        value = str(auth.get(field_name) or "").strip()
+        if value:
+            validate_portal_endpoint(
+                config,
+                value,
+                field_name,
+                expected_origin=login_origin,
+            )
 
 
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
@@ -96,21 +228,6 @@ def validate_config(config: dict[str, Any]) -> None:
     if isinstance(auth["timeout_seconds"], bool) or timeout_seconds <= 0 or not timeout_seconds.is_integer():
         raise ConfigError("auth.timeout_seconds 必须是正整数。")
 
-    if not str(auth["login_url"]).startswith("http://"):
-        raise ConfigError("auth.login_url 应该使用宿舍区 HTTP 登录地址。")
-
-    logout_url = str(auth.get("logout_url") or "").strip()
-    if logout_url and not logout_url.startswith(("http://", "https://")):
-        raise ConfigError("auth.logout_url 应该填写 HTTP/HTTPS 退出接口地址，或留空。")
-
-    logout_page_url = str(auth.get("logout_page_url") or "").strip()
-    if logout_page_url and not logout_page_url.startswith(("http://", "https://")):
-        raise ConfigError("auth.logout_page_url 应该填写 HTTP/HTTPS 门户退出页地址，或留空。")
-
-    unbind_url = str(auth.get("unbind_url") or "").strip()
-    if unbind_url and not unbind_url.startswith(("http://", "https://")):
-        raise ConfigError("auth.unbind_url 应该填写 HTTP/HTTPS MAC 解绑接口地址，或留空。")
-
     if user.get("username") in (None, "", "你的校园卡号，不要写密码"):
         raise ConfigError("请在 config.yaml 的 user.username 填写校园卡号。")
 
@@ -126,6 +243,10 @@ def validate_config(config: dict[str, Any]) -> None:
             ipaddress.ip_network(str(value), strict=False)
         except ValueError:
             raise ConfigError("network.campus_source_networks 必须是有效 CIDR 网段列表。") from None
+
+    # Validate the portal authority only after network gateway values have
+    # been type-checked; the same policy is reused by the client at runtime.
+    validate_portal_urls(config)
 
     password_source = str(security.get("password_source", "env"))
     if password_source not in ("env", "keychain", "private_file"):

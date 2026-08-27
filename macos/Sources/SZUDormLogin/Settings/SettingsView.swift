@@ -139,6 +139,7 @@ struct SettingsView: View {
     private var providerSection: some View {
         GroupBox("双 Provider") {
             VStack(alignment: .leading, spacing: 12) {
+                Toggle("启用自动登录", isOn: $providerConfiguration.automaticEnabled)
                 Toggle("Dorm Dr.COM", isOn: $providerConfiguration.dorm.enabled)
                 field("Dorm 标签", text: $providerConfiguration.dorm.accountLabel)
                 field("Dorm 凭据引用", text: $providerConfiguration.dorm.credentialReference)

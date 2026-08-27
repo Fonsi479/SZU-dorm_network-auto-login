@@ -56,6 +56,11 @@ struct SZUNETBoundaryBehaviorTests {
 
         #expect(result.requestId == "typed-request")
         #expect(result.sessionState == .online)
+        #expect(result.automaticEnabled == true)
+        #expect(result.ownerAppRunning == true)
+        #expect(result.networkProbeEnabled == true)
+        #expect(result.probeIntervalSeconds == 120)
+        #expect(result.observedAt != nil)
         let request = await recorder.current()
         #expect(request?.command == .status)
         #expect(request?.timeoutSeconds == 9)
@@ -81,6 +86,20 @@ struct SZUNETBoundaryBehaviorTests {
         } catch let error as SZUNETAdapterError {
             #expect(error == .requestMismatch)
         }
+    }
+
+    @Test("older CLI responses remain compatible when automation fields are absent")
+    func olderResponseWithoutAutomationFieldsDecodes() throws {
+        let data = Data(
+            #"{"schemaVersion":1,"requestId":"legacy","outcome":"unchanged","provider":"auto","networkContext":"unknown","sessionState":"unknown","errorCode":null,"retryable":false,"message":"unchanged","timestamp":"2026-07-28T00:00:00Z"}"#.utf8
+        )
+
+        let result = try SZUNETCLIClient.decode(data, expectedRequestID: "legacy")
+
+        #expect(result.automaticEnabled == nil)
+        #expect(result.ownerAppRunning == nil)
+        #expect(result.networkProbeEnabled == nil)
+        #expect(result.probeIntervalSeconds == nil)
     }
 
     @Test("untrusted wire detail and unknown code never reach the public result")
@@ -173,6 +192,24 @@ struct SZUNETBoundaryBehaviorTests {
         #expect(result.networkContext == .dorm)
     }
 
+    @Test("rapid child exits never strand a process waiter")
+    func rapidProcessExitsRemainBounded() async throws {
+        let response = try wireJSONString(requestId: "rapid-process")
+        let fixture = try makeExecutableFixture(
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '\(response)'\n"
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let client = SZUNETCLIClient(
+            executableURL: fixture.executable,
+            requestIDFactory: { "rapid-process" }
+        )
+
+        for _ in 0..<12 {
+            let result = try await client.execute(.status, timeoutSeconds: 2)
+            #expect(result.sessionState == .online)
+        }
+    }
+
     @Test("process timeout starts and then terminates the actual child")
     func processTimeoutStopsStartedChild() async throws {
         let fixture = try makeLongRunningFixture()
@@ -231,6 +268,32 @@ struct SZUNETBoundaryBehaviorTests {
             Issue.record("unexpected process cancellation error type")
         }
         #expect(await waitUntilProcessStops(processID))
+        #expect(await waitUntilProcessStops(descendantID))
+    }
+
+    @Test("timeout terminates descendants that outlive the direct child")
+    func timeoutStopsExitedChildProcessGroup() async throws {
+        let response = try wireJSONString(requestId: "exited-parent")
+        let fixture = try makeExitedParentFixture(response: response)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let client = SZUNETCLIClient(
+            executableURL: fixture.executable,
+            requestIDFactory: { "exited-parent" }
+        )
+        let task = Task {
+            try await client.execute(.status, timeoutSeconds: 1)
+        }
+        let descendantID = try await waitForProcessMarker(fixture.descendantMarker)
+        defer { terminateFixtureProcess(descendantID) }
+
+        do {
+            _ = try await task.value
+            Issue.record("inherited pipe unexpectedly bypassed the transport timeout")
+        } catch let error as SZUNETAdapterError {
+            #expect(error == .timedOut)
+        } catch {
+            Issue.record("unexpected inherited-pipe timeout error type")
+        }
         #expect(await waitUntilProcessStops(descendantID))
     }
 
@@ -300,6 +363,10 @@ private func encodeWireResult(
             sessionState: .online,
             errorCode: errorCode,
             retryable: false,
+            automaticEnabled: true,
+            ownerAppRunning: true,
+            networkProbeEnabled: true,
+            probeIntervalSeconds: 120,
             message: message,
             timestamp: "2026-07-28T00:00:00Z"
         )
@@ -360,6 +427,35 @@ private func makeLongRunningFixture() throws -> (
         ofItemAtPath: executable.path
     )
     return (directory, executable, marker, descendantMarker)
+}
+
+private func makeExitedParentFixture(response: String) throws -> (
+    directory: URL,
+    executable: URL,
+    descendantMarker: URL
+) {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("szunet-feature-exited-parent-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: directory,
+        withIntermediateDirectories: false
+    )
+    let descendantMarker = directory.appendingPathComponent("descendant.pid")
+    let executable = directory.appendingPathComponent("fixture-cli")
+    let script = """
+    #!/bin/sh
+    cat >/dev/null
+    /bin/sh -c 'trap "" TERM; printf "%s\\n" "$$" > "$1"; exec /bin/sleep 30' fixture-child \(shellQuoted(descendantMarker.path)) &
+    while [ ! -s \(shellQuoted(descendantMarker.path)) ]; do /bin/sleep 0.01; done
+    printf '%s\\n' '\(response)'
+    exit 0
+    """
+    try script.write(to: executable, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o700],
+        ofItemAtPath: executable.path
+    )
+    return (directory, executable, descendantMarker)
 }
 
 private func waitForProcessMarker(

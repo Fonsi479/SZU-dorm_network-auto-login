@@ -70,6 +70,10 @@ final class AppAutomationScheduler {
         cancelAutoLogin()
     }
 
+    func suspendTimers() {
+        stopTimers()
+    }
+
     @discardableResult
     func startProbe<Value>(
         operation: @escaping @MainActor () async throws -> Value,

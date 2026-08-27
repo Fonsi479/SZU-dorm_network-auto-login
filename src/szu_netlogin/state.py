@@ -18,6 +18,11 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None  # type: ignore[assignment]
+
 
 STATE_DIR_ENV = "SZU_NETLOGIN_STATE_DIR"
 STATE_DIR = Path(os.environ.get(STATE_DIR_ENV, Path.home() / ".szu-netlogin")).expanduser()
@@ -56,6 +61,10 @@ def describe_pause_state() -> str:
     if payload is None:
         return "未暂停"
 
+    if payload.get("mode") == "stale":
+        reason = str(payload.get("reason") or "unknown")
+        return f"已暂停（状态损坏，请点击重置；{reason}）"
+
     mode = str(payload.get("mode") or "manual")
     if mode == "until":
         resume_after = str(payload.get("resume_after") or "")
@@ -71,63 +80,71 @@ def resume() -> None:
 
 
 def _active_pause_payload() -> dict[str, Any] | None:
-    with _pause_file_lock():
-        try:
+    try:
+        with _pause_file_lock():
             if not PAUSE_FLAG_FILE.exists():
                 return None
             payload = _read_pause_payload()
-        except OSError:
-            return {"mode": "manual"}
+            status = _pause_payload_status(payload)
+            if status == "expired":
+                _remove_pause_flag()
+                return None
+            if status != "active":
+                payload["mode"] = "stale"
+                payload["reason"] = status
 
-        mode = str(payload.get("mode") or "manual")
-        if mode == "until" and _is_timed_pause_expired(payload):
-            _remove_pause_flag()
-            return None
-        if mode == "until_next_boot" and _is_next_boot_pause_expired(payload):
-            _remove_pause_flag()
-            return None
-
-        return payload
+            return payload
+    except OSError:
+        return {"mode": "stale", "reason": "lock_or_read_error"}
 
 
 def _read_pause_payload() -> dict[str, Any]:
     try:
         text = PAUSE_FLAG_FILE.read_text(encoding="utf-8").strip()
     except OSError:
-        return {"mode": "manual"}
+        return {"mode": "stale", "reason": "read_error"}
 
     if not text:
-        return {"mode": "manual"}
+        return {"mode": "stale", "reason": "empty_payload"}
 
     try:
         loaded = json.loads(text)
     except json.JSONDecodeError:
-        return {"mode": "manual", "paused_at": text}
+        return {"mode": "stale", "reason": "invalid_json"}
 
     if not isinstance(loaded, dict):
-        return {"mode": "manual"}
+        return {"mode": "stale", "reason": "invalid_payload"}
     return loaded
 
 
-def _is_timed_pause_expired(payload: dict[str, Any]) -> bool:
-    resume_after = str(payload.get("resume_after") or "")
-    if not resume_after:
-        return False
-
-    try:
-        deadline = datetime.fromisoformat(resume_after)
-    except ValueError:
-        return False
-    now = datetime.now().astimezone()
-    if deadline.tzinfo is None:
-        deadline = deadline.replace(tzinfo=now.tzinfo)
-    return now >= deadline
-
-
-def _is_next_boot_pause_expired(payload: dict[str, Any]) -> bool:
-    stored_marker = str(payload.get("boot_marker") or "")
-    current_marker = _current_boot_marker()
-    return bool(stored_marker and current_marker and stored_marker != current_marker)
+def _pause_payload_status(payload: dict[str, Any]) -> str:
+    """Classify a pause payload without silently treating invalid state as manual."""
+    mode = str(payload.get("mode") or "manual")
+    if mode == "stale":
+        return str(payload.get("reason") or "stale")
+    if mode == "manual":
+        return "active"
+    if mode == "until":
+        resume_after = str(payload.get("resume_after") or "")
+        if not resume_after:
+            return "missing_resume_after"
+        try:
+            deadline = datetime.fromisoformat(resume_after)
+        except ValueError:
+            return "invalid_resume_after"
+        now = datetime.now().astimezone()
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=now.tzinfo)
+        return "expired" if now >= deadline else "active"
+    if mode == "until_next_boot":
+        stored_marker = str(payload.get("boot_marker") or "")
+        if not stored_marker:
+            return "missing_boot_marker"
+        current_marker = _current_boot_marker()
+        if not current_marker:
+            return "boot_marker_unavailable"
+        return "expired" if stored_marker != current_marker else "active"
+    return "unknown_mode"
 
 
 def _current_boot_marker() -> str:
@@ -179,14 +196,31 @@ def _pause_file_lock():
     with _PAUSE_THREAD_LOCK:
         PAUSE_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
         lock_path = PAUSE_FLAG_FILE.with_name(f"{PAUSE_FLAG_FILE.name}.lock")
-        with lock_path.open("a+", encoding="utf-8") as lock_file:
+        # Windows' ``msvcrt.locking`` only locks an existing byte and does not
+        # provide the cross-process exclusion that the old no-op branch did.
+        with lock_path.open("a+b") as lock_file:
+            if fcntl is None and msvcrt is None:
+                raise OSError("当前平台没有可用的跨进程暂停状态锁。")
+            locked = False
             try:
                 if fcntl is not None:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                else:
+                    lock_file.seek(0, os.SEEK_END)
+                    if lock_file.tell() == 0:
+                        lock_file.write(b"\0")
+                    lock_file.flush()
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                locked = True
                 yield
             finally:
-                if fcntl is not None:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                if locked:
+                    if fcntl is not None:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    elif msvcrt is not None:
+                        lock_file.seek(0)
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _write_pause_payload(payload: dict[str, Any]) -> None:

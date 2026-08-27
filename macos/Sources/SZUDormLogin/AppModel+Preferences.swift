@@ -9,11 +9,15 @@ extension AppModel {
             isBusy = automation.hasActiveOperation
         }
         do {
+            var updated = campusProviderConfiguration
+            updated.automaticEnabled = enabled
             if enabled {
+                try saveCampusProviderConfiguration(updated)
                 try coordinator.pauseStore.resume()
                 automation.allowImmediateAutoLogin()
             } else {
                 try coordinator.pauseStore.pause()
+                try saveCampusProviderConfiguration(updated)
             }
             autoLoginEnabled = enabled
             onResult?(
@@ -36,7 +40,8 @@ extension AppModel {
                 ),
                 true
             )
-            autoLoginEnabled = !coordinator.pauseStore.isPaused
+            autoLoginEnabled = campusProviderConfiguration.automaticEnabled
+                && !coordinator.pauseStore.isPaused
         }
     }
 
@@ -64,14 +69,45 @@ extension AppModel {
 
     func setNetworkProbeEnabled(_ enabled: Bool) {
         networkProbeEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "networkProbeEnabled")
+        CampusAutomationPreferences.setNetworkProbeEnabled(enabled, in: defaults)
         logger.info(enabled ? "已开启联网状态探测。" : "已关闭联网状态探测。")
         if enabled {
-            refreshStatus()
+            startProbeTimer(initialDelay: TimeInterval(networkProbeIntervalSeconds))
+            refreshStatus(allowAutoLogin: false)
         } else {
+            automation.suspendTimers()
             automation.cancelProbe()
+            automation.cancelAutoLogin()
             isRefreshing = false
+            isBusy = automation.hasActiveOperation
             clearNetworkStatus()
+        }
+    }
+
+    func setNetworkProbeIntervalSeconds(_ seconds: Int) {
+        let normalized = CampusAutomationPreferences.setProbeIntervalSeconds(
+            seconds,
+            in: defaults
+        )
+        guard networkProbeIntervalSeconds != normalized else { return }
+        networkProbeIntervalSeconds = normalized
+        logger.info("联网状态探测间隔已设为 \(normalized) 秒。")
+        if networkProbeEnabled {
+            startProbeTimer(initialDelay: TimeInterval(normalized))
+        }
+    }
+
+    func reloadAutomationPreferences() {
+        let enabled = CampusAutomationPreferences.networkProbeEnabled(in: defaults)
+        let interval = CampusAutomationPreferences.probeIntervalSeconds(in: defaults)
+        let enabledChanged = enabled != networkProbeEnabled
+        let intervalChanged = interval != networkProbeIntervalSeconds
+
+        networkProbeIntervalSeconds = interval
+        if enabledChanged {
+            setNetworkProbeEnabled(enabled)
+        } else if intervalChanged, enabled {
+            startProbeTimer(initialDelay: TimeInterval(interval))
         }
     }
 
@@ -117,6 +153,9 @@ extension AppModel {
 
     func resetPauseState() {
         do {
+            var updated = campusProviderConfiguration
+            updated.automaticEnabled = true
+            try saveCampusProviderConfiguration(updated)
             try coordinator.pauseStore.resume()
             autoLoginEnabled = true
             automation.allowImmediateAutoLogin()

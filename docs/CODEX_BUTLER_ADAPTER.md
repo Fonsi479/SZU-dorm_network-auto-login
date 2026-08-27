@@ -8,6 +8,8 @@ The independent SZUNET application remains the sole owner of authentication, Pro
 - pause/resume automation;
 - open settings or request a sanitized diagnostic summary.
 
+`status` performs a read-only refresh because each CLI request runs in a new process and therefore has no reusable in-memory snapshot. `resume` restores the owner's persisted automatic-login gate, clears the pause gate, and verifies that the standalone App is running. Results may additionally expose the optional booleans `automaticEnabled` and `ownerAppRunning`; they contain no account or credential material.
+
 Codex Butler must not:
 
 - receive or store passwords, cookies, Challenge/Info/Checksum values or complete network identifiers;

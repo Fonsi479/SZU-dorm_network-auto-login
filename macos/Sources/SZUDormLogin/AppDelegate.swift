@@ -66,4 +66,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        if urls.contains(where: {
+            $0.scheme?.lowercased() == "szunet"
+                && $0.host?.lowercased() == "settings"
+        }) {
+            menuBarController?.openSettings()
+        }
+        if urls.contains(where: {
+            $0.scheme?.lowercased() == "szunet"
+                && $0.host?.lowercased() == "automation"
+                && $0.path.lowercased() == "/reload"
+        }) {
+            model?.reloadAutomationPreferences()
+        }
+    }
 }

@@ -159,6 +159,65 @@ class ConfigValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "unbind_url"):
             validate_config(config)
 
+    def test_portal_urls_bind_to_the_exact_gateway_origin(self) -> None:
+        malicious = (
+            "http://student:password@172.30.255.42:801/eportal/portal/login",
+            "http://2130706433:801/eportal/portal/login",
+            "http://172.30.255.42:0801/eportal/portal/login",
+            "http://172.30.255.42:802/eportal/portal/login",
+            "https://172.30.255.42:801/eportal/portal/login",
+            "http://172.30.255.42:801/eportal/portal/%2e%2e/login",
+            "http://172.30.255.43:801/eportal/portal/login",
+        )
+        for login_url in malicious:
+            config = _valid_config()
+            config["auth"]["login_url"] = login_url
+            with self.subTest(login_url=login_url), self.assertRaises(ConfigError):
+                validate_config(config)
+
+    def test_config_cannot_authorize_a_new_gateway_with_a_new_host_list(self) -> None:
+        config = _valid_config()
+        config["network"]["dorm_gateway_hosts"] = ["192.0.2.55"]
+        config["auth"]["login_url"] = "http://192.0.2.55:801/eportal/portal/login"
+        with self.assertRaisesRegex(ConfigError, "内建宿舍网关"):
+            validate_config(config)
+
+    def test_same_gateway_wrong_portal_paths_are_rejected(self) -> None:
+        config = _valid_config()
+        for field_name, path in {
+            "login_url": "/eportal/portal/evil",
+            "logout_url": "/eportal/portal/other",
+            "logout_page_url": "/a79.htm/evil",
+            "unbind_url": "/eportal/portal/mac/other",
+        }.items():
+            config = _valid_config()
+            config["auth"][field_name] = f"http://172.30.255.42:801{path}"
+            with self.subTest(field_name=field_name), self.assertRaisesRegex(ConfigError, field_name):
+                validate_config(config)
+
+    def test_logout_page_and_unbind_cannot_cross_login_origin(self) -> None:
+        valid_paths = {
+            "logout_url": "/eportal/portal/logout",
+            "logout_page_url": "/a79.htm",
+            "unbind_url": "/eportal/portal/mac/unbind",
+        }
+        for field_name, path in valid_paths.items():
+            config = _valid_config()
+            config["auth"][field_name] = f"http://172.30.255.43:801{path}"
+            with self.subTest(field_name=field_name), self.assertRaisesRegex(ConfigError, field_name):
+                validate_config(config)
+
+    def test_normal_portal_urls_keep_the_gateway_port(self) -> None:
+        config = _valid_config()
+        config["auth"].update(
+            {
+                "logout_url": "http://172.30.255.42:801/eportal/portal/logout",
+                "logout_page_url": "http://172.30.255.42:801/a79.htm",
+                "unbind_url": "http://172.30.255.42:801/eportal/portal/mac/unbind",
+            }
+        )
+        validate_config(config)
+
 
 class PasswordSourceTests(unittest.TestCase):
     def test_windows_rejects_environment_and_private_file_sources(self) -> None:

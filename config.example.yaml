@@ -57,5 +57,7 @@ network:
 security:
   # Windows 固定使用 Credential Manager；配置中不保存密码。
   password_source: "keychain"
+  password_env_name: "SZU_NET_PASSWORD"
+  # 当 password_source: "keychain" 时使用；Windows 对应系统凭据库/keyring 后端。
   keychain_service: "szu-netlogin"
   keychain_account: ""

@@ -221,6 +221,7 @@ def login_failure_reason_label(reason: str) -> str:
         "source_ip_unverified": "未确认处于校园网源地址",
         "login_not_confirmed": "门户未确认登录会话",
         "session_verification_unavailable": "门户会话状态暂时不可用",
+        "portal_url_invalid": "门户地址配置不安全",
     }
     if reason.startswith("http_status_"):
         return f"HTTP 状态码 {reason.removeprefix('http_status_')}"

@@ -43,9 +43,9 @@ private actor LiveCampusCLIHandler: CampusCLIHandling {
     func handle(_ request: CampusCLIRequest) async -> CampusCLIResponse {
         switch request.command {
         case .status:
-            return snapshotResponse(request, snapshot: await controller.currentSnapshot())
+            return await snapshotResponse(request, snapshot: await controller.refresh())
         case .check:
-            return snapshotResponse(request, snapshot: await controller.refresh())
+            return await snapshotResponse(request, snapshot: await controller.refresh())
         case .login:
             let result = await controller.login(
                 requestedProvider: request.provider.providerID,
@@ -85,7 +85,7 @@ private actor LiveCampusCLIHandler: CampusCLIHandling {
         case .pause:
             do {
                 try await controller.pause()
-                return snapshotResponse(
+                return await snapshotResponse(
                     request,
                     snapshot: await controller.currentSnapshot(),
                     outcome: .succeeded
@@ -96,7 +96,10 @@ private actor LiveCampusCLIHandler: CampusCLIHandling {
         case .resume:
             do {
                 try await controller.resume()
-                return snapshotResponse(
+                guard await CampusOwnerApplicationBridge.ensureRunning() else {
+                    return .blocked(requestId: request.requestId, code: "INTERNAL_ERROR")
+                }
+                return await snapshotResponse(
                     request,
                     snapshot: await controller.currentSnapshot(),
                     outcome: .succeeded
@@ -104,26 +107,29 @@ private actor LiveCampusCLIHandler: CampusCLIHandling {
             } catch {
                 return .blocked(requestId: request.requestId, code: "INTERNAL_ERROR")
             }
+        case .enableProbe:
+            return await updateProbePreferences(request, enabled: true)
+        case .disableProbe:
+            return await updateProbePreferences(request, enabled: false)
+        case .probeEvery30Seconds:
+            return await updateProbePreferences(request, intervalSeconds: 30)
+        case .probeEvery60Seconds:
+            return await updateProbePreferences(request, intervalSeconds: 60)
+        case .probeEvery120Seconds:
+            return await updateProbePreferences(request, intervalSeconds: 120)
+        case .probeEvery300Seconds:
+            return await updateProbePreferences(request, intervalSeconds: 300)
         case .openSettings:
-            guard let applicationURL = NSWorkspace.shared.urlForApplication(
-                withBundleIdentifier: "com.szu-netlogin.dorm-login"
-            ) else {
+            guard await CampusOwnerApplicationBridge.openSettings() else {
                 return .blocked(requestId: request.requestId, code: "INTERNAL_ERROR")
             }
-            let openConfiguration = NSWorkspace.OpenConfiguration()
-            openConfiguration.arguments = ["--open-settings"]
-            NSWorkspace.shared.openApplication(
-                at: applicationURL,
-                configuration: openConfiguration,
-                completionHandler: nil
-            )
-            return snapshotResponse(
+            return await snapshotResponse(
                 request,
                 snapshot: await controller.currentSnapshot(),
                 outcome: .succeeded
             )
         case .diagnostics:
-            return snapshotResponse(request, snapshot: await controller.currentSnapshot())
+            return await snapshotResponse(request, snapshot: await controller.refresh())
         }
     }
 
@@ -140,6 +146,10 @@ private actor LiveCampusCLIHandler: CampusCLIHandling {
             sessionState: result.sessionState,
             errorCode: result.errorCode,
             retryable: result.retryable,
+            automaticEnabled: snapshot.automaticEnabled,
+            ownerAppRunning: await CampusOwnerApplicationBridge.isRunning,
+            networkProbeEnabled: probePreferences.enabled,
+            probeIntervalSeconds: probePreferences.intervalSeconds,
             message: result.errorCode ?? result.outcome.rawValue,
             sanitizedDiagnostics: snapshot
         )
@@ -149,7 +159,7 @@ private actor LiveCampusCLIHandler: CampusCLIHandling {
         _ request: CampusCLIRequest,
         snapshot: CampusProductSnapshot,
         outcome: ProviderAuthOutcome = .unchanged
-    ) -> CampusCLIResponse {
+    ) async -> CampusCLIResponse {
         let state: ProviderSessionState = switch request.provider {
         case .dorm: ProviderSessionState(rawValue: snapshot.dorm.lifecycle) ?? .unknown
         case .teaching: ProviderSessionState(rawValue: snapshot.teaching.lifecycle) ?? .unknown
@@ -167,8 +177,115 @@ private actor LiveCampusCLIHandler: CampusCLIHandling {
             networkContext: snapshot.category.rawValue,
             sessionState: state,
             errorCode: snapshot.lastErrorCode,
+            automaticEnabled: snapshot.automaticEnabled,
+            ownerAppRunning: await CampusOwnerApplicationBridge.isRunning,
+            networkProbeEnabled: probePreferences.enabled,
+            probeIntervalSeconds: probePreferences.intervalSeconds,
             message: snapshot.lastErrorCode ?? outcome.rawValue,
             sanitizedDiagnostics: snapshot
+        )
+    }
+
+    private func updateProbePreferences(
+        _ request: CampusCLIRequest,
+        enabled: Bool? = nil,
+        intervalSeconds: Int? = nil
+    ) async -> CampusCLIResponse {
+        if let enabled {
+            CampusAutomationPreferences.setOwnerNetworkProbeEnabled(enabled)
+        }
+        if let intervalSeconds {
+            CampusAutomationPreferences.setOwnerProbeIntervalSeconds(intervalSeconds)
+        }
+        guard await CampusOwnerApplicationBridge.applyAutomationPreferences() else {
+            return .blocked(requestId: request.requestId, code: "INTERNAL_ERROR")
+        }
+        return await snapshotResponse(
+            request,
+            snapshot: await controller.currentSnapshot(),
+            outcome: .succeeded
+        )
+    }
+
+    private var probePreferences: (enabled: Bool, intervalSeconds: Int) {
+        return (
+            CampusAutomationPreferences.ownerNetworkProbeEnabled(),
+            CampusAutomationPreferences.ownerProbeIntervalSeconds()
+        )
+    }
+}
+
+@MainActor
+private enum CampusOwnerApplicationBridge {
+    private static let bundleIdentifier = "com.szu-netlogin.dorm-login"
+    private static let settingsURL = URL(string: "szunet://settings")!
+    private static let automationReloadURL = URL(string: "szunet://automation/reload")!
+
+    static var isRunning: Bool {
+        !NSRunningApplication.runningApplications(
+            withBundleIdentifier: bundleIdentifier
+        ).isEmpty
+    }
+
+    static func ensureRunning() async -> Bool {
+        if isRunning { return true }
+        guard let applicationURL else { return false }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        let opened = await withCheckedContinuation { continuation in
+            NSWorkspace.shared.openApplication(
+                at: applicationURL,
+                configuration: configuration
+            ) { application, error in
+                continuation.resume(returning: error == nil && application != nil)
+            }
+        }
+        guard opened else { return false }
+        for _ in 0..<20 {
+            if isRunning { return true }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return isRunning
+    }
+
+    static func openSettings() async -> Bool {
+        if isRunning {
+            return NSWorkspace.shared.open(settingsURL)
+        }
+        guard let applicationURL else { return false }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.arguments = ["--open-settings"]
+        configuration.activates = true
+        return await withCheckedContinuation { continuation in
+            NSWorkspace.shared.openApplication(
+                at: applicationURL,
+                configuration: configuration
+            ) { application, error in
+                continuation.resume(returning: error == nil && application != nil)
+            }
+        }
+    }
+
+    static func applyAutomationPreferences() async -> Bool {
+        if isRunning {
+            return NSWorkspace.shared.open(automationReloadURL)
+        }
+        return await ensureRunning()
+    }
+
+    private static var applicationURL: URL? {
+        let executable = URL(fileURLWithPath: CommandLine.arguments[0])
+            .resolvingSymlinksInPath()
+        let containingBundle = executable
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        if containingBundle.pathExtension == "app",
+           Bundle(url: containingBundle)?.bundleIdentifier == bundleIdentifier {
+            return containingBundle
+        }
+        return NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: bundleIdentifier
         )
     }
 }

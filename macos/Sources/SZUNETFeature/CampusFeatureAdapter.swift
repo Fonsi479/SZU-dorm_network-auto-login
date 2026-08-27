@@ -20,8 +20,44 @@ struct SZUNETWireResult: Codable, Equatable, Sendable {
     let sessionState: SZUNETSessionState
     let errorCode: String?
     let retryable: Bool
+    let automaticEnabled: Bool?
+    let ownerAppRunning: Bool?
+    let networkProbeEnabled: Bool?
+    let probeIntervalSeconds: Int?
     let message: String
     let timestamp: String
+
+    init(
+        schemaVersion: Int,
+        requestId: String,
+        outcome: SZUNETOutcome,
+        provider: SZUNETResultProvider,
+        networkContext: SZUNETNetworkContext,
+        sessionState: SZUNETSessionState,
+        errorCode: String?,
+        retryable: Bool,
+        automaticEnabled: Bool?,
+        ownerAppRunning: Bool?,
+        networkProbeEnabled: Bool? = nil,
+        probeIntervalSeconds: Int? = nil,
+        message: String,
+        timestamp: String
+    ) {
+        self.schemaVersion = schemaVersion
+        self.requestId = requestId
+        self.outcome = outcome
+        self.provider = provider
+        self.networkContext = networkContext
+        self.sessionState = sessionState
+        self.errorCode = errorCode
+        self.retryable = retryable
+        self.automaticEnabled = automaticEnabled
+        self.ownerAppRunning = ownerAppRunning
+        self.networkProbeEnabled = networkProbeEnabled
+        self.probeIntervalSeconds = probeIntervalSeconds
+        self.message = message
+        self.timestamp = timestamp
+    }
 }
 
 public enum SZUNETCLIExecutableLocator {
@@ -154,7 +190,12 @@ public actor SZUNETCLIClient: SZUNETCommandExecuting {
             networkContext: wire.networkContext,
             sessionState: wire.sessionState,
             errorCode: wire.errorCode,
-            retryable: wire.retryable
+            retryable: wire.retryable,
+            automaticEnabled: wire.automaticEnabled,
+            ownerAppRunning: wire.ownerAppRunning,
+            networkProbeEnabled: wire.networkProbeEnabled,
+            probeIntervalSeconds: wire.probeIntervalSeconds,
+            observedAt: ISO8601DateFormatter().date(from: wire.timestamp)
         )
     }
 }
@@ -164,6 +205,7 @@ public actor SZUNETModule {
     private var snapshot = SZUNETSnapshot()
     private var generation: UInt64 = 0
     private var activeTask: Task<SZUNETCommandResult, Error>?
+    private var diagnostics = SZUNETModuleDiagnostics()
 
     public init(executor: any SZUNETCommandExecuting = SZUNETCLIClient.installed()) {
         self.executor = executor
@@ -212,6 +254,14 @@ public actor SZUNETModule {
         await perform(.resume)
     }
 
+    public func setNetworkProbeEnabled(_ enabled: Bool) async -> SZUNETSnapshot {
+        await perform(enabled ? .enableProbe : .disableProbe)
+    }
+
+    public func setProbeInterval(_ interval: SZUNETProbeInterval) async -> SZUNETSnapshot {
+        await perform(interval.command)
+    }
+
     public func openSettings() async -> SZUNETSnapshot {
         await perform(.openSettings, interactive: true)
     }
@@ -227,6 +277,10 @@ public actor SZUNETModule {
         snapshot = SZUNETSnapshot()
     }
 
+    public func diagnosticSnapshot() -> SZUNETModuleDiagnostics {
+        diagnostics
+    }
+
     private func perform(
         _ command: SZUNETCommand,
         provider: SZUNETCommandProvider = .auto,
@@ -236,6 +290,7 @@ public actor SZUNETModule {
         generation &+= 1
         activeTask?.cancel()
         let operationGeneration = generation
+        diagnostics.commandExecutions[command, default: 0] += 1
         let task = Task {
             try await executor.execute(
                 command,
@@ -251,14 +306,18 @@ public actor SZUNETModule {
                 return snapshot
             }
             activeTask = nil
-            if command == .status || command == .check || command == .diagnostics {
+            if Self.isStatusCommand(command) {
                 snapshot.status = result
             } else {
                 snapshot.lastAction = result
+                if Self.updatesControlState(command) {
+                    snapshot.status = result
+                }
             }
             snapshot.detail = Self.detail(for: result)
         } catch {
             guard generation == operationGeneration, snapshot.adapterEnabled else {
+                diagnostics.cancelledExecutions += 1
                 return snapshot
             }
             activeTask = nil
@@ -267,7 +326,7 @@ public actor SZUNETModule {
                 requestId: "adapter-error",
                 code: code
             )
-            if command == .status || command == .check || command == .diagnostics {
+            if Self.isStatusCommand(command) {
                 snapshot.status = result
             } else {
                 snapshot.lastAction = result
@@ -280,6 +339,21 @@ public actor SZUNETModule {
     private static func detail(for result: SZUNETCommandResult) -> String {
         if let code = result.errorCode, !code.isEmpty { return code }
         return result.outcome.rawValue
+    }
+
+    private static func isStatusCommand(_ command: SZUNETCommand) -> Bool {
+        command == .status || command == .check || command == .diagnostics
+    }
+
+    private static func updatesControlState(_ command: SZUNETCommand) -> Bool {
+        switch command {
+        case .pause, .resume, .enableProbe, .disableProbe,
+             .probeEvery30Seconds, .probeEvery60Seconds,
+             .probeEvery120Seconds, .probeEvery300Seconds:
+            true
+        case .status, .check, .login, .logout, .openSettings, .diagnostics:
+            false
+        }
     }
 
     private static func code(for error: Error) -> String {
@@ -339,6 +413,11 @@ final class SZUNETProcessRunner: @unchecked Sendable {
         do {
             try process.run()
             state.isolateProcessGroupIfPossible()
+            // The child owns these pipe ends after launch. Keeping the parent
+            // copies open can prevent EOF from reaching the bounded readers.
+            try? standardInput.fileHandleForReading.close()
+            try? standardOutput.fileHandleForWriting.close()
+            try? standardError.fileHandleForWriting.close()
             try standardInput.fileHandleForWriting.write(contentsOf: input)
             try standardInput.fileHandleForWriting.close()
         } catch {
@@ -431,13 +510,8 @@ final class SZUNETProcessRunner: @unchecked Sendable {
     }
 
     private static func waitUntilExit(_ process: Process) async {
-        let blockingProcess = SZUNETBlockingProcess(process)
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                blockingProcess.process.waitUntilExit()
-                continuation.resume()
-            }
-        }
+        let observer = SZUNETProcessTerminationObserver(process)
+        await observer.wait()
     }
 }
 
@@ -449,11 +523,46 @@ private final class SZUNETBlockingFileHandle: @unchecked Sendable {
     }
 }
 
-private final class SZUNETBlockingProcess: @unchecked Sendable {
-    let process: Process
+private final class SZUNETProcessTerminationObserver: @unchecked Sendable {
+    private let lock = NSLock()
+    private let process: Process
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var finished = false
 
     init(_ process: Process) {
         self.process = process
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if finished {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            self.continuation = continuation
+            lock.unlock()
+
+            process.terminationHandler = { [self] _ in finish() }
+            if !process.isRunning { finish() }
+        }
+    }
+
+    private func finish() {
+        let continuation: CheckedContinuation<Void, Never>?
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+
+        process.terminationHandler = nil
+        continuation?.resume()
     }
 }
 
@@ -484,27 +593,30 @@ private final class SZUNETChildProcessState: @unchecked Sendable {
         let processID = process.processIdentifier
         let shouldStop = processID > 0 && process.isRunning
         let stopGroup = isolatedProcessGroup
-        closeHandlesLocked()
-        if shouldStop {
-            process.terminate()
-            if stopGroup {
-                _ = Darwin.kill(-processID, SIGKILL)
-            } else {
-                _ = Darwin.kill(processID, SIGKILL)
-            }
-        }
+        let handles = takeHandlesLocked()
         lock.unlock()
+
+        if processID > 0, stopGroup {
+            // A descendant can keep stdout/stderr open after the direct child
+            // exits, so terminate the isolated group even when Process already
+            // reports the direct child as stopped.
+            _ = Darwin.kill(-processID, SIGKILL)
+        } else if shouldStop {
+            _ = Darwin.kill(processID, SIGKILL)
+        }
+        for handle in handles { try? handle.close() }
     }
 
     func closeHandles() {
         lock.lock()
-        closeHandlesLocked()
+        let handles = takeHandlesLocked()
         lock.unlock()
+        for handle in handles { try? handle.close() }
     }
 
-    private func closeHandlesLocked() {
-        guard !handlesClosed else { return }
+    private func takeHandlesLocked() -> [FileHandle] {
+        guard !handlesClosed else { return [] }
         handlesClosed = true
-        for handle in handles { try? handle.close() }
+        return handles
     }
 }

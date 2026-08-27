@@ -63,7 +63,7 @@ bash scripts/verify_app.sh
 App 产物：
 
 ```text
-dist/SZU Dorm Login.app
+%LOCALAPPDATA%\SZU Dorm NetLogin\Logs\netlogin.log
 ```
 
 ### Windows

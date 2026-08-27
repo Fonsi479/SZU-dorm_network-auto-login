@@ -7,6 +7,12 @@ public enum CampusCLICommand: String, Codable, CaseIterable, Sendable {
     case logout
     case pause
     case resume
+    case enableProbe = "enable-probe"
+    case disableProbe = "disable-probe"
+    case probeEvery30Seconds = "probe-every-30-seconds"
+    case probeEvery60Seconds = "probe-every-60-seconds"
+    case probeEvery120Seconds = "probe-every-120-seconds"
+    case probeEvery300Seconds = "probe-every-300-seconds"
     case openSettings = "open-settings"
     case diagnostics
 }
@@ -59,6 +65,10 @@ public struct CampusCLIResponse: Encodable, Equatable, Sendable {
     public var sessionState: ProviderSessionState
     public var errorCode: String?
     public var retryable: Bool
+    public var automaticEnabled: Bool?
+    public var ownerAppRunning: Bool?
+    public var networkProbeEnabled: Bool?
+    public var probeIntervalSeconds: Int?
     public var message: String
     public var timestamp: Date
     public var sanitizedDiagnostics: CampusProductSnapshot?
@@ -71,6 +81,10 @@ public struct CampusCLIResponse: Encodable, Equatable, Sendable {
         sessionState: ProviderSessionState = .unknown,
         errorCode: String? = nil,
         retryable: Bool = false,
+        automaticEnabled: Bool? = nil,
+        ownerAppRunning: Bool? = nil,
+        networkProbeEnabled: Bool? = nil,
+        probeIntervalSeconds: Int? = nil,
         message: String = "",
         timestamp: Date = Date(),
         sanitizedDiagnostics: CampusProductSnapshot? = nil
@@ -83,6 +97,10 @@ public struct CampusCLIResponse: Encodable, Equatable, Sendable {
         self.sessionState = sessionState
         self.errorCode = errorCode
         self.retryable = retryable
+        self.automaticEnabled = automaticEnabled
+        self.ownerAppRunning = ownerAppRunning
+        self.networkProbeEnabled = networkProbeEnabled
+        self.probeIntervalSeconds = probeIntervalSeconds
         self.message = String(message.prefix(1_000))
         self.timestamp = timestamp
         self.sanitizedDiagnostics = sanitizedDiagnostics
@@ -112,6 +130,10 @@ public struct CampusCLIResponse: Encodable, Equatable, Sendable {
         case sessionState
         case errorCode
         case retryable
+        case automaticEnabled
+        case ownerAppRunning
+        case networkProbeEnabled
+        case probeIntervalSeconds
         case message
         case timestamp
         case sanitizedDiagnostics
@@ -127,6 +149,10 @@ public struct CampusCLIResponse: Encodable, Equatable, Sendable {
         try container.encode(sessionState, forKey: .sessionState)
         try container.encode(errorCode, forKey: .errorCode)
         try container.encode(retryable, forKey: .retryable)
+        try container.encodeIfPresent(automaticEnabled, forKey: .automaticEnabled)
+        try container.encodeIfPresent(ownerAppRunning, forKey: .ownerAppRunning)
+        try container.encodeIfPresent(networkProbeEnabled, forKey: .networkProbeEnabled)
+        try container.encodeIfPresent(probeIntervalSeconds, forKey: .probeIntervalSeconds)
         try container.encode(message, forKey: .message)
         try container.encode(timestamp, forKey: .timestamp)
         try container.encodeIfPresent(sanitizedDiagnostics, forKey: .sanitizedDiagnostics)

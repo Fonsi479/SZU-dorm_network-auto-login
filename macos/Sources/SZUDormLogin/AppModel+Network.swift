@@ -6,7 +6,8 @@ extension AppModel {
     func refreshStatus(allowAutoLogin: Bool = true) {
         guard !isRefreshing, !automation.isProbing else { return }
         launchAtLoginState = launchAtLogin.state
-        autoLoginEnabled = !coordinator.pauseStore.isPaused
+        autoLoginEnabled = campusProviderConfiguration.automaticEnabled
+            && !coordinator.pauseStore.isPaused
 
         guard networkProbeEnabled else {
             clearNetworkStatus()
