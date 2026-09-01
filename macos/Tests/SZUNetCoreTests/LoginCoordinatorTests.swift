@@ -19,6 +19,46 @@ struct LoginCoordinatorTests {
         #expect(requests.first?.sourceIP == fixture.sourceIP)
     }
 
+    @Test("legacy manual and automatic login stop at Dorm 3/3 without credentials")
+    func deviceLimitStopsLegacyLogin() async throws {
+        let automaticFixture = try CoordinatorFixture(
+            sessionOnline: false,
+            onlineDeviceCount: 3,
+            onlineDeviceLimit: 3
+        )
+        defer { automaticFixture.removeTemporaryFiles() }
+        let automatic = await automaticFixture.coordinator.checkAndLogin()
+        #expect(automatic.reason == "AUTH_DEVICE_LIMIT")
+        #expect(automaticFixture.credentialStore.passwordReadCount == 0)
+        #expect(await automaticFixture.client.loginRequests.isEmpty)
+
+        let manualFixture = try CoordinatorFixture(
+            sessionOnline: false,
+            onlineDeviceCount: 3,
+            onlineDeviceLimit: 3
+        )
+        defer { manualFixture.removeTemporaryFiles() }
+        let manual = await manualFixture.coordinator.loginNow()
+        #expect(manual.reason == "AUTH_DEVICE_LIMIT")
+        #expect(manualFixture.credentialStore.passwordReadCount == 0)
+        #expect(await manualFixture.client.loginRequests.isEmpty)
+    }
+
+    @Test("legacy force login requires 3/3 and then performs one login")
+    func forceLoginRequiresDeviceLimit() async throws {
+        let fixture = try CoordinatorFixture(
+            sessionOnline: false,
+            onlineDeviceCount: 3,
+            onlineDeviceLimit: 3
+        )
+        defer { fixture.removeTemporaryFiles() }
+
+        let result = await fixture.coordinator.forceLoginNow()
+        #expect(result.outcome == .authenticated)
+        #expect(fixture.credentialStore.passwordReadCount == 1)
+        #expect(await fixture.client.loginRequests.count == 1)
+    }
+
     @Test("status probes skip external URLs until the campus session is online")
     func offlineStatusProbeSkipsExternalInternet() async throws {
         let fixture = try CoordinatorFixture(sessionOnline: false)
@@ -190,6 +230,8 @@ private struct PortalLogoutRequest: Sendable {
 
 private actor StubDrCOMService: DrCOMServicing {
     private let sessionOnline: Bool?
+    private let onlineDeviceCount: Int?
+    private let onlineDeviceLimit: Int?
     private let holdSessionCheck: Bool
     private var sessionCheckStarted = false
     private var startWaiters: [CheckedContinuation<Void, Never>] = []
@@ -198,9 +240,16 @@ private actor StubDrCOMService: DrCOMServicing {
     private(set) var loginRequests: [PortalRequest] = []
     private(set) var logoutRequests: [PortalLogoutRequest] = []
 
-    init(sessionOnline: Bool?, holdSessionCheck: Bool) {
+    init(
+        sessionOnline: Bool?,
+        holdSessionCheck: Bool,
+        onlineDeviceCount: Int? = nil,
+        onlineDeviceLimit: Int? = nil
+    ) {
         self.sessionOnline = sessionOnline
         self.holdSessionCheck = holdSessionCheck
+        self.onlineDeviceCount = onlineDeviceCount
+        self.onlineDeviceLimit = onlineDeviceLimit
     }
 
     func login(username: String, password: String, knownSourceIP: String) async -> LoginResult {
@@ -226,6 +275,23 @@ private actor StubDrCOMService: DrCOMServicing {
             }
         }
         return sessionOnline
+    }
+
+    func sessionStatus(username: String, sourceIP: String) async -> ProviderSessionResult {
+        let online = await isSessionOnline(username: username, sourceIP: sourceIP)
+        let state: ProviderSessionState = switch online {
+        case .some(true): .online
+        case .some(false): .offline
+        case .none: .unknown
+        }
+        return ProviderSessionResult(
+            state: state,
+            accountMatch: state == .online ? .matches : .unknown,
+            clientIP: sourceIP,
+            onlineDeviceCount: onlineDeviceCount,
+            onlineDeviceLimit: onlineDeviceLimit,
+            errorCode: state == .unknown ? "SESSION_UNKNOWN" : nil
+        )
     }
 
     func waitUntilSessionCheckStarts() async {
@@ -314,7 +380,9 @@ private struct CoordinatorFixture {
         sessionOnline: Bool?,
         holdSessionCheck: Bool = false,
         sourceIP: String = "172.24.59.154",
-        autoLoginAvailable: Bool = true
+        autoLoginAvailable: Bool = true,
+        onlineDeviceCount: Int? = nil,
+        onlineDeviceLimit: Int? = nil
     ) throws {
         self.sourceIP = sourceIP
         root = FileManager.default.temporaryDirectory
@@ -336,7 +404,9 @@ private struct CoordinatorFixture {
         )
         let stubClient = StubDrCOMService(
             sessionOnline: sessionOnline,
-            holdSessionCheck: holdSessionCheck
+            holdSessionCheck: holdSessionCheck,
+            onlineDeviceCount: onlineDeviceCount,
+            onlineDeviceLimit: onlineDeviceLimit
         )
         client = stubClient
         let stubCredentialStore = StubCredentialStore(password: "test-secret")

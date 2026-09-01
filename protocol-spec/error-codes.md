@@ -26,12 +26,14 @@
 | `AUTH_BAD_PASSWORD` | 密码错误 | 否 |
 | `AUTH_ACCOUNT_NOT_FOUND` | 账号不存在 | 否 |
 | `AUTH_IP_ALREADY_ONLINE` | IP 已在线 | 先查状态，不盲重试 |
-| `AUTH_DEVICE_LIMIT` | 设备数超限 | 否 |
+| `AUTH_DEVICE_LIMIT` | 已确认账号在线设备达到 3 台；普通登录被阻止，需人工确认后才可使用 `force-login` | 否 |
+| `AUTH_DEVICE_REPLACEMENT_UNSUPPORTED` | 强制切换仅支持 Dorm，Teaching 或其他环境拒绝 | 否 |
 | `AUTH_ACCOUNT_BLOCKED` | 欠费/产品不可用/账号限制 | 否 |
 | `AUTH_PRODUCT_SUFFIX_INVALID` | 产品后缀错误 | 否 |
 | `AUTH_SERVER_RATE_LIMIT` | 服务端限流 | 长退避 |
 | `AUTH_NOT_CONFIRMED` | ACK 后状态仍非在线 | 退避 |
 | `NET_DNS_FAILED` | DNS 失败 | 是 |
+| `NET_CAMPUS_EGRESS_UNAVAILABLE` | 门户仍有本机记录，但绑定校园源地址且禁用代理的外网检测失败；不重复登录 | 下一轮重新检查 |
 | `NET_TIMEOUT` | 超时 | 是 |
 | `NET_TLS_FAILED` | TLS/证书失败 | 否，禁止降级 |
 | `NET_PROXY_INTERCEPTED` | 代理/重定向异常 | 否 |

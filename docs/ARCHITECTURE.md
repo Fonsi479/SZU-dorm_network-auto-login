@@ -1,13 +1,11 @@
 # Architecture
 
 ```text
-optional host / SZUNETFeature
-             |
-     stdin/stdout JSON only
-             |
-App -------- JSON CLI
-             |
-   high-level product controller
+MacManager ---- SZUNETEmbedded ----+
+                                    |
+Standalone App --------------------+---- high-level product controller
+                                    |
+scripts / legacy host -- JSON CLI -+
              |
    CampusNetworkCoordinator
      /                   \
@@ -20,6 +18,10 @@ The Coordinator is the only Provider decision owner and authentication scheduler
 
 Dorm and Teaching have separate enablement, account labels and credential references. Status probes are credential-free. Exactly one Provider must be verified before a credential is opened; two verified Providers are an ambiguous environment and fail closed.
 
-Platform desktop applications own lifecycle, settings, credentials, automation and packaging. The JSON CLI exposes sanitized DTOs and high-level commands only. `SZUNETFeature` is a CLI-only process client with no dependency on `SZUNetCore`; it never creates Provider/Coordinator/runtime state or accepts credentials. Codex Butler is an optional consumer, not an application owner.
+Dorm automatic recovery runs every 30 seconds and on network-path changes. A Portal-online result is checked through a source-bound session with ambient proxies disabled. Only a failed direct egress probe plus `exactOnlineRecordPresent=false` and a known device count below 3 permits one ordinary login; existing, full, or unknown records remain credential-free.
 
-The two platform releases share only `protocol-spec/` contracts, fixtures, vectors and error codes. macOS packages Swift code only. Windows packages Python into PE executables and does not include macOS sources.
+`SZUNETEmbedded` is the public in-process owner surface for macOS hosts; it composes Core, shared state, ownership, credential mode and management UI without importing private host code. MacManager and the standalone App use different lifecycle shells around that same runtime. `SZUNETFeature` stays transport-neutral and retains the JSON CLI client without depending on `SZUNetCore`.
+
+Shared automation has exactly one persistent owner. Non-owners may issue explicit manual operations, while scheduled authentication must revalidate ownership immediately before Core can open a credential. There is no automatic failover.
+
+The two platform releases share only `protocol-spec/` contracts, fixtures, vectors and error codes. macOS packages one arm64/x86_64 Swift status-bar app. Windows packages Python into separate native x64 and ARM64 PE executables and does not include macOS sources.

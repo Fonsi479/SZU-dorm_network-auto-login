@@ -86,6 +86,11 @@ class DesktopStatusResult:
     teaching_enabled: bool = False
     teaching_session_state: str = "disabled"
     auto_login_provider: str | None = None
+    online_device_count: int | None = None
+    online_device_limit: int | None = None
+    dorm_account: str = "****"
+    teaching_account: str = "****"
+    dorm_session_state: str = "disabled"
 
 
 class AutoLoginBackoff:
@@ -93,39 +98,47 @@ class AutoLoginBackoff:
         self,
         intervals_seconds: tuple[int, ...],
         initial_delay_seconds: float,
+        success_interval_seconds: float = STATUS_REFRESH_SECONDS,
         clock=time.time,
     ) -> None:
         self._intervals = intervals_seconds
         self._clock = clock
         self._failure_index = 0
+        self._success_interval_seconds = success_interval_seconds
+        self._scheduled_interval_seconds = intervals_seconds[0]
         self._deadline = clock() + initial_delay_seconds
 
     @property
     def current_interval_seconds(self) -> int:
-        return self._intervals[self._failure_index]
+        return int(self._scheduled_interval_seconds)
 
     def consume_if_due(self) -> bool:
         now = self._clock()
         if now < self._deadline:
             return False
-        self._deadline = now + self.current_interval_seconds
+        self._scheduled_interval_seconds = self._intervals[self._failure_index]
+        self._deadline = now + self._scheduled_interval_seconds
         return True
 
     def record_success(self) -> None:
         self._failure_index = 0
-        self._deadline = self._clock() + self.current_interval_seconds
+        self._scheduled_interval_seconds = self._success_interval_seconds
+        self._deadline = self._clock() + self._success_interval_seconds
 
     def record_failure(self) -> None:
+        self._scheduled_interval_seconds = self._intervals[self._failure_index]
+        self._deadline = self._clock() + self._scheduled_interval_seconds
         self._failure_index = min(self._failure_index + 1, len(self._intervals) - 1)
-        self._deadline = self._clock() + self.current_interval_seconds
 
     def allow_immediate_attempt(self) -> None:
         """Open one immediate attempt after the first verified offline transition."""
+        self._failure_index = 0
+        self._scheduled_interval_seconds = self._intervals[0]
         self._deadline = min(self._deadline, self._clock())
 
 
 class SzuDormWindowsApp:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, *, offline_ui_review: bool = False) -> None:
         self.root = root
         self.logger = get_logger()
         self.service = get_process_service()
@@ -150,10 +163,14 @@ class SzuDormWindowsApp:
         self._status_vars: dict[str, tk.StringVar] = {}
         self._command_buttons: list[ttk.Button] = []
         self._credential_backend_ok, self._credential_backend_label = credential_backend_status()
+        self._offline_ui_review = offline_ui_review
 
         self._ensure_initial_config_file()
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._close)
+        if self._offline_ui_review:
+            self._apply_offline_ui_review_fixture()
+            return
         self.root.after(100, self.refresh_status)
         self._drain_after_id = self.root.after(100, self._drain_messages)
         self._watchdog_after_id = self.root.after(
@@ -161,19 +178,38 @@ class SzuDormWindowsApp:
             self._watchdog_tick,
         )
 
+    def _apply_offline_ui_review_fixture(self) -> None:
+        """Populate the real widgets for VM visual QA without any network I/O."""
+        values = {
+            "environment": "离线界面检查",
+            "run_state": "运行中 · 30 秒直连检查",
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "dorm_provider": "启用 · online",
+            "dorm_account": "1***8",
+            "online_devices": "2/3",
+            "teaching_provider": "启用 · offline",
+            "teaching_account": "2***6",
+            "teaching_session": "offline",
+        }
+        for key, value in values.items():
+            self._status_vars[key].set(value)
+        self.header_state_var.set("离线 UI 检查")
+        self.dorm_toggle_button.configure(text="宿舍：关闭")
+        self.teaching_toggle_button.configure(text="教学：关闭")
+
     def _build_ui(self) -> None:
         if not hasattr(self, "_credential_backend_ok"):
             self._credential_backend_ok, self._credential_backend_label = credential_backend_status()
         self.root.title(APP_NAME)
-        self.root.geometry("900x680")
-        self.root.minsize(820, 620)
+        self.root.geometry("860x640")
+        self.root.minsize(780, 570)
 
         style = ttk.Style(self.root)
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("Title.TLabel", font=("Segoe UI", 18, "bold"))
+        style.configure("Title.TLabel", font=("Segoe UI", 19, "bold"))
         style.configure("Subtitle.TLabel", foreground="#5f6b7a")
         style.configure("State.TLabel", font=("Segoe UI", 10, "bold"), foreground="#176b3a")
         style.configure("StatusName.TLabel", foreground="#445", font=("Segoe UI", 10, "bold"))
@@ -190,12 +226,12 @@ class SzuDormWindowsApp:
         header.columnconfigure(0, weight=1)
         title_group = ttk.Frame(header)
         title_group.grid(row=0, column=0, sticky="w")
-        ttk.Label(title_group, text="SZU Campus Network", style="Title.TLabel").grid(
+        ttk.Label(title_group, text="校园网", style="Title.TLabel").grid(
             row=0, column=0, sticky="w"
         )
         ttk.Label(
             title_group,
-            text=f"Windows 独立客户端 v{APP_VERSION} · 宿舍/教学双 Provider",
+            text=f"Windows v{APP_VERSION}  ·  每 30 秒自动检查",
             style="Subtitle.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
         self.header_state_var = tk.StringVar(value="正在检查网络…")
@@ -211,29 +247,33 @@ class SzuDormWindowsApp:
         self.notebook.add(overview, text="概览")
         self.notebook.add(diagnostics, text="诊断与日志")
         overview.columnconfigure(0, weight=1)
-        overview.rowconfigure(0, weight=1)
+        overview.columnconfigure(1, weight=1)
         diagnostics.columnconfigure(0, weight=1)
         diagnostics.rowconfigure(1, weight=1)
 
-        status_frame = ttk.LabelFrame(overview, text="当前状态", padding=12)
-        status_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 12))
-        status_frame.columnconfigure(1, weight=1)
-        self._add_status_row(status_frame, 0, "自动登录", "run_state")
-        self._add_status_row(status_frame, 1, "暂停状态", "pause_state")
-        self._add_status_row(status_frame, 2, "网络环境", "environment")
-        self._add_status_row(status_frame, 3, "门户会话", "portal_session")
-        self._add_status_row(status_frame, 4, "宿舍 Provider", "dorm_provider")
-        self._add_status_row(status_frame, 5, "教学 Provider", "teaching_provider")
-        self._add_status_row(status_frame, 6, "默认网络出口", "internet")
-        self._add_status_row(status_frame, 7, "宿舍网关", "gateway")
-        self._add_status_row(status_frame, 8, "源 IP", "source_ip")
-        self._add_status_row(status_frame, 9, "Credential Manager", "credential_backend")
-        self._add_status_row(status_frame, 10, "配置文件", "config")
-        self._add_status_row(status_frame, 11, "开机自启", "startup")
-        self._add_status_row(status_frame, 12, "更新时间", "updated_at")
+        summary = ttk.Frame(overview)
+        summary.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        summary.columnconfigure(1, weight=1)
+        self._add_status_row(summary, 0, "网络", "environment")
+        self._add_status_row(summary, 1, "自动恢复", "run_state")
+        self._add_status_row(summary, 2, "更新", "updated_at")
 
-        button_frame = ttk.LabelFrame(overview, text="快捷操作", padding=8)
-        button_frame.grid(row=1, column=0, sticky="ew")
+        dorm_card = ttk.LabelFrame(overview, text="宿舍区 Dorm", padding=12)
+        dorm_card.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
+        dorm_card.columnconfigure(1, weight=1)
+        self._add_status_row(dorm_card, 0, "状态", "dorm_provider")
+        self._add_status_row(dorm_card, 1, "账号", "dorm_account")
+        self._add_status_row(dorm_card, 2, "设备", "online_devices")
+
+        teaching_card = ttk.LabelFrame(overview, text="教学区 Teaching", padding=12)
+        teaching_card.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(0, 12))
+        teaching_card.columnconfigure(1, weight=1)
+        self._add_status_row(teaching_card, 0, "状态", "teaching_provider")
+        self._add_status_row(teaching_card, 1, "账号", "teaching_account")
+        self._add_status_row(teaching_card, 2, "认证", "teaching_session")
+
+        button_frame = ttk.LabelFrame(overview, text="操作", padding=8)
+        button_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
         for index in range(4):
             button_frame.columnconfigure(index, weight=1)
 
@@ -252,51 +292,40 @@ class SzuDormWindowsApp:
             lambda: self._run_control_action(["login-now"], "立即登录", timeout=80),
             style="Primary.TButton",
         )
-        self.check_login_button = self._add_button(
-            button_frame,
-            0,
-            2,
-            "检查并登录",
-            lambda: self._run_control_action(["check-and-login"], "检查并登录", timeout=100),
-        )
-        self.logout_button = self._add_button(button_frame, 0, 3, "退出账号", self.logout_now)
+        self.logout_button = self._add_button(button_frame, 0, 2, "退出账号", self.logout_now)
+        self.pause_button = self._add_button(button_frame, 0, 3, "暂停自动恢复", self.toggle_pause)
 
-        self.pause_button = self._add_button(button_frame, 1, 0, "暂停自动登录", self.toggle_pause)
-        self.probe_button = self._add_button(
-            button_frame,
-            1,
-            1,
-            "关闭联网探测",
-            self.toggle_network_probe,
+        self.username_button = self._add_button(
+            button_frame, 1, 0, "宿舍账号", lambda: self.change_username("dorm")
         )
-        self.username_button = self._add_button(button_frame, 1, 2, "修改账号", self.change_username)
         self.password_button = self._add_button(
-            button_frame, 1, 3, "宿舍密码", lambda: self.change_password("dorm")
+            button_frame, 1, 1, "宿舍密码", lambda: self.change_password("dorm")
+        )
+        self.teaching_username_button = self._add_button(
+            button_frame, 1, 2, "教学账号", lambda: self.change_username("teaching")
         )
         self.teaching_password_button = self._add_button(
-            button_frame, 2, 0, "教学密码", lambda: self.change_password("teaching")
+            button_frame, 1, 3, "教学密码", lambda: self.change_password("teaching")
         )
         self.dorm_toggle_button = self._add_button(
-            button_frame, 2, 1, "切换宿舍认证", lambda: self.toggle_provider("dorm")
+            button_frame, 2, 0, "宿舍：启用", lambda: self.toggle_provider("dorm")
         )
         self.teaching_toggle_button = self._add_button(
-            button_frame, 2, 2, "切换教学认证", lambda: self.toggle_provider("teaching")
+            button_frame, 2, 1, "教学：关闭", lambda: self.toggle_provider("teaching")
         )
         self.startup_button = self._add_button(
             button_frame,
-            3,
-            0,
+            2,
+            2,
             "安装开机自启",
             self.toggle_windows_startup,
-            columnspan=2,
         )
         self.open_diagnostics_button = self._add_button(
             button_frame,
-            3,
             2,
-            "打开诊断工具",
+            3,
+            "诊断与日志",
             lambda: self.notebook.select(diagnostics),
-            columnspan=2,
         )
 
         diagnostic_buttons = ttk.Frame(diagnostics)
@@ -325,19 +354,6 @@ class SzuDormWindowsApp:
             "重置暂停",
             lambda: self._run_control_action(["reset-pause"], "重置暂停", timeout=30),
         )
-        self.dependencies_button = self._add_button(
-            diagnostic_buttons,
-            1,
-            0,
-            "检查依赖",
-            lambda: self._run_control_action(
-                ["check-dependencies"],
-                "检查依赖",
-                timeout=30,
-            ),
-            columnspan=4,
-        )
-
         output_frame = ttk.LabelFrame(diagnostics, text="脱敏运行输出", padding=8)
         output_frame.grid(row=1, column=0, sticky="nsew")
         output_frame.rowconfigure(0, weight=1)
@@ -357,9 +373,9 @@ class SzuDormWindowsApp:
             pady=8,
         )
         self.output.grid(row=0, column=0, sticky="nsew")
-        self._append_output("诊断输出将在这里显示；账号、密码和 URL 等敏感内容会自动脱敏。")
+        self._append_output("诊断输出已脱敏。")
 
-        self.footer_var = tk.StringVar(value=f"配置：{DEFAULT_CONFIG_PATH}")
+        self.footer_var = tk.StringVar(value=f"凭据：{self._credential_backend_label}")
         ttk.Label(main, textvariable=self.footer_var, style="Subtitle.TLabel").grid(
             row=2, column=0, sticky="w", pady=(10, 0)
         )
@@ -448,6 +464,8 @@ class SzuDormWindowsApp:
             portal_session_matches = (
                 portal_session_state == "online" and active.get("accountMatch") is True
             )
+            online_device_count = _optional_nonnegative_int(active.get("onlineDeviceCount"))
+            online_device_limit = _optional_nonnegative_int(active.get("onlineDeviceLimit"))
             network_status = NetworkStatus(
                 gateway_reachable=status["networkContext"] == "dorm",
                 campus_internet_ok=False,
@@ -469,6 +487,11 @@ class SzuDormWindowsApp:
                         teaching_enabled=bool(teaching["enabled"]),
                         teaching_session_state=str(teaching["state"]),
                         auto_login_provider=status["autoLoginProvider"],
+                        online_device_count=online_device_count,
+                        online_device_limit=online_device_limit,
+                        dorm_account=str(dorm.get("account") or "****"),
+                        teaching_account=str(teaching.get("account") or "****"),
+                        dorm_session_state=str(dorm.get("state") or "unknown"),
                     ),
                 )
             )
@@ -481,39 +504,31 @@ class SzuDormWindowsApp:
     def _apply_status_result(self, result: DesktopStatusResult) -> None:
         self._last_status_result = result
         run_label = auto_login_state_label(result.paused, result)
-        if result.portal_session_matches:
-            campus_label = "可用" if result.network_status.campus_internet_ok else "门户在线，出口待确认"
-        elif result.portal_session_state == "offline":
-            campus_label = "门户离线，未探测"
-        else:
-            campus_label = "未探测"
-        gateway_label = "可达" if result.network_status.gateway_reachable else "不可达"
-        config_label = str(DEFAULT_CONFIG_PATH) if not result.config_error else result.config_error
-        portal_label = portal_session_label(result)
+        devices_label = online_devices_label(
+            result.online_device_count,
+            result.online_device_limit,
+        )
 
         self._status_vars["run_state"].set(run_label)
-        self._status_vars["pause_state"].set(describe_pause_state())
         self._status_vars["environment"].set(result.environment_label or "网络环境未知")
-        self._status_vars["portal_session"].set(portal_label)
+        self._status_vars["online_devices"].set(devices_label)
         self._status_vars["dorm_provider"].set(
-            ("启用 · " + portal_label) if result.dorm_enabled else "已关闭"
+            ("启用 · " + result.dorm_session_state) if result.dorm_enabled else "已关闭"
         )
         self._status_vars["teaching_provider"].set(
             ("启用 · " + result.teaching_session_state) if result.teaching_enabled else "已关闭"
         )
-        self._status_vars["internet"].set(campus_label)
-        self._status_vars["gateway"].set(gateway_label)
-        self._status_vars["source_ip"].set(result.network_status.source_ip or "-")
-        self._status_vars["credential_backend"].set(self._credential_backend_label)
-        self._status_vars["config"].set(config_label)
-        self._status_vars["startup"].set(
-            "已安装" if is_windows_startup_enabled() else "未安装"
-        )
+        self._status_vars["dorm_account"].set(result.dorm_account)
+        self._status_vars["teaching_account"].set(result.teaching_account)
+        self._status_vars["teaching_session"].set(result.teaching_session_state)
         self._status_vars["updated_at"].set(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         self.header_state_var.set(run_label)
-        self.pause_button.configure(text="恢复自动登录" if result.paused else "暂停自动登录")
-        self.probe_button.configure(
-            text="关闭联网探测" if self._network_probe_enabled else "开启联网探测"
+        self.pause_button.configure(text="恢复自动恢复" if result.paused else "暂停自动恢复")
+        self.dorm_toggle_button.configure(
+            text="宿舍：关闭" if result.dorm_enabled else "宿舍：启用"
+        )
+        self.teaching_toggle_button.configure(
+            text="教学：关闭" if result.teaching_enabled else "教学：启用"
         )
         self._update_startup_ui()
 
@@ -525,9 +540,6 @@ class SzuDormWindowsApp:
         if transition_state.endswith(":offline") and self._last_portal_session_state != transition_state:
             self._auto_login_schedule.allow_immediate_attempt()
         self._last_portal_session_state = transition_state
-
-        if result.portal_session_matches:
-            self._auto_login_schedule.record_success()
 
         self._schedule_next_status_refresh()
 
@@ -660,37 +672,20 @@ class SzuDormWindowsApp:
         label = "恢复自动登录" if command == "resume" else "暂停自动登录"
         self._run_control_action([command], label, timeout=30)
 
-    def toggle_network_probe(self) -> None:
-        self._network_probe_enabled = not self._network_probe_enabled
-        if self._network_probe_enabled:
-            self._append_output("已开启联网状态探测。")
-            self.refresh_status()
-            return
-
-        if self._status_after_id is not None:
-            try:
-                self.root.after_cancel(self._status_after_id)
-            except tk.TclError:
-                pass
-            self._status_after_id = None
-        self._append_output("已关闭联网状态探测。")
-        self._apply_status_result(
-            DesktopStatusResult(
-                is_paused(),
-                NetworkStatus(False, False),
-                network_probe_enabled=False,
-            )
-        )
-
-    def change_username(self) -> None:
-        username = simpledialog.askstring(APP_NAME, "请输入校园网账号：", parent=self.root)
+    def change_username(self, provider_id: str = "dorm") -> None:
+        label = "宿舍区" if provider_id == "dorm" else "教学区"
+        username = simpledialog.askstring(APP_NAME, f"请输入{label}账号：", parent=self.root)
         if username is None:
             return
         username = username.strip()
         if not username:
             messagebox.showwarning(APP_NAME, "账号不能为空。")
             return
-        self._run_control_action(["set-username", username], "修改账号", timeout=30)
+        self._run_control_action(
+            ["set-provider-account", provider_id, username],
+            f"修改{label}账号",
+            timeout=30,
+        )
 
     def toggle_provider(self, provider_id: str) -> None:
         try:
@@ -756,7 +751,6 @@ class SzuDormWindowsApp:
 
     def _finish_windows_startup_change(self, enabled: bool) -> None:
         self._update_startup_ui()
-        self._status_vars["startup"].set("已安装" if enabled else "未安装")
         detail = "登录 Windows 后会自动启动客户端。" if enabled else "已移除启动快捷方式。"
         self._append_output(detail)
         messagebox.showinfo(APP_NAME, detail)
@@ -879,6 +873,14 @@ class SzuDormWindowsApp:
             return
 
         if show_dialog:
+            if (
+                result.returncode != 0
+                and "AUTH_DEVICE_LIMIT" in output
+                and "force-login-now" not in args
+            ):
+                self._offer_force_login()
+                self.refresh_status()
+                return
             if result.returncode == 0:
                 messagebox.showinfo(APP_NAME, f"{label}完成。")
             else:
@@ -890,6 +892,22 @@ class SzuDormWindowsApp:
                 self._open_path(Path(report_path))
 
         self.refresh_status()
+
+    def _offer_force_login(self) -> None:
+        """Ask once before intentionally replacing a full Dorm slot."""
+
+        if not messagebox.askyesno(
+            APP_NAME,
+            "校园网已有 3/3 台设备在线。继续将由服务端选择一台旧设备下线，确定强制切换到本机吗？",
+            parent=self.root,
+        ):
+            self._append_output("已取消强制切换；未发送登录请求。")
+            return
+        self._run_control_action(
+            ["force-login-now"],
+            "强制切换到本机",
+            timeout=100,
+        )
 
     def _append_output(self, text: str) -> None:
         redacted = redact_sensitive_text(text).strip()
@@ -1148,11 +1166,16 @@ def should_start_auto_login(paused: bool, result: DesktopStatusResult | None) ->
         return False
     if result is None or result.config_error or not result.network_probe_enabled:
         return False
+    if result.environment_label == "dorm" and result.dorm_enabled:
+        # Dorm recovery must also run for a Portal-online session so the
+        # source-bound, proxy-free egress probe can catch stale sessions.  All
+        # credential and device-limit gates remain inside the service/Core.
+        return result.portal_session_state in {"online", "offline", "unknown"}
     return (
-        result.auto_login_available
-        and result.auto_login_provider in {"dorm", "teaching"}
+        result.environment_label == "teaching"
+        and result.teaching_enabled
+        and result.auto_login_provider == "teaching"
         and result.portal_session_state == "offline"
-        and not result.portal_session_matches
     )
 
 
@@ -1170,11 +1193,17 @@ def auto_login_state_label(paused: bool, result: DesktopStatusResult) -> str:
     if is_non_campus_status(result):
         return "非宿舍网络，自动登录停用"
     if result.portal_session_matches:
-        return "门户已登录"
+        return "运行中 · 30 秒直连检查"
+    if (
+        result.online_device_count is not None
+        and result.online_device_limit is not None
+        and result.online_device_count >= result.online_device_limit
+    ):
+        return f"设备 {online_devices_label(result.online_device_count, result.online_device_limit)} · 仅检查"
     if result.portal_session_state == "online":
-        return "检测到其他门户会话，自动登录停用"
+        return "运行中 · 30 秒直连检查"
     if result.portal_session_state == "unknown":
-        return "等待门户确认，不发送账号密码"
+        return "运行中 · 安全等待"
     return "运行中"
 
 
@@ -1183,11 +1212,33 @@ def portal_session_label(result: DesktopStatusResult) -> str:
         return "检测已关闭"
     if result.portal_session_matches:
         return "已登录（账号与 IP 已匹配）"
+    if (
+        result.online_device_count is not None
+        and result.online_device_limit is not None
+        and result.online_device_count >= result.online_device_limit
+    ):
+        return "本机未登录，账号设备已达上限"
     if result.portal_session_state == "online":
         return "存在其他账号或 IP 的在线会话"
     if result.portal_session_state == "offline":
         return "已确认离线"
     return "暂时无法确认"
+
+
+def online_devices_label(count: int | None, limit: int | None) -> str:
+    if count is None or limit is None:
+        return "未知（不发送登录）"
+    return f"{count}/{limit}"
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
 
 
 def mask_username(username: str) -> str:
@@ -1200,6 +1251,8 @@ def mask_username(username: str) -> str:
 def mask_command(args: list[str]) -> str:
     if args[:1] == ["set-username"] and len(args) > 1:
         return f"set-username {mask_username(args[1])}"
+    if args[:1] == ["set-provider-account"] and len(args) > 2:
+        return f"set-provider-account {args[1]} {mask_username(args[2])}"
     return " ".join(args)
 
 
@@ -1250,10 +1303,13 @@ def run_frozen_self_test() -> int:
         if not schedule.consume_if_due():
             return 1
         schedule.record_failure()
+        if schedule.current_interval_seconds != 120:
+            return 1
+        schedule.record_failure()
         if schedule.current_interval_seconds != 300:
             return 1
         schedule.record_success()
-        if schedule.current_interval_seconds != 120:
+        if schedule.current_interval_seconds != STATUS_REFRESH_SECONDS:
             return 1
     except Exception:
         return 1
@@ -1325,7 +1381,7 @@ def main() -> None:
         raise SystemExit(run_control_dispatch())
 
     root = tk.Tk()
-    SzuDormWindowsApp(root)
+    SzuDormWindowsApp(root, offline_ui_review="--ui-review" in sys.argv[1:])
     root.mainloop()
 
 

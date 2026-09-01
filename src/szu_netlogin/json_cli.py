@@ -18,7 +18,7 @@ from src.szu_netlogin.windows_product import WindowsCampusService, get_process_s
 
 
 _COMMANDS = {
-    "status", "check", "login", "logout", "pause", "resume", "open-settings", "diagnostics"
+    "status", "check", "login", "force-login", "force-login-now", "logout", "pause", "resume", "open-settings", "diagnostics"
 }
 _PROVIDERS = {"auto", "dorm", "teaching"}
 _FORBIDDEN_KEYS = {"password", "secret", "token", "cookie", "authorization", "credentialvalue"}
@@ -64,6 +64,23 @@ def execute(request: dict[str, Any], service: WindowsCampusService) -> tuple[dic
         result = AuthResult(AuthOutcome.UNCHANGED, provider)
     elif command == "login":
         result = service.login(provider, manual=bool(request.get("interactive", False)))
+    elif command in {"force-login", "force-login-now"}:
+        if not request.get("interactive", False):
+            result = AuthResult(
+                AuthOutcome.BLOCKED,
+                provider,
+                session_state=SessionState.BLOCKED,
+                error_code="AUTH_DEVICE_REPLACEMENT_UNSUPPORTED",
+            )
+        elif provider != "dorm":
+            result = AuthResult(
+                AuthOutcome.BLOCKED,
+                provider,
+                session_state=SessionState.BLOCKED,
+                error_code="AUTH_DEVICE_REPLACEMENT_UNSUPPORTED",
+            )
+        else:
+            result = service.force_login("dorm")
     elif command == "logout":
         result = service.logout(provider)
     elif command == "pause":
@@ -129,7 +146,7 @@ def _contains_forbidden_key(value: Any) -> bool:
 
 
 def _result_payload(request_id, result, network_context, diagnostics):
-    return {
+    payload = {
         "schemaVersion": 1,
         "requestId": request_id,
         "outcome": result.outcome.value,
@@ -142,6 +159,14 @@ def _result_payload(request_id, result, network_context, diagnostics):
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "sanitizedDiagnostics": diagnostics,
     }
+    # Optional aggregate fields preserve schema v1 compatibility while making
+    # the Dorm device budget visible to clients.  No MAC/IP/device list is
+    # ever serialized.
+    if result.online_device_count is not None:
+        payload["onlineDeviceCount"] = result.online_device_count
+    if result.online_device_limit is not None:
+        payload["onlineDeviceLimit"] = result.online_device_limit
+    return payload
 
 
 def _error_payload(request_id, code):

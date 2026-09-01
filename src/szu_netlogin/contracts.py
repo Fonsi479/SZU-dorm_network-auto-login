@@ -57,11 +57,20 @@ class ProviderProbe:
 class SessionResult:
     state: SessionState
     account_match: bool | None = None
+    # Whether the account-wide online list contains the exact local
+    # account/source-IP record.  ``None`` means the list was unavailable or
+    # could not be interpreted safely.
+    exact_online_record_present: bool | None = None
     client_ip: str = ""
     product: str = ""
     server_code: str = ""
     error_code: str = ""
     retryable: bool = False
+    # Dorm Dr.COM may report all sessions for an account.  These optional
+    # fields deliberately carry only an aggregate count; individual device
+    # identities never cross the provider boundary.
+    online_device_count: int | None = None
+    online_device_limit: int | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +83,8 @@ class AuthResult:
     error_code: str = ""
     server_code: str = ""
     retryable: bool = False
+    online_device_count: int | None = None
+    online_device_limit: int | None = None
 
 
 class CredentialHandle:

@@ -12,6 +12,11 @@ private actor RequestRecorder {
 
 @Suite("SZUNET CLI adapter boundary", .serialized)
 struct SZUNETBoundaryBehaviorTests {
+    @Test("force-login keeps the stable wire command spelling")
+    func forceLoginWireSpelling() {
+        #expect(SZUNETCommand.forceLogin.rawValue == "force-login")
+    }
+
     @Test("request encoding contains only the public command contract")
     func requestHasExactFields() throws {
         let request = SZUNETCommandRequest(
@@ -102,6 +107,20 @@ struct SZUNETBoundaryBehaviorTests {
         #expect(result.probeIntervalSeconds == nil)
     }
 
+    @Test("schema-v1 device occupancy fields decode when present")
+    func deviceOccupancyFieldsDecode() throws {
+        let data = try encodeWireResult(
+            requestId: "device-count",
+            onlineDeviceCount: 3,
+            onlineDeviceLimit: 3
+        )
+
+        let result = try SZUNETCLIClient.decode(data, expectedRequestID: "device-count")
+
+        #expect(result.onlineDeviceCount == 3)
+        #expect(result.onlineDeviceLimit == 3)
+    }
+
     @Test("untrusted wire detail and unknown code never reach the public result")
     func untrustedWireTextIsNotExposed() throws {
         let rawMarker = "RAW_PRIVATE_FIXTURE_198_51_100_8"
@@ -121,6 +140,17 @@ struct SZUNETBoundaryBehaviorTests {
         let publicLabels = Set(Mirror(reflecting: result).children.compactMap(\.label))
         #expect(!publicLabels.contains("message"))
         #expect(!publicLabels.contains("timestamp"))
+    }
+
+    @Test("automation ownership conflict remains a stable public safety code")
+    func ownershipConflictRemainsPublic() {
+        let result = SZUNETCommandResult(
+            requestId: "owner-conflict",
+            outcome: .blocked,
+            errorCode: "AUTOMATION_OWNER_CONFLICT"
+        )
+
+        #expect(result.errorCode == "AUTOMATION_OWNER_CONFLICT")
     }
 
     @Test("process environment is an exact minimal allowlist")
@@ -185,7 +215,12 @@ struct SZUNETBoundaryBehaviorTests {
             .status,
             provider: .auto,
             interactive: false,
-            timeoutSeconds: 2
+            // This test verifies the one-request JSON boundary, not the
+            // timeout path. Use the production status budget so a loaded CI
+            // runner cannot turn process scheduling latency into a false
+            // boundary failure; dedicated tests below keep the 1-second
+            // timeout and descendant-termination contract covered.
+            timeoutSeconds: 10
         )
 
         #expect(result.sessionState == .online)
@@ -304,7 +339,8 @@ struct SZUNETBoundaryBehaviorTests {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let sourceRoot = packageRoot.appendingPathComponent("Sources/SZUNETFeature")
+            .deletingLastPathComponent()
+        let sourceRoot = packageRoot.appendingPathComponent("macos/Sources/SZUNETFeature")
         let sourceFiles = try FileManager.default.contentsOfDirectory(
             at: sourceRoot,
             includingPropertiesForKeys: nil
@@ -351,7 +387,9 @@ private func encodeWireResult(
     schemaVersion: Int = 1,
     requestId: String,
     errorCode: String? = nil,
-    message: String = "fixture"
+    message: String = "fixture",
+    onlineDeviceCount: Int? = nil,
+    onlineDeviceLimit: Int? = nil
 ) throws -> Data {
     try JSONEncoder().encode(
         SZUNETWireResult(
@@ -367,6 +405,8 @@ private func encodeWireResult(
             ownerAppRunning: true,
             networkProbeEnabled: true,
             probeIntervalSeconds: 120,
+            onlineDeviceCount: onlineDeviceCount,
+            onlineDeviceLimit: onlineDeviceLimit,
             message: message,
             timestamp: "2026-07-28T00:00:00Z"
         )

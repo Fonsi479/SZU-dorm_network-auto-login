@@ -34,6 +34,22 @@ public struct AppPaths: Equatable {
         applicationSupportDirectory.appendingPathComponent("campus-providers.json")
     }
 
+    public var configurationLockFile: URL {
+        applicationSupportDirectory.appendingPathComponent("config.lock")
+    }
+
+    public var campusProviderConfigurationLockFile: URL {
+        applicationSupportDirectory.appendingPathComponent("campus-providers.lock")
+    }
+
+    public var automationFile: URL {
+        applicationSupportDirectory.appendingPathComponent("automation.json")
+    }
+
+    public var automationLockFile: URL {
+        applicationSupportDirectory.appendingPathComponent("automation.lock")
+    }
+
     public var legacyConfigurationFile: URL {
         applicationSupportDirectory.appendingPathComponent("config.yaml")
     }
@@ -64,14 +80,8 @@ public struct AppPaths: Equatable {
 
     public func createDirectories() throws {
         do {
-            try FileManager.default.createDirectory(
-                at: applicationSupportDirectory,
-                withIntermediateDirectories: true
-            )
-            try FileManager.default.createDirectory(
-                at: logDirectory,
-                withIntermediateDirectories: true
-            )
+            try SecurePersistence.prepareDirectory(applicationSupportDirectory)
+            try SecurePersistence.prepareDirectory(logDirectory)
         } catch {
             throw SZUNetError.fileSystem("无法创建应用数据目录：\(error.localizedDescription)")
         }

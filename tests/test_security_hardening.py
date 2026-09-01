@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import types
 import unittest
+import logging
 from unittest.mock import patch
 
 from src.szu_netlogin import password_store
-from src.szu_netlogin.logger import redact_sensitive_text
+from src.szu_netlogin.logger import _RedactingFormatter, redact_sensitive_text
 
 
 class LoggingSecurityTests(unittest.TestCase):
@@ -25,6 +26,38 @@ class LoggingSecurityTests(unittest.TestCase):
         )
         for forbidden in ("synthetic-token", "derived", "checksum", "account"):
             self.assertNotIn(forbidden, output)
+
+    def test_portal_device_identity_fields_are_redacted(self) -> None:
+        synthetic = (
+            '{"online_ip":"172.24.1.10","online_mac":"aabbccddeeff",'
+            '"nas_ip":"704585388","wlan_user_ip":"172.24.1.10",'
+            '"wlan_user_mac":"aa:bb:cc:dd:ee:ff","ac_ip":"172.30.255.41"}'
+        )
+        output = redact_sensitive_text(synthetic)
+        for forbidden in (
+            "172.24.1.10",
+            "aabbccddeeff",
+            "704585388",
+            "aa:bb:cc:dd:ee:ff",
+            "172.30.255.41",
+        ):
+            self.assertNotIn(forbidden, output)
+        self.assertIn("device_id_redacted", output)
+
+    def test_persisted_log_formatter_redacts_keyed_device_identity(self) -> None:
+        record = logging.LogRecord(
+            "campus-test",
+            logging.INFO,
+            __file__,
+            1,
+            "route source_ip=%s online_mac=%s",
+            ("172.24.1.10", "aabbccddeeff"),
+            None,
+        )
+        output = _RedactingFormatter("%(message)s").format(record)
+        self.assertNotIn("172.24.1.10", output)
+        self.assertNotIn("aabbccddeeff", output)
+        self.assertIn("device_id_redacted", output)
 
 
 class WindowsCredentialBackendTests(unittest.TestCase):

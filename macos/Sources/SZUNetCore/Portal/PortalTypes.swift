@@ -44,11 +44,24 @@ struct PortalSessionFact {
     var statusWasReadable = false
     var onlineListWasReadable = false
     var exactOnlineRecordPresent: Bool?
+    /// Distinct server-reported sessions for this account.  A missing value is
+    /// intentionally different from zero: it means the list was unavailable
+    /// or contained an identity we could not count safely.
+    var onlineDeviceCount: Int?
+    var onlineDeviceLimit: Int? = CampusOnlineDevicePolicy.dormLimit
 
-    func matches(username: String, sourceIP: String) -> Bool {
-        let expectedAccount = username.trimmingCharacters(in: .whitespacesAndNewlines)
+    func matches(
+        username: String,
+        sourceIP: String,
+        accountPrefix: String = ""
+    ) -> Bool {
+        let expectedAccount = PortalAccountNormalizer.normalize(
+            username,
+            prefix: accountPrefix
+        )
         let expectedIP = IPv4CIDR.normalized(sourceIP)
-        let accountMatches = expectedAccount.isEmpty || account == expectedAccount
+        let accountMatches = expectedAccount.isEmpty
+            || PortalAccountNormalizer.normalize(account, prefix: accountPrefix) == expectedAccount
         let ipMatches = expectedIP.isEmpty || ip == expectedIP
         return state == .online && accountMatches && ipMatches
     }
@@ -76,6 +89,7 @@ struct PortalSessionSnapshot {
 struct PortalOnlineListResult {
     var readable = false
     var exactRecord: [String: Any]?
+    var deviceCount: Int?
 }
 
 struct PortalStatusResult {
@@ -87,4 +101,19 @@ struct PortalStatusResult {
     var vlan = "0"
     var acIP = ""
     var acName = ""
+}
+
+/// Normalizes the account identity used by the Dorm portal without exposing or
+/// persisting credentials.  The wire format commonly prefixes accounts with
+/// `,1,`; both the configured prefix and surrounding whitespace are ignored
+/// when comparing status and online-list records.
+enum PortalAccountNormalizer {
+    static func normalize(_ value: String, prefix: String = "") -> String {
+        var normalized = value.filter { !$0.isWhitespace }
+        let configuredPrefix = prefix.filter { !$0.isWhitespace }
+        if !configuredPrefix.isEmpty, normalized.hasPrefix(configuredPrefix) {
+            normalized.removeFirst(configuredPrefix.count)
+        }
+        return normalized
+    }
 }

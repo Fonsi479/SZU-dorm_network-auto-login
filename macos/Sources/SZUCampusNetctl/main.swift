@@ -17,10 +17,14 @@ struct SZUCampusNetctl {
         } else if CommandLine.arguments == [CommandLine.arguments[0], "--json"] {
             let input = FileHandle.standardInput.readDataToEndOfFile()
             do {
-                let controller = try CampusProductRuntime.make()
+                let accessMode = try CampusContainingApplication.credentialAccessMode()
+                let controller = try CampusProductRuntime.make(credentialAccessMode: accessMode)
                 response = await CampusCLIProcessor.process(
                     input,
-                    handler: LiveCampusCLIHandler(controller: controller)
+                    handler: LiveCampusCLIHandler(
+                        controller: controller,
+                        automationStore: CampusAutomationStore()
+                    )
                 )
             } catch {
                 response = .blocked(requestId: "configuration-error", code: "CFG_INVALID")
@@ -35,9 +39,11 @@ struct SZUCampusNetctl {
 
 private actor LiveCampusCLIHandler: CampusCLIHandling {
     let controller: CampusProductController
+    let automationStore: CampusAutomationStore
 
-    init(controller: CampusProductController) {
+    init(controller: CampusProductController, automationStore: CampusAutomationStore) {
         self.controller = controller
+        self.automationStore = automationStore
     }
 
     func handle(_ request: CampusCLIRequest) async -> CampusCLIResponse {
@@ -50,6 +56,20 @@ private actor LiveCampusCLIHandler: CampusCLIHandling {
             let result = await controller.login(
                 requestedProvider: request.provider.providerID,
                 automatic: false
+            )
+            return await actionResponse(request, result: result)
+        case .forceLogin:
+            guard request.interactive, request.provider != .teaching else {
+                return .blocked(
+                    requestId: request.requestId,
+                    code: request.provider == .teaching
+                        ? "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED"
+                        : "AUTH_NOT_CONFIRMED",
+                    provider: request.provider.rawValue
+                )
+            }
+            let result = await controller.forceLogin(
+                requestedProvider: request.provider.providerID
             )
             return await actionResponse(request, result: result)
         case .logout:
@@ -96,9 +116,6 @@ private actor LiveCampusCLIHandler: CampusCLIHandling {
         case .resume:
             do {
                 try await controller.resume()
-                guard await CampusOwnerApplicationBridge.ensureRunning() else {
-                    return .blocked(requestId: request.requestId, code: "INTERNAL_ERROR")
-                }
                 return await snapshotResponse(
                     request,
                     snapshot: await controller.currentSnapshot(),
@@ -144,10 +161,12 @@ private actor LiveCampusCLIHandler: CampusCLIHandling {
             provider: result.providerID.rawValue,
             networkContext: snapshot.category.rawValue,
             sessionState: result.sessionState,
+            onlineDeviceCount: result.onlineDeviceCount ?? snapshot.onlineDeviceCount,
+            onlineDeviceLimit: result.onlineDeviceLimit ?? snapshot.onlineDeviceLimit,
             errorCode: result.errorCode,
             retryable: result.retryable,
             automaticEnabled: snapshot.automaticEnabled,
-            ownerAppRunning: await CampusOwnerApplicationBridge.isRunning,
+            ownerAppRunning: ownershipSnapshot?.ownerRunning ?? false,
             networkProbeEnabled: probePreferences.enabled,
             probeIntervalSeconds: probePreferences.intervalSeconds,
             message: result.errorCode ?? result.outcome.rawValue,
@@ -176,9 +195,11 @@ private actor LiveCampusCLIHandler: CampusCLIHandling {
             provider: request.provider.rawValue,
             networkContext: snapshot.category.rawValue,
             sessionState: state,
+            onlineDeviceCount: snapshot.onlineDeviceCount,
+            onlineDeviceLimit: snapshot.onlineDeviceLimit,
             errorCode: snapshot.lastErrorCode,
             automaticEnabled: snapshot.automaticEnabled,
-            ownerAppRunning: await CampusOwnerApplicationBridge.isRunning,
+            ownerAppRunning: ownershipSnapshot?.ownerRunning ?? false,
             networkProbeEnabled: probePreferences.enabled,
             probeIntervalSeconds: probePreferences.intervalSeconds,
             message: snapshot.lastErrorCode ?? outcome.rawValue,
@@ -191,13 +212,13 @@ private actor LiveCampusCLIHandler: CampusCLIHandling {
         enabled: Bool? = nil,
         intervalSeconds: Int? = nil
     ) async -> CampusCLIResponse {
-        if let enabled {
-            CampusAutomationPreferences.setOwnerNetworkProbeEnabled(enabled)
-        }
-        if let intervalSeconds {
-            CampusAutomationPreferences.setOwnerProbeIntervalSeconds(intervalSeconds)
-        }
-        guard await CampusOwnerApplicationBridge.applyAutomationPreferences() else {
+        do {
+            let current = try automationStore.load()
+            _ = try automationStore.updateProbe(
+                enabled: enabled ?? current.networkProbeEnabled,
+                intervalSeconds: intervalSeconds ?? current.probeIntervalSeconds
+            )
+        } catch {
             return .blocked(requestId: request.requestId, code: "INTERNAL_ERROR")
         }
         return await snapshotResponse(
@@ -208,10 +229,17 @@ private actor LiveCampusCLIHandler: CampusCLIHandling {
     }
 
     private var probePreferences: (enabled: Bool, intervalSeconds: Int) {
-        return (
-            CampusAutomationPreferences.ownerNetworkProbeEnabled(),
-            CampusAutomationPreferences.ownerProbeIntervalSeconds()
-        )
+        guard let configuration = try? automationStore.load() else {
+            return (
+                false,
+                CampusAutomationPreferences.defaultProbeIntervalSeconds
+            )
+        }
+        return (configuration.networkProbeEnabled, configuration.probeIntervalSeconds)
+    }
+
+    private var ownershipSnapshot: CampusAutomationOwnershipSnapshot? {
+        try? automationStore.ownershipSnapshot(for: CampusContainingApplication.cliHostID)
     }
 }
 
@@ -219,33 +247,11 @@ private actor LiveCampusCLIHandler: CampusCLIHandling {
 private enum CampusOwnerApplicationBridge {
     private static let bundleIdentifier = "com.szu-netlogin.dorm-login"
     private static let settingsURL = URL(string: "szunet://settings")!
-    private static let automationReloadURL = URL(string: "szunet://automation/reload")!
 
     static var isRunning: Bool {
         !NSRunningApplication.runningApplications(
             withBundleIdentifier: bundleIdentifier
         ).isEmpty
-    }
-
-    static func ensureRunning() async -> Bool {
-        if isRunning { return true }
-        guard let applicationURL else { return false }
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = false
-        let opened = await withCheckedContinuation { continuation in
-            NSWorkspace.shared.openApplication(
-                at: applicationURL,
-                configuration: configuration
-            ) { application, error in
-                continuation.resume(returning: error == nil && application != nil)
-            }
-        }
-        guard opened else { return false }
-        for _ in 0..<20 {
-            if isRunning { return true }
-            try? await Task.sleep(for: .milliseconds(100))
-        }
-        return isRunning
     }
 
     static func openSettings() async -> Bool {
@@ -266,13 +272,6 @@ private enum CampusOwnerApplicationBridge {
         }
     }
 
-    static func applyAutomationPreferences() async -> Bool {
-        if isRunning {
-            return NSWorkspace.shared.open(automationReloadURL)
-        }
-        return await ensureRunning()
-    }
-
     private static var applicationURL: URL? {
         let executable = URL(fileURLWithPath: CommandLine.arguments[0])
             .resolvingSymlinksInPath()
@@ -287,6 +286,46 @@ private enum CampusOwnerApplicationBridge {
         return NSWorkspace.shared.urlForApplication(
             withBundleIdentifier: bundleIdentifier
         )
+    }
+}
+
+private enum CampusContainingApplication {
+    static let cliHostID = "com.szu-netlogin.dorm-login"
+    private static let credentialModeKey = "SZUNETCredentialMode"
+    private static let accessGroupKey = "SZUNETKeychainAccessGroup"
+
+    static func credentialAccessMode() throws -> CampusCredentialAccessMode {
+        guard let bundle = containingBundle else { return .local }
+        let rawMode = (bundle.object(forInfoDictionaryKey: credentialModeKey) as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? "local"
+        switch rawMode {
+        case "local":
+            return .local
+        case "shared":
+            guard let accessGroup = (bundle.object(forInfoDictionaryKey: accessGroupKey) as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                !accessGroup.isEmpty else {
+                throw SZUNetError.configuration("shared credential mode 缺少 Keychain access group。")
+            }
+            return .shared(
+                accessGroup: accessGroup,
+                legacyLocations: [.init(accessGroup: nil)]
+            )
+        default:
+            throw SZUNetError.configuration("不支持的 SZUNET credential mode。")
+        }
+    }
+
+    private static var containingBundle: Bundle? {
+        let executable = URL(fileURLWithPath: CommandLine.arguments[0])
+            .resolvingSymlinksInPath()
+        let applicationURL = executable
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        guard applicationURL.pathExtension == "app" else { return nil }
+        return Bundle(url: applicationURL)
     }
 }
 

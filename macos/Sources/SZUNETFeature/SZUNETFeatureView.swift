@@ -56,6 +56,20 @@ public struct SZUNETFeatureView: View {
             store.setAdapterEnabled(value)
             onAdapterEnabledChanged(value)
         }
+        .alert(
+            "在线设备已达上限",
+            isPresented: Binding(
+                get: { store.forceLoginProvider != nil },
+                set: { presented in
+                    if !presented { store.cancelForceLogin() }
+                }
+            )
+        ) {
+            Button("取消", role: .cancel) { store.cancelForceLogin() }
+            Button("强制切换", role: .destructive) { store.confirmForceLogin() }
+        } message: {
+            Text("当前账号已有 3 台设备在线。本次普通登录已阻止；确认后将由校园网服务端选择一台旧设备下线。")
+        }
     }
 
     private var header: some View {
@@ -107,6 +121,7 @@ public struct SZUNETFeatureView: View {
                     statusValue("当前线路", providerLabel(status.provider))
                     statusValue("自动登录", automationLabel(status.automaticEnabled))
                     statusValue("独立 App", ownerAppLabel(status.ownerAppRunning))
+                    statusValue("在线设备", onlineDeviceLabel(status))
                     statusValue("最近更新", observedAtLabel(status.observedAt))
                 }
 
@@ -425,6 +440,11 @@ public struct SZUNETFeatureView: View {
         }
     }
 
+    private func onlineDeviceLabel(_ status: SZUNETCommandResult) -> String {
+        guard let count = status.onlineDeviceCount else { return "待确认" }
+        return "\(count)/\(status.onlineDeviceLimit ?? 3)"
+    }
+
     private func observedAtLabel(_ date: Date?) -> String {
         guard let date else { return "待确认" }
         return date.formatted(date: .omitted, time: .standard)
@@ -449,6 +469,9 @@ public struct SZUNETFeatureView: View {
         case "ENV_AMBIGUOUS": "网络区域证据有冲突，已停止自动操作。"
         case "CRED_MISSING": "尚未保存密码，请先修改账号或密码。"
         case "AUTH_BAD_PASSWORD": "账号或密码不正确，请更新后重试。"
+        case "AUTH_DEVICE_LIMIT": "账号已有 3 台设备在线；普通登录已阻止，避免挤下其他设备。"
+        case "NET_CAMPUS_EGRESS_UNAVAILABLE": "校园网会话仍在，但直连外网暂不可用；已避免重复登录。"
+        case "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED": "强制切换仅适用于宿舍区 Dorm，Teaching 不会发送请求。"
         case "PROVIDER_DISABLED": "所选校园网区域尚未启用。"
         case "SRUN_LOGOUT_DISABLED": "教学区退出尚未开放，未发送退出请求。"
         case "OPERATION_IN_PROGRESS": "已有校园网操作正在进行，请稍候。"

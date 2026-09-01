@@ -63,9 +63,40 @@ public final class NetworkProbe: NetworkProbing {
         configuration: AppConfiguration,
         status: NetworkStatus
     ) async -> NetworkStatus {
+        await probeInternet(
+            configuration: configuration,
+            status: status,
+            requiredSourceIP: nil
+        )
+    }
+
+    /// Probes external reachability while requiring every request to originate
+    /// from the verified campus source IP. URLSessionHTTPTransport routes this
+    /// through SourceBoundHTTPTransport, whose NWParameters disable proxies and
+    /// require that exact local endpoint.
+    public func probeCampusEgress(
+        configuration: AppConfiguration,
+        status: NetworkStatus
+    ) async -> NetworkStatus {
+        await probeInternet(
+            configuration: configuration,
+            status: status,
+            requiredSourceIP: status.sourceIP
+        )
+    }
+
+    private func probeInternet(
+        configuration: AppConfiguration,
+        status: NetworkStatus,
+        requiredSourceIP: String?
+    ) async -> NetworkStatus {
         guard status.gatewayReachable else { return status }
         let timeout = TimeInterval(max(1, configuration.network.timeoutSeconds))
-        let internet = await checkInternet(configuration.network, timeout: timeout)
+        let internet = await checkInternet(
+            configuration.network,
+            timeout: timeout,
+            requiredSourceIP: requiredSourceIP
+        )
         var result = status
         result.campusInternetOK = internet.ok
         result.internetReason = internet.reason
@@ -168,7 +199,8 @@ public final class NetworkProbe: NetworkProbing {
 
     private func checkInternet(
         _ configuration: NetworkConfiguration,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        requiredSourceIP: String?
     ) async -> (ok: Bool, reason: String, portalRedirect: Bool) {
         let defaults = NetworkConfiguration.default.testURLs
         var seen = Set<String>()
@@ -192,7 +224,7 @@ public final class NetworkProbe: NetworkProbing {
                     query: [:],
                     headers: ["User-Agent": Self.userAgent],
                     timeout: timeout,
-                    sourceIP: nil
+                    sourceIP: requiredSourceIP
                 )
                 let preview = String(response.bodyText.prefix(120))
                     .replacingOccurrences(of: "\n", with: " ")
@@ -211,7 +243,8 @@ public final class NetworkProbe: NetworkProbing {
                     preview: preview
                 ) {
                     successfulHosts.insert(host)
-                    logger.info("默认网络出口检测：可用 route=default url=\(host) status=\(response.statusCode)")
+                    let route = requiredSourceIP == nil ? "default" : "campus-bound"
+                    logger.info("网络出口检测：可用 route=\(route) endpoint=external status=\(response.statusCode)")
                     if successfulHosts.count >= 2 {
                         return (true, "ok", false)
                     }
@@ -225,7 +258,12 @@ public final class NetworkProbe: NetworkProbing {
         }
 
         let reason = failures.isEmpty ? "no_test_url" : failures.joined(separator: "; ")
-        logger.info("默认网络出口检测：不可用 route=default reason=\(reason)")
+        let route = requiredSourceIP == nil ? "default" : "campus-bound"
+        if requiredSourceIP == nil {
+            logger.info("网络出口检测：不可用 route=\(route) reason=\(reason)")
+        } else {
+            logger.info("网络出口检测：不可用 route=\(route) evidence=all_candidates_failed")
+        }
         return (false, reason, portalRedirect)
     }
 

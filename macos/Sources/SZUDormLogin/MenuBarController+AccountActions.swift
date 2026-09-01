@@ -4,7 +4,7 @@ import SZUNetCore
 @MainActor
 extension MenuBarController {
     @objc func loginNow() {
-        if model.campusProductController == nil, !model.passwordSaved {
+        if !model.passwordSaved {
             guard promptForPassword(title: "首次登录需要密码") else { return }
         }
         model.loginNow()

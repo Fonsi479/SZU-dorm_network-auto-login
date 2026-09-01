@@ -61,10 +61,14 @@ public final class DrCOMClient {
             )
             logger.info("宿舍区 Dr.COM 登录 HTTP 状态码=\(response.statusCode)")
             if response.statusCode >= 500 {
-                return LoginResult(
-                    status: .unknown,
-                    reason: "server_response_uncertain",
-                    httpStatus: response.statusCode,
+                return await recoverAmbiguousLogin(
+                    fallback: LoginResult(
+                        status: .unknown,
+                        reason: "server_response_uncertain",
+                        httpStatus: response.statusCode,
+                        sourceIP: sourceIP
+                    ),
+                    username: username,
                     sourceIP: sourceIP
                 )
             }
@@ -110,19 +114,29 @@ public final class DrCOMClient {
                     sourceIP: sourceIP
                 )
             case .none:
-                return LoginResult(
-                    status: .unknown,
-                    reason: "portal_interface_changed",
-                    httpStatus: response.statusCode,
+                return await recoverAmbiguousLogin(
+                    fallback: LoginResult(
+                        status: .unknown,
+                        reason: "portal_interface_changed",
+                        httpStatus: response.statusCode,
+                        sourceIP: sourceIP
+                    ),
+                    username: username,
                     sourceIP: sourceIP
                 )
             }
+        } catch is CancellationError {
+            return LoginResult(status: .failed, reason: "request_cancelled", sourceIP: sourceIP)
         } catch {
             logger.error("宿舍区 Dr.COM 登录请求异常：\(Self.safeError(error))", password: password)
             let detail = error.localizedDescription.lowercased()
             let reason = detail.contains("timeout") || detail.contains("connect")
                 ? "gateway_unreachable" : "request_exception"
-            return LoginResult(status: .failed, reason: reason, sourceIP: sourceIP)
+            return await recoverAmbiguousLogin(
+                fallback: LoginResult(status: .failed, reason: reason, sourceIP: sourceIP),
+                username: username,
+                sourceIP: sourceIP
+            )
         }
     }
 
@@ -146,22 +160,110 @@ public final class DrCOMClient {
     }
 
     public func isSessionOnline(username: String, sourceIP: String) async -> Bool? {
+        let status = await sessionStatus(username: username, sourceIP: sourceIP)
+        switch status.state {
+        case .online: return status.accountMatch == .matches
+        case .offline: return false
+        case .unknown, .blocked: return nil
+        }
+    }
+
+    /// Reads the Dorm portal's current terminal identity and account-wide
+    /// online list in one Core result.  The physical/private local MAC is never
+    /// consulted; device counts come solely from server-reported MAC/IP values.
+    public func sessionStatus(
+        username: String,
+        sourceIP: String
+    ) async -> ProviderSessionResult {
         let fact = await PortalSessionReader(
             configuration: configuration,
             transport: transport,
             logger: logger
         ).sessionFact(username: username, sourceIP: sourceIP)
-        switch fact.state {
-        case .online: return fact.matches(username: username, sourceIP: sourceIP)
-        case .offline: return false
-        case .unknown: return nil
+
+        let expectedAccount = PortalAccountNormalizer.normalize(
+            username,
+            prefix: configuration.auth.accountPrefix
+        )
+        let observedAccount = PortalAccountNormalizer.normalize(
+            fact.account,
+            prefix: configuration.auth.accountPrefix
+        )
+        let accountIdentityMatches: Bool? = if expectedAccount.isEmpty || observedAccount.isEmpty {
+            nil
+        } else {
+            expectedAccount == observedAccount
         }
+        let accountMatch: AccountMatch = switch accountIdentityMatches {
+        case .none: .unknown
+        case .some(true): .matches
+        case .some(false): .differs
+        }
+        let exactSession = fact.matches(
+            username: username,
+            sourceIP: sourceIP,
+            accountPrefix: configuration.auth.accountPrefix
+        )
+
+        // An offline result without a trustworthy online-list count must not
+        // proceed to credential access.  Keep a definitive online result when
+        // chkstatus/exact identity proved this Mac online; the coordinator will
+        // still avoid any login in that case.
+        let state: ProviderSessionState
+        let errorCode: String?
+        switch fact.state {
+        case .online:
+            state = exactSession ? .online : .unknown
+            errorCode = state == .unknown ? "SESSION_UNKNOWN" : nil
+        case .offline:
+            if fact.onlineDeviceCount == nil {
+                state = .unknown
+                errorCode = "SESSION_UNKNOWN"
+            } else {
+                state = .offline
+                errorCode = nil
+            }
+        case .unknown:
+            state = .unknown
+            errorCode = "SESSION_UNKNOWN"
+        }
+
+        return ProviderSessionResult(
+            state: state,
+            accountMatch: accountMatch,
+            exactOnlineRecordPresent: fact.exactOnlineRecordPresent,
+            clientIP: fact.ip.isEmpty ? IPv4CIDR.normalized(sourceIP) : fact.ip,
+            product: fact.account,
+            onlineDeviceCount: fact.onlineDeviceCount,
+            onlineDeviceLimit: fact.onlineDeviceLimit,
+            errorCode: errorCode
+        )
     }
 
     private func resolveSourceIP(for url: URL, timeout: TimeInterval) -> String {
         guard let host = url.host else { return "" }
         let port = UInt16(url.port ?? (url.scheme == "https" ? 443 : 80))
         return (try? SocketHTTPClient.sourceAddress(host: host, port: port, timeout: timeout)) ?? ""
+    }
+
+    private func recoverAmbiguousLogin(
+        fallback: LoginResult,
+        username: String,
+        sourceIP: String
+    ) async -> LoginResult {
+        guard !sourceIP.isEmpty, !Task.isCancelled else { return fallback }
+        let verified = await PortalSessionReader(
+            configuration: configuration,
+            transport: transport,
+            logger: logger
+        ).verifyLogin(username: username, sourceIP: sourceIP)
+        guard verified == true else { return fallback }
+        return LoginResult(
+            status: .success,
+            reason: "session_verified",
+            httpStatus: fallback.httpStatus,
+            sourceIP: sourceIP
+        )
     }
 
     private static func safeError(_ error: Error) -> String {

@@ -118,15 +118,23 @@ public final class LoginCoordinator {
             }
             try Task.checkCancellation()
             let client = clientFactory(configuration)
-            let online = await client.isSessionOnline(
+            let session = await client.sessionStatus(
                 username: configuration.user.username,
                 sourceIP: status.sourceIP
             )
-            if online == true {
+            if session.state == .online {
                 return unchanged("校园网会话已在线", "无需重复登录。", "session_already_online")
             }
-            guard online == false else {
+            guard session.state == .offline,
+                  session.errorCode != "SESSION_UNKNOWN" else {
                 return unchanged("会话状态无法确认", "为避免误发凭据，本轮未登录。", "session_unverified")
+            }
+            if Self.isAtDormDeviceLimit(session) {
+                return unchanged(
+                    "校园网在线设备已达上限",
+                    "检测到账号已有 3 台设备在线，本轮未读取或发送账号密码。",
+                    "AUTH_DEVICE_LIMIT"
+                )
             }
             try Task.checkCancellation()
             guard let password = try currentPassword(configuration: configuration), !password.isEmpty else {
@@ -146,6 +154,80 @@ public final class LoginCoordinator {
         } catch {
             logger.error("立即登录失败：\(error.localizedDescription)")
             return configurationFailure(title: "无法登录", error: error)
+        }
+    }
+
+    /// Explicit manual replacement for the legacy standalone Dorm app.  This
+    /// method is never called by `checkAndLogin`; it can only bypass the
+    /// confirmed Dorm 3/3 device-limit gate after the caller's confirmation.
+    public func forceLoginNow() async -> LoginActionResult {
+        guard let lease = try? operationLock.tryAcquire() else {
+            return operationInProgress("强制切换登录")
+        }
+        defer { lease.release() }
+
+        do {
+            let configuration = try currentConfiguration().validatedForLogin()
+            let status = networkProbe.probeGateway(configuration: configuration)
+            guard status.gatewayReachable else {
+                return unchanged(
+                    "非宿舍网络",
+                    "宿舍区网关不可达，本轮未读取或发送账号密码。",
+                    "gateway_unreachable"
+                )
+            }
+            let environment = networkProbe.classify(configuration: configuration, status: status)
+            guard environment.isDormNetwork,
+                  environment.autoLoginAvailable,
+                  !status.sourceIP.isEmpty else {
+                return unchanged(
+                    "未验证的宿舍网络",
+                    "仅允许在已验证的宿舍区网络执行强制切换，本轮未读取或发送账号密码。",
+                    "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED"
+                )
+            }
+            try Task.checkCancellation()
+            let client = clientFactory(configuration)
+            let session = await client.sessionStatus(
+                username: configuration.user.username,
+                sourceIP: status.sourceIP
+            )
+            if session.state == .online {
+                return unchanged("校园网会话已在线", "无需重复登录。", "session_already_online")
+            }
+            guard session.state == .offline,
+                  session.errorCode != "SESSION_UNKNOWN" else {
+                return unchanged(
+                    "会话状态无法确认",
+                    "为避免误发凭据，本轮未执行强制切换。",
+                    "session_unverified"
+                )
+            }
+            guard Self.isConfirmedDormDeviceLimit(session) else {
+                return unchanged(
+                    "未达到设备上限",
+                    "仅在确认账号已有 3 台设备在线时允许强制切换。",
+                    "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED"
+                )
+            }
+            try Task.checkCancellation()
+            guard let password = try currentPassword(configuration: configuration), !password.isEmpty else {
+                return missingPassword(auto: false)
+            }
+            try Task.checkCancellation()
+            logger.info("用户确认强制切换 Dorm 会话。")
+            let result = await client.login(
+                username: configuration.user.username,
+                password: password,
+                knownSourceIP: status.sourceIP
+            )
+            if Task.isCancelled { return cancelled() }
+            return LoginActionMapper.login(result)
+        } catch is CancellationError {
+            return cancelled()
+        } catch {
+            logger.error("强制切换登录失败：\(error.localizedDescription)")
+            return configurationFailure(title: "强制切换失败", error: error)
         }
     }
 
@@ -170,15 +252,23 @@ public final class LoginCoordinator {
             guard !pauseStore.isPaused else { return paused() }
 
             let client = clientFactory(configuration)
-            let online = await client.isSessionOnline(
+            let session = await client.sessionStatus(
                 username: configuration.user.username,
                 sourceIP: status.sourceIP
             )
-            if online == true {
+            if session.state == .online {
                 return unchanged("校园网会话已在线", "无需重复登录。", "session_already_online")
             }
-            guard online == false else {
+            guard session.state == .offline,
+                  session.errorCode != "SESSION_UNKNOWN" else {
                 return unchanged("会话状态无法确认", "为避免误发凭据，本轮未自动登录。", "session_unverified")
+            }
+            if Self.isAtDormDeviceLimit(session) {
+                return unchanged(
+                    "校园网在线设备已达上限",
+                    "检测到账号已有 3 台设备在线，本轮未读取或发送账号密码。",
+                    "AUTH_DEVICE_LIMIT"
+                )
             }
             try Task.checkCancellation()
             guard !pauseStore.isPaused else { return paused() }
@@ -240,6 +330,8 @@ public final class LoginCoordinator {
             "login_not_confirmed": "登录未确认", "session_verification_unavailable": "会话验证不可用",
             "portal_interface_changed": "门户接口变化", "server_response_uncertain": "服务器响应不确定",
             "server_failed": "门户返回失败", "request_exception": "网络请求异常",
+            "AUTH_DEVICE_LIMIT": "在线设备已达上限",
+            "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED": "不允许强制切换设备",
             "cancelled": "操作已取消",
         ]
         if reason.hasPrefix("http_status_") {
@@ -291,5 +383,16 @@ public final class LoginCoordinator {
             detail: error.localizedDescription,
             reason: "configuration_error"
         )
+    }
+
+    private static func isAtDormDeviceLimit(_ session: ProviderSessionResult) -> Bool {
+        return isConfirmedDormDeviceLimit(session)
+            || session.errorCode == "AUTH_DEVICE_LIMIT"
+    }
+
+    private static func isConfirmedDormDeviceLimit(_ session: ProviderSessionResult) -> Bool {
+        let limit = session.onlineDeviceLimit ?? CampusOnlineDevicePolicy.dormLimit
+        return limit == CampusOnlineDevicePolicy.dormLimit
+            && session.onlineDeviceCount.map { $0 >= limit } == true
     }
 }

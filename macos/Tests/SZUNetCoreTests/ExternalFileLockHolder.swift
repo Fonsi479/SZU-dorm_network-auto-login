@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 final class ExternalFileLockHolder {
@@ -22,8 +23,7 @@ final class ExternalFileLockHolder {
 
         let handshake = output.fileHandleForReading.readData(ofLength: 7)
         guard String(decoding: handshake, as: UTF8.self).contains("locked") else {
-            process.terminate()
-            process.waitUntilExit()
+            stop()
             throw NSError(
                 domain: "SZUNetCoreTests.ExternalFileLockHolder",
                 code: 1,
@@ -33,9 +33,23 @@ final class ExternalFileLockHolder {
     }
 
     func stop() {
-        guard process.isRunning else { return }
-        process.terminate()
-        process.waitUntilExit()
+        let pid = process.processIdentifier
+        guard pid > 0 else { return }
+        if Darwin.kill(pid, 0) == 0 {
+            _ = Darwin.kill(pid, SIGTERM)
+        }
+        let deadline = Date().addingTimeInterval(1)
+        var status: Int32 = 0
+        while true {
+            let result = Darwin.waitpid(pid, &status, WNOHANG)
+            if result == pid || (result == -1 && errno == ECHILD) { return }
+            if Date() >= deadline {
+                _ = Darwin.kill(pid, SIGKILL)
+                while Darwin.waitpid(pid, &status, 0) == -1, errno == EINTR {}
+                return
+            }
+            usleep(10_000)
+        }
     }
 
     deinit { stop() }

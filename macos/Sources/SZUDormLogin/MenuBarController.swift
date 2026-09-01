@@ -177,7 +177,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 self.campusCategoryMenuItem.title = "网络分类：\(snapshot?.category.rawValue ?? "unknown")"
                 let dormAccount = snapshot?.dorm.accountLabel ?? ""
                 let teachingAccount = snapshot?.teaching.accountLabel ?? ""
-                self.dormStatusMenuItem.title = "Dorm：\(snapshot?.dorm.lifecycle ?? "idle") · \(dormAccount.isEmpty ? "未设置标签" : dormAccount)"
+                let onlineDevices = snapshot.flatMap { value in
+                    value.onlineDeviceCount.map {
+                        " · 在线设备 \($0)/\(value.onlineDeviceLimit ?? 3)"
+                    }
+                } ?? ""
+                self.dormStatusMenuItem.title = "Dorm：\(snapshot?.dorm.lifecycle ?? "idle") · \(dormAccount.isEmpty ? "未设置标签" : dormAccount)\(onlineDevices)"
                 self.teachingStatusMenuItem.title = "Teaching：\(snapshot?.teaching.lifecycle ?? "idle") · \(teachingAccount.isEmpty ? "未设置标签" : teachingAccount)"
                 self.logoutMenuItem.isEnabled = !self.model.isBusy && snapshot?.category == .dorm
             }
@@ -205,6 +210,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             .sink { [weak self] seconds in self?.updateProbeInterval(seconds) }
             .store(in: &cancellables)
 
+        model.$automationOwnershipSnapshot
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateAutomationAvailability() }
+            .store(in: &cancellables)
+
         model.onResult = { [weak self] result, showAlert in
             self?.present(result: result, showAlert: showAlert)
         }
@@ -229,6 +239,25 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         loginMenuItem.isEnabled = !busy
         logoutMenuItem.isEnabled = !busy && model.campusSnapshot?.category == .dorm
         loginMenuItem.title = busy ? "正在处理…" : "立即登录"
+        updateAutomationAvailability()
+    }
+
+    private func updateAutomationAvailability() {
+        let enabled = model.isAutomationOwner && !model.isBusy
+        autoLoginMenuItem.isEnabled = enabled
+        probeMenuItem.isEnabled = enabled
+        probeIntervalMenuItem.isEnabled = enabled
+        probeInterval30MenuItem.isEnabled = enabled
+        probeInterval60MenuItem.isEnabled = enabled
+        probeInterval120MenuItem.isEnabled = enabled
+        probeInterval300MenuItem.isEnabled = enabled
+        if !model.isAutomationOwner {
+            probeMenuItem.toolTip = "自动化由其他客户端管理"
+            autoLoginMenuItem.toolTip = "自动化由其他客户端管理"
+        } else {
+            probeMenuItem.toolTip = nil
+            autoLoginMenuItem.toolTip = nil
+        }
     }
 
     private func updateStatus(text: String, tone: AppModel.StatusTone) {

@@ -7,12 +7,57 @@ public protocol CredentialStoring {
     func deletePassword(service: String, account: String) throws
 }
 
-public final class KeychainStore: CredentialStoring {
+public protocol AccessGroupCredentialStoring: CredentialStoring {
+    func password(service: String, account: String, accessGroup: String?) throws -> String?
+    func setPassword(_ password: String, service: String, account: String, accessGroup: String?) throws
+    func deletePassword(service: String, account: String, accessGroup: String?) throws
+}
+
+public extension AccessGroupCredentialStoring {
+    func password(service: String, account: String) throws -> String? {
+        try password(service: service, account: account, accessGroup: nil)
+    }
+
+    func setPassword(_ password: String, service: String, account: String) throws {
+        try setPassword(password, service: service, account: account, accessGroup: nil)
+    }
+
+    func deletePassword(service: String, account: String) throws {
+        try deletePassword(service: service, account: account, accessGroup: nil)
+    }
+}
+
+public struct CampusLegacyCredentialLocation: Equatable, Sendable {
+    public var provider: CampusProviderID?
+    public var service: String?
+    public var accessGroup: String?
+
+    public init(
+        provider: CampusProviderID? = nil,
+        service: String? = nil,
+        accessGroup: String? = nil
+    ) {
+        self.provider = provider
+        self.service = service
+        self.accessGroup = accessGroup
+    }
+}
+
+public enum CampusCredentialAccessMode: Equatable, Sendable {
+    case local
+    case shared(accessGroup: String, legacyLocations: [CampusLegacyCredentialLocation])
+}
+
+public final class KeychainStore: AccessGroupCredentialStoring {
     public init() {}
 
     public func password(service: String, account: String) throws -> String? {
+        try password(service: service, account: account, accessGroup: nil)
+    }
+
+    public func password(service: String, account: String, accessGroup: String?) throws -> String? {
         guard !service.isEmpty, !account.isEmpty else { return nil }
-        var query = baseQuery(service: service, account: account)
+        var query = baseQuery(service: service, account: account, accessGroup: accessGroup)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -28,6 +73,10 @@ public final class KeychainStore: CredentialStoring {
     }
 
     public func setPassword(_ password: String, service: String, account: String) throws {
+        try setPassword(password, service: service, account: account, accessGroup: nil)
+    }
+
+    public func setPassword(_ password: String, service: String, account: String, accessGroup: String?) throws {
         guard !service.isEmpty else {
             throw SZUNetError.credential("钥匙串服务名不能为空。")
         }
@@ -38,7 +87,7 @@ public final class KeychainStore: CredentialStoring {
             throw SZUNetError.credential("密码不能为空。")
         }
 
-        let query = baseQuery(service: service, account: account)
+        let query = baseQuery(service: service, account: account, accessGroup: accessGroup)
         let data = Data(password.utf8)
         let updateStatus = SecItemUpdate(
             query as CFDictionary,
@@ -55,18 +104,27 @@ public final class KeychainStore: CredentialStoring {
     }
 
     public func deletePassword(service: String, account: String) throws {
-        let status = SecItemDelete(baseQuery(service: service, account: account) as CFDictionary)
+        try deletePassword(service: service, account: account, accessGroup: nil)
+    }
+
+    public func deletePassword(service: String, account: String, accessGroup: String?) throws {
+        let status = SecItemDelete(baseQuery(service: service, account: account, accessGroup: accessGroup) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw keychainError(status)
         }
     }
 
-    private func baseQuery(service: String, account: String) -> [String: Any] {
-        [
+    private func baseQuery(service: String, account: String, accessGroup: String?) -> [String: Any] {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
+        if let accessGroup, !accessGroup.isEmpty {
+            query[kSecAttrAccessGroup as String] = accessGroup
+            query[kSecUseDataProtectionKeychain as String] = true
+        }
+        return query
     }
 
     private func keychainError(_ status: OSStatus) -> SZUNetError {

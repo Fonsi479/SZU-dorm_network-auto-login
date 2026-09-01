@@ -36,15 +36,15 @@ jobs:
 
       - name: Build non-publishing macOS release candidate
         if: github.event_name != 'pull_request'
-        run: python3 scripts/build_macos_release.py --version 2.0.0 --release-label beta.1
+        run: python3 scripts/build_macos_release.py --version 2.0.0 --release-label beta.2
 
       - name: Upload macOS release candidate
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: SZU-Campus-Network-macOS-v2.0.0-beta.1
+          name: SZU-Campus-Network-macOS-v2.0.0-beta.2
           path: |
-            dist/release/SZU-Campus-Network-macOS-v2.0.0-beta.1.zip
-            dist/release/SZU-Campus-Network-macOS-v2.0.0-beta.1.zip.sha256
+            dist/release/SZU-Campus-Network-macOS-v2.0.0-beta.2.zip
+            dist/release/SZU-Campus-Network-macOS-v2.0.0-beta.2.zip.sha256
           if-no-files-found: error
           retention-days: 30

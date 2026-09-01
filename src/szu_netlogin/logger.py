@@ -48,6 +48,19 @@ SENSITIVE_PATTERNS = (
     (re.compile(r"\{MD5\}[0-9a-fA-F]+"), "[derived_password_redacted]"),
     (re.compile(r"\{SRBX1\}[^&\s),]+"), "[srun_info_redacted]"),
 )
+_DEVICE_ID_FIELD_PATTERN = re.compile(
+    r"(?i)((?:[\"'])?(?:online_ip|v46ip|ss5|v4ip|olip|source_ip|"
+    r"online_mac|ss4|olmac|nas_ip|wlan_user_ip|wlan_user_mac|"
+    r"wlanacip|wlan_ac_ip|ac_ip|nasname|wlan_ac_name)(?:[\"'])?\s*[:=]\s*[\"']?)"
+    r"[^,;\s\"'\]}]+"
+)
+
+
+class _RedactingFormatter(logging.Formatter):
+    """Apply the same identifier filter to every persisted log record."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_sensitive_text(super().format(record))
 
 
 def redact_sensitive_text(text: object, password: str | None = None) -> str:
@@ -62,6 +75,11 @@ def redact_sensitive_text(text: object, password: str | None = None) -> str:
 
     for pattern, replacement in SENSITIVE_PATTERNS:
         value = pattern.sub(replacement, value)
+
+    # Portal/session responses and exception strings may include device
+    # identity fields that are not credentials.  Keep the field names and
+    # surrounding structure for diagnostics, but never persist their values.
+    value = _DEVICE_ID_FIELD_PATTERN.sub(r"\1[device_id_redacted]", value)
 
     return value
 
@@ -104,7 +122,7 @@ def _add_file_handler(logger: logging.Logger, log_file: Path) -> bool:
         return False
 
     file_handler.setFormatter(
-        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        _RedactingFormatter("%(asctime)s [%(levelname)s] %(message)s")
     )
     logger.addHandler(file_handler)
     return True

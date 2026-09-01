@@ -108,7 +108,72 @@ public actor CampusNetworkCoordinator {
         context: CampusNetworkContext,
         username: String,
         requestedProvider: CampusProviderID? = nil,
-        automatic: Bool = false
+        automatic: Bool = false,
+        credentialAuthorization: (@Sendable () async -> Bool)? = nil
+    ) async -> ProviderAuthResult {
+        return await executeLogin(
+            context: context,
+            username: username,
+            requestedProvider: requestedProvider,
+            automatic: automatic,
+            allowDeviceReplacement: false,
+            allowMissingExactDormSession: false,
+            credentialAuthorization: credentialAuthorization
+        )
+    }
+
+    /// Re-evaluates a Dorm session after a source-bound, proxy-free external
+    /// probe failed. This path may treat an authoritative missing exact online
+    /// record as recoverable, but it never replaces another device.
+    public func recoverStaleDormSession(
+        context: CampusNetworkContext,
+        username: String,
+        credentialAuthorization: (@Sendable () async -> Bool)? = nil
+    ) async -> ProviderAuthResult {
+        await executeLogin(
+            context: context,
+            username: username,
+            requestedProvider: .dorm,
+            automatic: true,
+            allowDeviceReplacement: false,
+            allowMissingExactDormSession: true,
+            credentialAuthorization: credentialAuthorization
+        )
+    }
+
+    /// Performs an explicitly confirmed Dorm session replacement.  This path
+    /// is intentionally separate from `login` so automatic callers cannot
+    /// accidentally opt into evicting another device.
+    public func forceLogin(
+        context: CampusNetworkContext,
+        username: String,
+        requestedProvider: CampusProviderID? = nil
+    ) async -> ProviderAuthResult {
+        guard requestedProvider == nil || requestedProvider == .dorm else {
+            return .blocked(
+                requestedProvider ?? .dorm,
+                "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED"
+            )
+        }
+        return await executeLogin(
+            context: context,
+            username: username,
+            requestedProvider: requestedProvider,
+            automatic: false,
+            allowDeviceReplacement: true,
+            allowMissingExactDormSession: false,
+            credentialAuthorization: nil
+        )
+    }
+
+    private func executeLogin(
+        context: CampusNetworkContext,
+        username: String,
+        requestedProvider: CampusProviderID?,
+        automatic: Bool,
+        allowDeviceReplacement: Bool,
+        allowMissingExactDormSession: Bool,
+        credentialAuthorization: (@Sendable () async -> Bool)?
     ) async -> ProviderAuthResult {
         guard context.generation == generation else {
             return .blocked(requestedProvider ?? .dorm, "ENV_NETWORK_CHANGED")
@@ -144,7 +209,10 @@ public actor CampusNetworkCoordinator {
                 settings: currentSettings,
                 fatalErrors: fatalSnapshot,
                 backoffUntil: backoffSnapshot,
-                now: now
+                now: now,
+                allowDeviceReplacement: allowDeviceReplacement,
+                allowMissingExactDormSession: allowMissingExactDormSession,
+                credentialAuthorization: credentialAuthorization
             )
         }
         activeTask = task
@@ -301,7 +369,10 @@ public actor CampusNetworkCoordinator {
         settings: CampusCoordinatorSettings,
         fatalErrors: [CampusProviderID: String],
         backoffUntil: [CampusProviderID: Date],
-        now: Date
+        now: Date,
+        allowDeviceReplacement: Bool,
+        allowMissingExactDormSession: Bool,
+        credentialAuthorization: (@Sendable () async -> Bool)?
     ) async -> ProviderAuthResult {
         var probes: [ProviderProbe] = []
         for provider in providers {
@@ -334,18 +405,93 @@ public actor CampusNetworkCoordinator {
         }
         let session = await provider.sessionStatus(context, probe: probe, username: username)
         guard !Task.isCancelled else { return cancelled(probe.providerID) }
-        if session.state == .online, session.accountMatch == .matches {
-            return ProviderAuthResult(
-                outcome: .unchanged,
-                providerID: probe.providerID,
-                sessionState: .online,
-                accountMatch: .matches,
-                clientIP: session.clientIP,
-                errorCode: "SESSION_ONLINE"
+        if allowMissingExactDormSession {
+            guard probe.providerID == .dorm else {
+                return .blocked(probe.providerID, "PROVIDER_DISABLED", session: session)
+            }
+            switch session.exactOnlineRecordPresent {
+            case .some(true):
+                return .blocked(
+                    probe.providerID,
+                    "NET_CAMPUS_EGRESS_UNAVAILABLE",
+                    session: session
+                )
+            case .some(false):
+                guard session.accountMatch != .differs,
+                      session.onlineDeviceCount != nil,
+                      session.onlineDeviceLimit == CampusOnlineDevicePolicy.dormLimit else {
+                    return .blocked(probe.providerID, "SESSION_UNKNOWN", session: session)
+                }
+            case .none:
+                return .blocked(probe.providerID, "SESSION_UNKNOWN", session: session)
+            }
+        } else {
+            if session.state == .online, session.accountMatch == .matches {
+                return ProviderAuthResult(
+                    outcome: .unchanged,
+                    providerID: probe.providerID,
+                    sessionState: .online,
+                    accountMatch: .matches,
+                    clientIP: session.clientIP,
+                    onlineDeviceCount: session.onlineDeviceCount,
+                    onlineDeviceLimit: session.onlineDeviceLimit,
+                    errorCode: "SESSION_ONLINE"
+                )
+            }
+            guard session.state == .offline else {
+                return .blocked(
+                    probe.providerID,
+                    session.errorCode ?? "SESSION_UNKNOWN",
+                    session: session
+                )
+            }
+        }
+
+        // A real Dorm provider always reports the fixed limit even when the
+        // portal list itself is unavailable.  That combination (known policy,
+        // unknown count) is fail-closed and must never fall through to a
+        // credential read.  Legacy provider doubles that predate the count
+        // fields leave both values nil and retain their existing behavior.
+        if probe.providerID == .dorm,
+           session.onlineDeviceLimit != nil,
+           session.onlineDeviceCount == nil {
+            return .blocked(probe.providerID, "SESSION_UNKNOWN", session: session)
+        }
+
+        // A Dorm count is authoritative only when the portal supplied both
+        // values.  Unknown counts are handled by the provider as an unknown
+        // session and never reach credential access.  The fixed policy fallback
+        // keeps compatibility with older provider implementations that expose
+        // only the optional count field.
+        let configuredLimit = session.onlineDeviceLimit ?? CampusOnlineDevicePolicy.dormLimit
+        let confirmedAtDeviceLimit = probe.providerID == .dorm
+            && configuredLimit == CampusOnlineDevicePolicy.dormLimit
+            && session.onlineDeviceCount.map { $0 >= configuredLimit } == true
+        let atDeviceLimit = confirmedAtDeviceLimit
+            || session.errorCode == "AUTH_DEVICE_LIMIT"
+        if atDeviceLimit {
+            guard allowDeviceReplacement else {
+                return .blocked(probe.providerID, "AUTH_DEVICE_LIMIT", session: session)
+            }
+            guard confirmedAtDeviceLimit else {
+                return .blocked(
+                    probe.providerID,
+                    "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED",
+                    session: session
+                )
+            }
+        } else if allowDeviceReplacement {
+            // Force replacement is not a general login bypass.  Requiring a
+            // confirmed Dorm 3/3 result prevents callers from using it to skip
+            // an ordinary session or environment gate.
+            return .blocked(
+                probe.providerID,
+                "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED",
+                session: session
             )
         }
-        guard session.state == .offline else {
-            return .blocked(probe.providerID, session.errorCode ?? "SESSION_UNKNOWN")
+        if let credentialAuthorization, !(await credentialAuthorization()) {
+            return .blocked(probe.providerID, "AUTOMATION_OWNER_CONFLICT")
         }
         let credential: CredentialHandle
         do {
@@ -407,7 +553,7 @@ public actor CampusNetworkCoordinator {
     }
 
     private static let fatalCodes: Set<String> = [
-        "AUTH_BAD_PASSWORD", "AUTH_ACCOUNT_NOT_FOUND", "AUTH_DEVICE_LIMIT",
+        "AUTH_BAD_PASSWORD", "AUTH_ACCOUNT_NOT_FOUND",
         "AUTH_ACCOUNT_BLOCKED", "AUTH_PRODUCT_SUFFIX_INVALID", "NET_TLS_FAILED",
         "CRED_STORE_FAILURE", "CRED_MIGRATION_REQUIRED",
     ]

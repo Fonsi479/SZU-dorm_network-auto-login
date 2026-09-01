@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from src.szu_netlogin.dorm_drcom_client import (
+    DORM_ONLINE_DEVICE_LIMIT,
     DormDrcomClient,
+    LoginResult,
     PortalOnlineListResult,
     PortalSessionFact,
     PortalStatusResult,
     PortalTerminalParams,
     _build_portal_terminal_params,
     _ip_to_parse_int,
+    _account_online_records,
     _select_online_record,
 )
+from src.szu_netlogin.contracts import CredentialHandle, NetworkContext, ProviderProbe, Support
+from src.szu_netlogin.providers.dorm_drcom import DormDrcomProvider
 
 
 class DormDrcomResponseTests(unittest.TestCase):
@@ -130,6 +135,149 @@ class DormDrcomResponseTests(unittest.TestCase):
 
 
 class PortalSessionTests(unittest.TestCase):
+    def test_account_online_device_count_deduplicates_server_mac_and_ip(self) -> None:
+        records = [
+            {"user_account": ",1, 481505", "online_ip": "172.24.1.10", "online_mac": "AA-AA-AA-AA-AA-AA"},
+            # Same server MAC is one device even when the IP changes.
+            {"user_account": "481505", "online_ip": "172.24.1.11", "online_mac": "aaaaaaaaaaaa"},
+            # All-zero MAC is a sentinel; this device falls back to its IP.
+            {"user_account": "481505", "online_ip": "172.24.1.12", "online_mac": "000000000000"},
+            {"user_account": " 481505 ", "online_ip": "172.24.1.12", "online_mac": "000000000000"},
+            {"user_account": "other", "online_ip": "172.24.1.13", "online_mac": "bbbbbbbbbbbb"},
+        ]
+        account_records, count, reliable = _account_online_records(
+            records,
+            "481505",
+            account_prefix=",1,",
+        )
+        self.assertTrue(reliable)
+        self.assertEqual(len(account_records), 4)
+        self.assertEqual(count, 2)
+
+    def test_malformed_online_list_makes_count_unknown(self) -> None:
+        records = [
+            {"user_account": "481505", "online_ip": "172.24.1.10"},
+            "malformed-record",
+        ]
+        _account_records, count, reliable = _account_online_records(records, "481505")
+        self.assertIsNone(count)
+        self.assertFalse(reliable)
+
+        missing_account = [
+            {"user_account": "481505", "online_ip": "172.24.1.10"},
+            {"online_ip": "172.24.1.11", "online_mac": "bbbbbbbbbbbb"},
+        ]
+        _account_records, count, reliable = _account_online_records(
+            missing_account, "481505"
+        )
+        self.assertIsNone(count)
+        self.assertFalse(reliable)
+
+    def test_online_device_count_saturates_at_public_limit(self) -> None:
+        records = [
+            {
+                "user_account": "481505",
+                "online_ip": f"172.24.1.{index}",
+                "online_mac": f"aaaaaaaaaa{index:02d}",
+            }
+            for index in range(10, 14)
+        ]
+        _account_records, count, reliable = _account_online_records(records, "481505")
+        self.assertTrue(reliable)
+        self.assertEqual(count, DORM_ONLINE_DEVICE_LIMIT)
+
+    def test_mac_row_and_mac_missing_duplicate_share_one_device(self) -> None:
+        records = [
+            {
+                "user_account": "481505",
+                "online_ip": "172.24.1.10",
+                "online_mac": "aaaaaaaaaaaa",
+            },
+            {
+                "user_account": "481505",
+                "online_ip": "172.24.1.10",
+                "online_mac": "000000000000",
+            },
+        ]
+        _account_records, count, reliable = _account_online_records(records, "481505")
+        self.assertTrue(reliable)
+        self.assertEqual(count, 1)
+
+    def test_session_fact_carries_account_device_limit(self) -> None:
+        client = DormDrcomClient(_test_config())
+        status = PortalStatusResult(
+            readable=True,
+            declared_online=False,
+            account="481505",
+            ip="172.24.182.13",
+        )
+        online = PortalOnlineListResult(
+            readable=True,
+            device_count=DORM_ONLINE_DEVICE_LIMIT,
+            count_reliable=True,
+        )
+        with (
+            patch.object(client, "_fetch_portal_status", return_value=status),
+            patch.object(client, "_fetch_online_list", return_value=online),
+        ):
+            fact = client.session_fact("481505", "172.24.182.13")
+
+        self.assertEqual(fact.state, "offline")
+        self.assertEqual(fact.online_device_count, DORM_ONLINE_DEVICE_LIMIT)
+        self.assertEqual(fact.online_device_limit, DORM_ONLINE_DEVICE_LIMIT)
+
+    def test_provider_success_refreshes_one_rich_session_fact_for_device_count(self) -> None:
+        client = Mock()
+        client.login_with_result.return_value = LoginResult(
+            "success",
+            source_ip="172.24.182.13",
+        )
+        client.session_fact.return_value = PortalSessionFact(
+            state="online",
+            account="481505",
+            ip="172.24.182.13",
+            online_device_count=3,
+        )
+        provider = DormDrcomProvider(_test_config(), client_factory=lambda _config: client)
+        context = NetworkContext(
+            generation=0,
+            source_ip="172.24.182.13",
+            source_route_bound=True,
+            portal_identity_verified=True,
+        )
+        probe = ProviderProbe(
+            "dorm",
+            Support.VERIFIED,
+            source_ip="172.24.182.13",
+        )
+
+        result = provider.login(context, probe, "481505", CredentialHandle("secret"))
+
+        self.assertEqual(result.outcome.value, "succeeded")
+        self.assertEqual((result.online_device_count, result.online_device_limit), (3, 3))
+        client.session_fact.assert_called_once_with("481505", "172.24.182.13")
+
+    def test_online_list_and_logout_parameter_logs_never_include_device_values(self) -> None:
+        client = DormDrcomClient(_test_config())
+        client.logger = Mock()
+        response = _Response(
+            'dr9999({"list":[{"user_account":"481505",'
+            '"online_ip":"172.24.1.10","online_mac":"aabbccddeeff",'
+            '"nas_ip":"12345"}]});'
+        )
+        with patch.object(client, "_get_portal_api_url", return_value="http://172.30.255.42:801/eportal/portal/"), patch.object(
+            client.session, "get", return_value=response
+        ):
+            client._fetch_online_list("481505", "172.24.1.10")
+
+        rendered = " ".join(
+            str(call.args[0]) + " " + " ".join(map(str, call.args[1:]))
+            for call in client.logger.info.call_args_list
+        )
+        self.assertNotIn("172.24.1.10", rendered)
+        self.assertNotIn("aabbccddeeff", rendered)
+        self.assertNotIn("12345", rendered)
+
     def test_session_fact_uses_exact_server_identity(self) -> None:
         client = DormDrcomClient(_test_config())
         status = PortalStatusResult(
@@ -265,6 +413,7 @@ class PortalLogoutTests(unittest.TestCase):
     @patch("src.szu_netlogin.dorm_drcom_client._get_source_ip", return_value="172.24.182.13")
     def test_logout_calls_server_mac_unbind_before_portal_logout(self, _get_source_ip) -> None:
         client = DormDrcomClient(_test_config())
+        client.logger = Mock()
         before = PortalSessionFact(
             state="online",
             account="481505",
@@ -301,6 +450,12 @@ class PortalLogoutTests(unittest.TestCase):
         self.assertEqual(get.call_args_list[0].kwargs["params"]["wlan_user_mac"], "9eb56a2011e4")
         self.assertEqual(get.call_args_list[1].kwargs["params"]["wlan_user_mac"], "000000000000")
         self.assertTrue(all(not call.kwargs["allow_redirects"] for call in get.call_args_list))
+        rendered = " ".join(
+            str(call.args[0]) + " " + " ".join(map(str, call.args[1:]))
+            for call in client.logger.info.call_args_list
+        )
+        self.assertNotIn("172.24.182.13", rendered)
+        self.assertNotIn("9eb56a2011e4", rendered)
 
 
 class _Response:

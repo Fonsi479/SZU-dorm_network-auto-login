@@ -4,6 +4,9 @@ public enum CampusCLICommand: String, Codable, CaseIterable, Sendable {
     case status
     case check
     case login
+    /// Explicitly acknowledged Dorm 3/3 session replacement.  UI/CLI callers
+    /// must obtain a user confirmation before dispatching this command.
+    case forceLogin = "force-login"
     case logout
     case pause
     case resume
@@ -63,6 +66,8 @@ public struct CampusCLIResponse: Encodable, Equatable, Sendable {
     public var provider: String
     public var networkContext: String
     public var sessionState: ProviderSessionState
+    public var onlineDeviceCount: Int?
+    public var onlineDeviceLimit: Int?
     public var errorCode: String?
     public var retryable: Bool
     public var automaticEnabled: Bool?
@@ -79,6 +84,8 @@ public struct CampusCLIResponse: Encodable, Equatable, Sendable {
         provider: String = "none",
         networkContext: String = "unknown",
         sessionState: ProviderSessionState = .unknown,
+        onlineDeviceCount: Int? = nil,
+        onlineDeviceLimit: Int? = nil,
         errorCode: String? = nil,
         retryable: Bool = false,
         automaticEnabled: Bool? = nil,
@@ -95,6 +102,8 @@ public struct CampusCLIResponse: Encodable, Equatable, Sendable {
         self.provider = provider
         self.networkContext = networkContext
         self.sessionState = sessionState
+        self.onlineDeviceCount = onlineDeviceCount
+        self.onlineDeviceLimit = onlineDeviceLimit
         self.errorCode = errorCode
         self.retryable = retryable
         self.automaticEnabled = automaticEnabled
@@ -128,6 +137,8 @@ public struct CampusCLIResponse: Encodable, Equatable, Sendable {
         case provider
         case networkContext
         case sessionState
+        case onlineDeviceCount
+        case onlineDeviceLimit
         case errorCode
         case retryable
         case automaticEnabled
@@ -147,6 +158,8 @@ public struct CampusCLIResponse: Encodable, Equatable, Sendable {
         try container.encode(provider, forKey: .provider)
         try container.encode(networkContext, forKey: .networkContext)
         try container.encode(sessionState, forKey: .sessionState)
+        try container.encodeIfPresent(onlineDeviceCount, forKey: .onlineDeviceCount)
+        try container.encodeIfPresent(onlineDeviceLimit, forKey: .onlineDeviceLimit)
         try container.encode(errorCode, forKey: .errorCode)
         try container.encode(retryable, forKey: .retryable)
         try container.encodeIfPresent(automaticEnabled, forKey: .automaticEnabled)

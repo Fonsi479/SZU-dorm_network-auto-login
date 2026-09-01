@@ -40,6 +40,7 @@ sanitizedDiagnostics
 ```text
 state: online | offline | unknown | blocked
 accountMatch: true | false | unknown
+exactOnlineRecordPresent: true | false | unknown
 clientIP
 product
 serverCode
@@ -47,7 +48,9 @@ message
 retryable
 ```
 
-`unknown` 不得被 Coordinator 当作 `offline`。
+`unknown` 不得被 Coordinator 当作 `offline`。只有 Dorm 自动恢复在直连外网检测已失败、
+`exactOnlineRecordPresent=false` 且设备数已知并小于 3 时，才可进入一次普通登录；
+该例外不适用于手动登录、Teaching 或 `force-login`。
 
 ## AuthResult
 

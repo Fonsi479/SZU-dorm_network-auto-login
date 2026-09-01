@@ -103,14 +103,17 @@ class PauseStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             pause_file = Path(temp_dir) / "paused"
             pause_file.write_text(json.dumps({"mode": "manual"}), encoding="utf-8")
+            lock_api = state.fcntl if state.fcntl is not None else state.msvcrt
+            method = "flock" if state.fcntl is not None else "locking"
+            exclusive = state.fcntl.LOCK_EX if state.fcntl is not None else state.msvcrt.LK_LOCK
             with (
                 patch("src.szu_netlogin.state.PAUSE_FLAG_FILE", pause_file),
-                patch.object(state.fcntl, "flock", side_effect=OSError("lock unavailable")) as flock,
+                patch.object(lock_api, method, side_effect=OSError("lock unavailable")) as lock,
             ):
                 self.assertTrue(state.is_paused())
                 self.assertIn("lock_or_read_error", state.describe_pause_state())
-                self.assertEqual(flock.call_count, 2)
-                self.assertTrue(all(call.args[1] == state.fcntl.LOCK_EX for call in flock.call_args_list))
+                self.assertEqual(lock.call_count, 2)
+                self.assertTrue(all(call.args[1] == exclusive for call in lock.call_args_list))
 
 
 if __name__ == "__main__":

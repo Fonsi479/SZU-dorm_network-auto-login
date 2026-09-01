@@ -4,6 +4,10 @@ public enum SZUNETCommand: String, Codable, CaseIterable, Hashable, Sendable {
     case status
     case check
     case login
+    /// Explicitly acknowledged Dorm device-limit takeover. This command is
+    /// never issued by automatic-login lanes; callers must obtain a visible
+    /// user confirmation before dispatching it.
+    case forceLogin = "force-login"
     case logout
     case pause
     case resume
@@ -119,6 +123,12 @@ public struct SZUNETCommandResult: Equatable, Sendable {
     public let ownerAppRunning: Bool?
     public let networkProbeEnabled: Bool?
     public let probeIntervalSeconds: Int?
+    /// Number of distinct Dorm sessions reported by the portal.  This is
+    /// optional for compatibility with older CLI/Runtime responses.
+    public let onlineDeviceCount: Int?
+    /// Maximum number of concurrent Dorm sessions.  Optional so old schema-v1
+    /// responses continue to decode; current clients use 3 when present.
+    public let onlineDeviceLimit: Int?
     public let observedAt: Date?
 
     public init(
@@ -134,6 +144,8 @@ public struct SZUNETCommandResult: Equatable, Sendable {
         ownerAppRunning: Bool? = nil,
         networkProbeEnabled: Bool? = nil,
         probeIntervalSeconds: Int? = nil,
+        onlineDeviceCount: Int? = nil,
+        onlineDeviceLimit: Int? = nil,
         observedAt: Date? = nil
     ) {
         self.schemaVersion = schemaVersion
@@ -148,6 +160,8 @@ public struct SZUNETCommandResult: Equatable, Sendable {
         self.ownerAppRunning = ownerAppRunning
         self.networkProbeEnabled = networkProbeEnabled
         self.probeIntervalSeconds = probeIntervalSeconds
+        self.onlineDeviceCount = onlineDeviceCount
+        self.onlineDeviceLimit = onlineDeviceLimit
         self.observedAt = observedAt
     }
 
@@ -183,10 +197,12 @@ enum SZUNETStableCode {
         "AUTH_ACCOUNT_NOT_FOUND",
         "AUTH_BAD_PASSWORD",
         "AUTH_DEVICE_LIMIT",
+        "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED",
         "AUTH_IP_ALREADY_ONLINE",
         "AUTH_NOT_CONFIRMED",
         "AUTH_PRODUCT_SUFFIX_INVALID",
         "AUTH_SERVER_RATE_LIMIT",
+        "AUTOMATION_OWNER_CONFLICT",
         "CFG_INVALID",
         "CRED_MIGRATION_REQUIRED",
         "CRED_MISSING",
@@ -198,6 +214,7 @@ enum SZUNETStableCode {
         "ENV_SOURCE_ROUTE_UNVERIFIED",
         "INTERNAL_ERROR",
         "NET_DNS_FAILED",
+        "NET_CAMPUS_EGRESS_UNAVAILABLE",
         "NET_PROXY_INTERCEPTED",
         "NET_TIMEOUT",
         "NET_TLS_FAILED",
@@ -234,7 +251,7 @@ public struct SZUNETSnapshot: Equatable, Sendable {
         adapterEnabled: Bool = false,
         status: SZUNETCommandResult? = nil,
         lastAction: SZUNETCommandResult? = nil,
-        detail: String = "适配已关闭；不会启动独立校园网 CLI。"
+        detail: String = "校园网功能已关闭；不会读取状态或发送认证请求。"
     ) {
         self.adapterEnabled = adapterEnabled
         self.status = status

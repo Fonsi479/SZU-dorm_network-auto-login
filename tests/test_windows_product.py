@@ -22,10 +22,11 @@ from src.szu_netlogin.windows_product import (
     WindowsEnvironmentDetector,
     WindowsCampusService,
     get_process_service,
+    set_provider_account,
     set_process_service_for_testing,
     set_provider_enabled,
 )
-from src.szu_netlogin.portal_detect import SourceAddressAdapter
+from src.szu_netlogin.portal_detect import InternetProbe, SourceAddressAdapter
 from src.szu_netlogin.srun_portal import RequestsSRunTransport
 
 
@@ -56,13 +57,14 @@ class FakeDetector:
 
 
 class FakeProvider:
-    def __init__(self, provider_id, *, session=SessionState.OFFLINE, login_result=None):
+    def __init__(self, provider_id, *, session=SessionState.OFFLINE, login_result=None, session_result=None):
         self.provider_id = provider_id
         self.session = session
         self.login_calls = 0
         self.login_result = login_result or AuthResult(
             AuthOutcome.SUCCEEDED, provider_id, session_state=SessionState.ONLINE
         )
+        self.session_result = session_result
         self.cancelled = []
         self.session_hook = None
 
@@ -72,6 +74,8 @@ class FakeProvider:
     def session_status(self, context, probe, username):
         if self.session_hook:
             self.session_hook()
+        if self.session_result is not None:
+            return self.session_result
         return SessionResult(self.session, account_match=self.session == SessionState.ONLINE)
 
     def login(self, context, probe, username, credential):
@@ -102,17 +106,39 @@ class FakeProcessLock:
 
 
 class WindowsProductTests(unittest.TestCase):
+    def setUp(self):
+        # Product tests own their pause state; a developer VM may contain a
+        # legitimate user pause marker that must neither affect nor be removed
+        # by the suite.
+        self.pause_patcher = patch(
+            "src.szu_netlogin.windows_product.is_paused",
+            return_value=False,
+        )
+        self.pause_patcher.start()
+
     def tearDown(self):
         set_process_service_for_testing(None)
+        self.pause_patcher.stop()
 
-    def service(self, configuration=None, category="dorm", providers=None, process_lock=None):
+    def service(
+        self,
+        configuration=None,
+        category="dorm",
+        providers=None,
+        process_lock=None,
+        direct_egress_probe=None,
+    ):
         configuration = configuration or config()
         providers = providers or {"dorm": FakeProvider("dorm"), "teaching": FakeProvider("teaching")}
+        kwargs = {}
+        if direct_egress_probe is not None:
+            kwargs["direct_egress_probe"] = direct_egress_probe
         return WindowsCampusService(
             config_loader=lambda: configuration,
             detector=FakeDetector(category),
             provider_factory=lambda _: providers,
             process_lock=process_lock or FakeProcessLock(),
+            **kwargs,
         )
 
     def test_status_never_reads_credentials(self):
@@ -148,6 +174,150 @@ class WindowsProductTests(unittest.TestCase):
             result = self.service().login("auto")
         self.assertEqual(result.outcome, AuthOutcome.SUCCEEDED)
         get_password.assert_called_once_with(ANY, "dorm")
+
+    def test_dorm_device_limit_reads_zero_credentials_and_sends_zero_login(self):
+        provider = FakeProvider(
+            "dorm",
+            session_result=SessionResult(
+                SessionState.UNKNOWN,
+                error_code="AUTH_DEVICE_LIMIT",
+                online_device_count=3,
+                online_device_limit=3,
+            ),
+        )
+        service = self.service(
+            providers={"dorm": provider, "teaching": FakeProvider("teaching")}
+        )
+        with patch("src.szu_netlogin.windows_product.get_provider_password") as get_password:
+            result = service.login("dorm", manual=True)
+        self.assertEqual(result.error_code, "AUTH_DEVICE_LIMIT")
+        self.assertEqual((provider.login_calls, get_password.call_count), (0, 0))
+
+    def test_recovery_logs_in_once_when_direct_egress_fails_and_exact_record_is_absent(self):
+        provider = FakeProvider(
+            "dorm",
+            session_result=SessionResult(
+                SessionState.ONLINE,
+                account_match=False,
+                exact_online_record_present=False,
+                online_device_count=2,
+                online_device_limit=3,
+            ),
+        )
+        direct = Mock(return_value=InternetProbe(False, "timeout", route="campus-direct"))
+        service = self.service(
+            providers={"dorm": provider, "teaching": FakeProvider("teaching")},
+            direct_egress_probe=direct,
+        )
+        with patch(
+            "src.szu_netlogin.windows_product.get_provider_password",
+            return_value="synthetic-only",
+        ) as get_password:
+            result = service.recover_automatically()
+
+        self.assertEqual(result.outcome, AuthOutcome.SUCCEEDED)
+        self.assertEqual((get_password.call_count, provider.login_calls), (1, 1))
+        direct.assert_called_once_with(ANY, "198.51.100.1")
+
+    def test_recovery_direct_success_never_reads_credentials_or_logs_in(self):
+        provider = FakeProvider(
+            "dorm",
+            session_result=SessionResult(
+                SessionState.ONLINE,
+                account_match=True,
+                exact_online_record_present=True,
+                online_device_count=1,
+                online_device_limit=3,
+            ),
+        )
+        service = self.service(
+            providers={"dorm": provider, "teaching": FakeProvider("teaching")},
+            direct_egress_probe=lambda _config, _source: InternetProbe(
+                True, "ok", route="campus-direct"
+            ),
+        )
+        with patch("src.szu_netlogin.windows_product.get_provider_password") as get_password:
+            result = service.recover_automatically()
+
+        self.assertEqual(result.error_code, "SESSION_ONLINE")
+        self.assertEqual((get_password.call_count, provider.login_calls), (0, 0))
+
+    def test_recovery_existing_record_or_full_count_never_reads_credentials(self):
+        direct = lambda _config, _source: InternetProbe(
+            False, "timeout", route="campus-direct"
+        )
+        existing = FakeProvider(
+            "dorm",
+            session_result=SessionResult(
+                SessionState.ONLINE,
+                account_match=True,
+                exact_online_record_present=True,
+                online_device_count=1,
+                online_device_limit=3,
+            ),
+        )
+        full = FakeProvider(
+            "dorm",
+            session_result=SessionResult(
+                SessionState.ONLINE,
+                account_match=False,
+                exact_online_record_present=False,
+                online_device_count=3,
+                online_device_limit=3,
+            ),
+        )
+        with patch("src.szu_netlogin.windows_product.get_provider_password") as get_password:
+            existing_result = self.service(
+                providers={"dorm": existing, "teaching": FakeProvider("teaching")},
+                direct_egress_probe=direct,
+            ).recover_automatically()
+            full_result = self.service(
+                providers={"dorm": full, "teaching": FakeProvider("teaching")},
+                direct_egress_probe=direct,
+            ).recover_automatically()
+
+        self.assertEqual(existing_result.error_code, "NET_CAMPUS_EGRESS_UNAVAILABLE")
+        self.assertEqual(full_result.error_code, "AUTH_DEVICE_LIMIT")
+        self.assertEqual((get_password.call_count, existing.login_calls, full.login_calls), (0, 0, 0))
+
+    def test_force_login_is_explicit_and_dorm_only(self):
+        provider = FakeProvider(
+            "dorm",
+            session_result=SessionResult(
+                SessionState.UNKNOWN,
+                error_code="AUTH_DEVICE_LIMIT",
+                online_device_count=3,
+                online_device_limit=3,
+            ),
+        )
+        service = self.service(
+            providers={"dorm": provider, "teaching": FakeProvider("teaching")}
+        )
+        with patch("src.szu_netlogin.windows_product.get_provider_password", return_value="synthetic"):
+            result = service.force_login("dorm")
+        self.assertEqual(result.outcome, AuthOutcome.SUCCEEDED)
+        self.assertEqual(provider.login_calls, 1)
+        self.assertEqual(
+            service.force_login("teaching").error_code,
+            "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED",
+        )
+
+    def test_status_contains_aggregate_device_budget_without_identities(self):
+        provider = FakeProvider(
+            "dorm",
+            session_result=SessionResult(
+                SessionState.UNKNOWN,
+                error_code="AUTH_DEVICE_LIMIT",
+                online_device_count=3,
+                online_device_limit=3,
+            ),
+        )
+        status = self.service(
+            providers={"dorm": provider, "teaching": FakeProvider("teaching")}
+        ).status()
+        dorm = status["providers"]["dorm"]
+        self.assertEqual((dorm["onlineDeviceCount"], dorm["onlineDeviceLimit"]), (3, 3))
+        self.assertNotIn("mac", str(dorm).lower())
 
     def test_teaching_disabled_blocks_without_credential_read(self):
         with patch("src.szu_netlogin.windows_product.get_provider_password") as get_password:
@@ -219,6 +389,24 @@ class WindowsProductTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("dorm:\n    enabled: true", text)
             self.assertIn("teaching:\n    enabled: true", text)
+
+    def test_provider_accounts_are_independent_and_dorm_keeps_legacy_value_in_sync(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.yaml"
+            path.write_text(
+                "providers:\n"
+                "  dorm:\n    accountLabel: \"old-dorm\"\n"
+                "  teaching:\n    accountLabel: \"old-teaching\"\n"
+                "user:\n  username: \"old-dorm\"\n",
+                encoding="utf-8",
+            )
+            set_provider_account("teaching", "new-teaching", path=path)
+            set_provider_account("dorm", "new-dorm", path=path)
+            text = path.read_text(encoding="utf-8")
+
+        self.assertIn('accountLabel: "new-teaching"', text)
+        self.assertIn('accountLabel: "new-dorm"', text)
+        self.assertIn('username: "new-dorm"', text)
 
     def test_service_reuses_coordinator_and_preserves_backoff(self):
         provider = FakeProvider(

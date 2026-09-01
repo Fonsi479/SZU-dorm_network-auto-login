@@ -5,6 +5,10 @@ import Foundation
 public final class SZUNETFeatureStore: ObservableObject {
     @Published public private(set) var snapshot = SZUNETSnapshot()
     @Published public private(set) var isWorking = false
+    /// Provider awaiting an explicit device-limit takeover confirmation.  A
+    /// non-nil value is presentation state only; no force-login command is
+    /// sent until `confirmForceLogin()` is called by the host UI.
+    @Published public private(set) var forceLoginProvider: SZUNETCommandProvider?
 
     private let module: SZUNETModule
     private let refreshPolicy: SZUNETRefreshPolicy
@@ -67,6 +71,7 @@ public final class SZUNETFeatureStore: ObservableObject {
         fallbackTask = nil
         followUpTask = nil
         pendingRefreshReason = nil
+        forceLoginProvider = nil
         if !enabled {
             resetWorking()
         }
@@ -99,9 +104,32 @@ public final class SZUNETFeatureStore: ObservableObject {
     }
 
     public func manualLogin(provider: SZUNETCommandProvider = .auto) {
-        runOperation(reason: .user, schedulesFollowUp: true) { module in
+        forceLoginProvider = nil
+        runOperation(reason: .user, schedulesFollowUp: true, onComplete: { [weak self] updated in
+            guard let self,
+                  let action = updated.lastAction,
+                  action.errorCode == "AUTH_DEVICE_LIMIT",
+                  action.outcome == .blocked else { return }
+            self.forceLoginProvider = provider
+        }) { module in
             await module.manualLogin(provider: provider)
         }
+    }
+
+    /// Confirms the warning shown after a normal login is blocked at the
+    /// three-device limit. The pending prompt is consumed before dispatch so
+    /// repeated taps cannot issue more than one force-login request.
+    public func confirmForceLogin() {
+        guard let provider = forceLoginProvider else { return }
+        forceLoginProvider = nil
+        runOperation(reason: .user, schedulesFollowUp: true) { module in
+            await module.forceLogin(provider: provider)
+        }
+    }
+
+    /// Dismisses the device-limit warning without contacting the runtime.
+    public func cancelForceLogin() {
+        forceLoginProvider = nil
     }
 
     public func manualLogout() {
@@ -196,6 +224,7 @@ public final class SZUNETFeatureStore: ObservableObject {
         operationTask = nil
         removeLifecycleObservers()
         pendingRefreshReason = nil
+        forceLoginProvider = nil
         operationGeneration &+= 1
         await module.stop()
         snapshot = await module.currentSnapshot()
@@ -244,18 +273,25 @@ public final class SZUNETFeatureStore: ObservableObject {
     private func runOperation(
         reason: SZUNETRefreshReason,
         schedulesFollowUp: Bool = false,
+        onComplete: (@MainActor (SZUNETSnapshot) -> Void)? = nil,
         _ operation: @escaping @Sendable (SZUNETModule) async -> SZUNETSnapshot
     ) {
         guard snapshot.adapterEnabled else { return }
         recordRequest(reason)
         operationTask?.cancel()
         operationGeneration &+= 1
-        launchOperation(reason: reason, schedulesFollowUp: schedulesFollowUp, operation)
+        launchOperation(
+            reason: reason,
+            schedulesFollowUp: schedulesFollowUp,
+            onComplete: onComplete,
+            operation
+        )
     }
 
     private func launchOperation(
         reason: SZUNETRefreshReason,
         schedulesFollowUp: Bool,
+        onComplete: (@MainActor (SZUNETSnapshot) -> Void)? = nil,
         _ operation: @escaping @Sendable (SZUNETModule) async -> SZUNETSnapshot
     ) {
         fallbackTask?.cancel()
@@ -269,6 +305,7 @@ public final class SZUNETFeatureStore: ObservableObject {
             let updated = await operation(self.module)
             guard self.operationGeneration == generation else { return }
             self.snapshot = updated
+            onComplete?(updated)
             self.operationTask = nil
 
             if let pending = self.pendingRefreshReason {

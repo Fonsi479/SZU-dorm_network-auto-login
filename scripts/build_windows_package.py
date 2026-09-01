@@ -106,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--executable", type=Path)
     parser.add_argument("--cli-executable", type=Path)
     parser.add_argument("--allow-dirty", action="store_true")
+    parser.add_argument("--architecture", choices=("x64", "arm64"), required=True)
     args = parser.parse_args(argv)
     try:
         release_label = normalize_release_label(args.release_label)
@@ -125,8 +126,16 @@ def main(argv: list[str] | None = None) -> int:
     cli_executable = (args.cli_executable or root / "dist" / "windows-app" / CLI_EXECUTABLE_NAME).resolve()
     failures = (
         verify_source(root)
-        + verify_executable(executable, expected_subsystem=2)
-        + verify_executable(cli_executable, expected_subsystem=3)
+        + verify_executable(
+            executable,
+            expected_subsystem=2,
+            expected_architecture=args.architecture,
+        )
+        + verify_executable(
+            cli_executable,
+            expected_subsystem=3,
+            expected_architecture=args.architecture,
+        )
     )
     if not failures:
         failures += verify_frozen_self_test(executable)
@@ -141,7 +150,9 @@ def main(argv: list[str] | None = None) -> int:
     package_suffix = f"-{release_label}" if release_label else ""
     if dirty:
         package_suffix += "-local"
-    package_name = f"SZU-Campus-Network-Windows-v{args.version}{package_suffix}"
+    package_name = (
+        f"SZU-Campus-Network-Windows-{args.architecture}-v{args.version}{package_suffix}"
+    )
     package_root = staging_root / package_name
     archive_path = output_dir / f"{package_name}.zip"
 
@@ -189,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         "schemaVersion": 1,
         "product": "SZU Campus Network",
         "platform": "Windows",
+        "architecture": args.architecture,
         "version": args.version,
         "releaseLabel": release_label or None,
         "releaseChannel": "prerelease" if release_label else "stable-candidate",
@@ -211,7 +223,10 @@ def main(argv: list[str] | None = None) -> int:
     ]
     write_utf8_lf(package_root / "SHA256.txt", "\n".join(checksums) + "\n")
 
-    failures = verify_release(package_root)
+    failures = verify_release(
+        package_root,
+        expected_architecture=args.architecture,
+    )
     if failures:
         for failure in failures:
             print(f"[失败] {failure}", file=sys.stderr)

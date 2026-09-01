@@ -19,7 +19,7 @@ def main() -> int:
     print(f"网络环境：{environment.label}")
     print(f"自动登录可用：{'是' if environment.auto_login_available else '否'}")
     print(f"当前 Wi-Fi：{environment.wifi_ssid or '-'}")
-    print(f"源 IP：{status.source_ip or '-'}")
+    print(f"源路由已验证：{'是' if status.source_ip else '否'}")
     print(f"外网：{'可用' if status.campus_internet_ok else '不可用'}")
     print(f"宿舍区网关：{'可连接' if status.gateway_reachable else '不可连接'}")
     print(f"网关原因：{status.gateway_reason or '-'}")

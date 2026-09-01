@@ -9,6 +9,15 @@ private struct RecordedCommand: Equatable, Sendable {
     var timeoutSeconds: Int
 }
 
+@MainActor
+private func waitUntilStoreIdle(_ store: SZUNETFeatureStore) async {
+    for _ in 0..<100 {
+        if !store.isWorking { return }
+        await Task.yield()
+    }
+    Issue.record("feature store did not become idle")
+}
+
 private actor FakeCommandExecutor: SZUNETCommandExecuting {
     private var commands: [RecordedCommand] = []
     private let result: SZUNETCommandResult
@@ -137,6 +146,59 @@ private actor DelayedCommandExecutor: SZUNETCommandExecuting {
     func recordedCommands() -> [RecordedCommand] { commands }
 }
 
+private actor DeviceLimitCommandExecutor: SZUNETCommandExecuting {
+    private var commands: [RecordedCommand] = []
+
+    func execute(
+        _ command: SZUNETCommand,
+        provider: SZUNETCommandProvider,
+        interactive: Bool,
+        timeoutSeconds: Int
+    ) async throws -> SZUNETCommandResult {
+        commands.append(.init(
+            command: command,
+            provider: provider,
+            interactive: interactive,
+            timeoutSeconds: timeoutSeconds
+        ))
+        switch command {
+        case .login:
+            return SZUNETCommandResult(
+                requestId: "device-limit",
+                outcome: .blocked,
+                provider: .dorm,
+                networkContext: .dorm,
+                sessionState: .offline,
+                errorCode: "AUTH_DEVICE_LIMIT",
+                onlineDeviceCount: 3,
+                onlineDeviceLimit: 3
+            )
+        case .forceLogin:
+            return SZUNETCommandResult(
+                requestId: "forced",
+                outcome: .succeeded,
+                provider: .dorm,
+                networkContext: .dorm,
+                sessionState: .online,
+                onlineDeviceCount: 3,
+                onlineDeviceLimit: 3
+            )
+        default:
+            return SZUNETCommandResult(
+                requestId: "status",
+                outcome: .unchanged,
+                provider: .dorm,
+                networkContext: .dorm,
+                sessionState: .offline,
+                onlineDeviceCount: 3,
+                onlineDeviceLimit: 3
+            )
+        }
+    }
+
+    func recordedCommands() -> [RecordedCommand] { commands }
+}
+
 @Suite("SZUNET CLI consumer module")
 struct SZUNETModuleTests {
     @Test("disabled adapter sends no CLI command")
@@ -204,6 +266,53 @@ struct SZUNETModuleTests {
         #expect(commands[1].provider == .dorm)
         #expect(commands[1].interactive)
         #expect(commands[2...].allSatisfy { $0.timeoutSeconds == 30 })
+    }
+
+    @Test("force login is a distinct explicit command")
+    func forceLoginUsesExplicitCommand() async {
+        let executor = FakeCommandExecutor()
+        let module = SZUNETModule(executor: executor)
+        _ = await module.configure(adapterEnabled: true)
+
+        _ = await module.forceLogin(provider: .dorm)
+
+        let commands = await executor.recordedCommands()
+        #expect(commands == [
+            RecordedCommand(
+                command: .forceLogin,
+                provider: .dorm,
+                interactive: true,
+                timeoutSeconds: 30
+            ),
+        ])
+    }
+
+    @Test("device-limit prompt cancellation sends no force command")
+    @MainActor
+    func deviceLimitPromptRequiresExplicitConfirmation() async {
+        let executor = DeviceLimitCommandExecutor()
+        let module = SZUNETModule(executor: executor)
+        let store = SZUNETFeatureStore(module: module)
+        await store.start(adapterEnabled: true)
+
+        store.manualLogin(provider: .dorm)
+        try? await Task.sleep(for: .milliseconds(1))
+        await waitUntilStoreIdle(store)
+        #expect(store.forceLoginProvider == .dorm)
+        store.cancelForceLogin()
+        #expect(store.forceLoginProvider == nil)
+        #expect(await executor.recordedCommands().filter { $0.command == .forceLogin }.isEmpty)
+
+        store.manualLogin(provider: .dorm)
+        try? await Task.sleep(for: .milliseconds(1))
+        await waitUntilStoreIdle(store)
+        store.confirmForceLogin()
+        try? await Task.sleep(for: .milliseconds(1))
+        await waitUntilStoreIdle(store)
+        #expect(await executor.recordedCommands().filter { $0.command == .forceLogin }.count == 1)
+        store.confirmForceLogin()
+        #expect(await executor.recordedCommands().filter { $0.command == .forceLogin }.count == 1)
+        await store.shutdown()
     }
 
     @Test("disabling the adapter cancels in-flight status and rejects its late result")

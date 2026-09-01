@@ -19,6 +19,7 @@ from apps.windows_desktop.szu_windows_desktop import (
     get_windows_startup_link,
     hidden_popen_options,
     is_windows_startup_enabled,
+    online_devices_label,
     portal_session_label,
     run_frozen_control_action,
     run_frozen_self_test,
@@ -127,7 +128,13 @@ class WindowsAppLifecycleTests(unittest.TestCase):
             "autoLoginProvider": "teaching",
             "providers": {
                 "dorm": {"enabled": True, "state": "blocked", "accountMatch": None},
-                "teaching": {"enabled": True, "state": "offline", "accountMatch": None},
+                "teaching": {
+                    "enabled": True,
+                    "state": "offline",
+                    "accountMatch": None,
+                    "onlineDeviceCount": 0,
+                    "onlineDeviceLimit": 3,
+                },
             },
         }
         app._refresh_status_worker()
@@ -138,6 +145,7 @@ class WindowsAppLifecycleTests(unittest.TestCase):
         self.assertEqual(result.portal_session_state, "offline")
         self.assertEqual(result.teaching_session_state, "offline")
         self.assertEqual(result.auto_login_provider, "teaching")
+        self.assertEqual((result.online_device_count, result.online_device_limit), (0, 3))
 
     def test_frozen_control_action_captures_output_for_windowed_gui(self) -> None:
         service = Mock()
@@ -157,7 +165,7 @@ class WindowsAppLifecycleTests(unittest.TestCase):
     def test_frozen_self_test_checks_embedded_config_without_network(self) -> None:
         self.assertEqual(run_frozen_self_test(), 0)
 
-    def test_auto_login_requires_confirmed_portal_offline(self) -> None:
+    def test_dorm_watchdog_runs_for_offline_and_portal_online_recovery(self) -> None:
         offline = DesktopStatusResult(
             False,
             NetworkStatus(True, True, source_ip="172.24.182.13"),
@@ -173,11 +181,61 @@ class WindowsAppLifecycleTests(unittest.TestCase):
             portal_session_state="unknown",
             environment_label="unknown",
         )
+        portal_online = DesktopStatusResult(
+            False,
+            NetworkStatus(True, False, source_ip="172.24.182.13"),
+            portal_session_state="online",
+            portal_session_matches=True,
+            environment_label="dorm",
+        )
 
         self.assertTrue(should_start_auto_login(False, offline))
+        self.assertTrue(should_start_auto_login(False, portal_online))
         self.assertFalse(should_start_auto_login(False, unknown))
         self.assertFalse(should_start_auto_login(True, offline))
         self.assertEqual(portal_session_label(offline), "已确认离线")
+
+    def test_full_device_budget_still_allows_credential_free_recovery_check(self):
+        full = DesktopStatusResult(
+            False,
+            NetworkStatus(True, False, source_ip="172.24.182.13"),
+            environment_label="dorm",
+            auto_login_available=True,
+            portal_session_state="offline",
+            auto_login_provider="dorm",
+            online_device_count=3,
+            online_device_limit=3,
+        )
+        self.assertTrue(should_start_auto_login(False, full))
+        self.assertEqual(online_devices_label(3, 3), "3/3")
+        self.assertIn("上限", portal_session_label(full))
+
+    def test_cancelled_device_limit_confirmation_sends_no_force_command(self):
+        app = SzuDormWindowsApp.__new__(SzuDormWindowsApp)
+        app.root = Mock()
+        app._append_output = Mock()
+        app._run_control_action = Mock()
+        with patch(
+            "apps.windows_desktop.szu_windows_desktop.messagebox.askyesno",
+            return_value=False,
+        ):
+            app._offer_force_login()
+        app._run_control_action.assert_not_called()
+        app._append_output.assert_called_once()
+
+    def test_confirmed_device_limit_confirmation_dispatches_once(self):
+        app = SzuDormWindowsApp.__new__(SzuDormWindowsApp)
+        app.root = Mock()
+        app._append_output = Mock()
+        app._run_control_action = Mock()
+        with patch(
+            "apps.windows_desktop.szu_windows_desktop.messagebox.askyesno",
+            return_value=True,
+        ):
+            app._offer_force_login()
+        app._run_control_action.assert_called_once_with(
+            ["force-login-now"], "强制切换到本机", timeout=100
+        )
 
     def test_teaching_watchdog_requires_one_verified_enabled_provider(self) -> None:
         teaching = DesktopStatusResult(
@@ -211,6 +269,21 @@ class WindowsAppLifecycleTests(unittest.TestCase):
         self.assertTrue(schedule.consume_if_due())
         self.assertFalse(schedule.consume_if_due())
 
+    def test_failure_backoff_uses_two_then_five_minutes_and_success_returns_to_thirty_seconds(self) -> None:
+        now = [100.0]
+        schedule = AutoLoginBackoff((120, 300, 600, 900), 0, clock=lambda: now[0])
+
+        self.assertTrue(schedule.consume_if_due())
+        schedule.record_failure()
+        self.assertEqual(schedule.current_interval_seconds, 120)
+        now[0] += 120
+        self.assertTrue(schedule.consume_if_due())
+        schedule.record_failure()
+        self.assertEqual(schedule.current_interval_seconds, 300)
+
+        schedule.record_success()
+        self.assertEqual(schedule.current_interval_seconds, 30)
+
     @unittest.skipUnless(os.environ.get("SZU_RUN_TK_SMOKE") == "1", "需要真实 Tk 桌面会话")
     def test_ui_builds_with_two_tabs_and_dynamic_startup_button(self) -> None:
         root = tk.Tk()
@@ -226,7 +299,9 @@ class WindowsAppLifecycleTests(unittest.TestCase):
 
             self.assertEqual(len(app.notebook.tabs()), 2)
             self.assertIn(app.startup_button.cget("text"), ("安装开机自启", "卸载开机自启"))
-            self.assertEqual(app.open_diagnostics_button.cget("text"), "打开诊断工具")
+            self.assertEqual(app.open_diagnostics_button.cget("text"), "诊断与日志")
+            self.assertIn("dorm_account", app._status_vars)
+            self.assertIn("teaching_account", app._status_vars)
         finally:
             root.destroy()
 

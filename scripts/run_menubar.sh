@@ -5,4 +5,4 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
 cd "${PROJECT_ROOT}"
-exec swift run --package-path macos SZUDormLogin
+exec swift run --package-path . SZUDormLogin

@@ -1,4 +1,5 @@
 import SZUNetCore
+import SZUNETEmbedded
 
 @MainActor
 extension AppModel {
@@ -7,19 +8,20 @@ extension AppModel {
         automation.cancelProbe()
         isRefreshing = false
 
-        if let campusProductController {
-            guard automation.startManualOperation(
-                operation: { Self.mapCampusResult(await campusProductController.login()) },
-                completion: { [weak self] result in
-                    self?.finishOperation(result, alwaysNotify: true)
-                }
-            ) else { return }
-            isBusy = true
+        guard let embeddedRuntime else {
+            onResult?(
+                LoginActionResult(
+                    outcome: .failed,
+                    title: "无法登录校园网",
+                    detail: "Embedded Runtime 初始化失败；未读取凭据或发送认证请求。",
+                    reason: "embedded_runtime_unavailable"
+                ),
+                true
+            )
             return
         }
-        let coordinator = coordinator
         guard automation.startManualOperation(
-            operation: { await coordinator.loginNow() },
+            operation: { Self.mapCampusResult(await embeddedRuntime.login()) },
             completion: { [weak self] result in
                 self?.finishOperation(result, alwaysNotify: true)
             }
@@ -40,38 +42,38 @@ extension AppModel {
         isRefreshing = false
         isBusy = automation.hasActiveOperation
 
-        if let campusProductController {
-            guard campusSnapshot?.category == .dorm else {
-                onResult?(
-                    LoginActionResult(
-                        outcome: .unchanged,
-                        title: "当前网络不支持退出",
-                        detail: "Teaching SRun 与未确认环境的退出操作已禁用。",
-                        reason: "logout_disabled"
-                    ),
-                    false
-                )
-                return
-            }
-            guard automation.startManualOperation(
-                operation: {
-                    Self.mapCampusResult(
-                        await campusProductController.logout(providerID: .dorm)
-                    )
-                },
-                completion: { [weak self] result in
-                    self?.finishOperation(result, alwaysNotify: true)
-                }
-            ) else { return }
-            isBusy = true
+        guard let embeddedRuntime else {
+            onResult?(
+                LoginActionResult(
+                    outcome: .failed,
+                    title: "无法退出校园网",
+                    detail: "Embedded Runtime 初始化失败；未发送退出请求。",
+                    reason: "embedded_runtime_unavailable"
+                ),
+                true
+            )
             return
         }
-        let coordinator = coordinator
+        guard campusSnapshot?.category == .dorm else {
+            onResult?(
+                LoginActionResult(
+                    outcome: .unchanged,
+                    title: "当前网络不支持退出",
+                    detail: "Teaching SRun 与未确认环境的退出操作已禁用。",
+                    reason: "logout_disabled"
+                ),
+                false
+            )
+            return
+        }
         guard automation.startManualOperation(
-            operation: { await coordinator.logout() },
+            operation: {
+                Self.mapCampusResult(
+                    await embeddedRuntime.logout(providerID: .dorm)
+                )
+            },
             completion: { [weak self] result in
                 guard let self else { return }
-                self.autoLoginEnabled = !coordinator.pauseStore.isPaused
                 self.finishOperation(result, alwaysNotify: true)
             }
         ) else {
@@ -90,8 +92,19 @@ extension AppModel {
         return LoginActionResult(
             outcome: outcome,
             title: outcome == .authenticated ? "校园网登录成功" : outcome == .loggedOut ? "已退出校园网" : "校园网操作完成",
-            detail: result.errorCode ?? "Provider：\(result.providerID.rawValue)",
+            detail: Self.actionDetail(for: result),
             reason: result.errorCode ?? result.outcome.rawValue
         )
+    }
+
+    private static func actionDetail(for result: ProviderAuthResult) -> String {
+        switch result.errorCode {
+        case "AUTH_DEVICE_LIMIT":
+            return "账号已有 3 台设备在线，普通登录已阻止以避免挤下其他设备。若确需切换，请在完整设置页面确认，或显式运行 --force-login。"
+        case let code? where !code.isEmpty:
+            return code
+        default:
+            return "Provider：\(result.providerID.rawValue)"
+        }
     }
 }

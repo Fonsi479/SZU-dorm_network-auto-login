@@ -1,29 +1,14 @@
-# Codex Butler Adapter Boundary
+# MacManager / Codex Butler Integration Boundary
 
-The independent SZUNET application remains the sole owner of authentication, Provider state, credentials, settings, automation and release lifecycle. Codex Butler may:
+The public repository supports two explicit integration modes:
 
-- request sanitized `status` or `check` results;
-- request `login` for `auto`, `dorm` or `teaching`;
-- request Dorm logout or receive `SRUN_LOGOUT_DISABLED` for Teaching;
-- pause/resume automation;
-- open settings or request a sanitized diagnostic summary.
+- `SZUNETFeature` remains transport-neutral and keeps the bounded JSON CLI client for scripts and legacy consumers. It does not depend on `SZUNetCore`.
+- `SZUNETEmbedded` is the full in-process product for trusted macOS hosts. It owns the same Core, Provider selection, settings, credential broker, automation gate and reusable SwiftUI management page used by the standalone product.
 
-`status` performs a read-only refresh because each CLI request runs in a new process and therefore has no reusable in-memory snapshot. `resume` restores the owner's persisted automatic-login gate, clears the pause gate, and verifies that the standalone App is running. Results may additionally expose the optional booleans `automaticEnabled` and `ownerAppRunning`; they contain no account or credential material.
+MacManager imports `SZUNETEmbedded`; it does not copy Provider or authentication code and does not require `SZU Dorm Login.app` or `szu-campus-netctl` at runtime. The standalone App and CLI remain independently buildable and distributable, and neither requires MacManager.
 
-Codex Butler must not:
+Both official macOS hosts share non-secret state under `~/Library/Application Support/szu-netlogin`. `automation.json` records one explicit automation owner. Manual status/login/logout remains available from either host, but only the current owner may schedule automatic login. Ownership is rechecked immediately before automatic credential access; quitting an owner does not transfer it, while explicitly disabling a module releases it.
 
-- receive or store passwords, cookies, Challenge/Info/Checksum values or complete network identifiers;
-- instantiate a second authentication implementation;
-- bypass Coordinator gates or select a Provider from UI assumptions;
-- own the SZUNET menu bar, settings, login item or final application bundle;
-- use a default localhost HTTP control port.
+Official same-team builds may use a provisioning-profile-authorized Keychain access group. Shared credentials are read first; readable legacy items are copied without deleting the originals. Ad-hoc or self-built clients use local Keychain mode and clearly disclose that credentials are not shared.
 
-The enforced boundary is `szu-campus-netctl --json` with one JSON request on stdin and one JSON response on stdout. The optional `SZUNETFeature` Swift library is only a typed process client for that executable. It must not link or import `SZUNetCore`, instantiate a Provider/Coordinator/runtime, access a configuration or credential path, accept credentials, or schedule automatic login. Its UI may show sanitized state and forward explicit high-level commands, but account and Provider settings stay in the independent App.
-
-The live adapter resolves only an explicitly supplied CLI URL or the fixed CLI inside an installed `SZU Dorm Login.app`. It uses a process argument array plus stdin JSON, bounded output and timeout, and terminates the child on cancellation. Missing CLI, schema mismatch, request-ID mismatch, oversized output and timeout all fail closed without falling back to an in-process authentication implementation.
-
-The standalone App and CLI remain independently buildable and distributable. Installing Codex Butler is never required for SZUNET, and importing `SZUNETFeature` never transfers authentication ownership to the host.
-
-Schema major-version mismatch is rejected. Unknown response fields may be ignored. Requests include a request ID and bounded timeout; results contain only sanitized status and stable error codes.
-
-Repository tests use an injected fake executor and never launch the real campus CLI. A real Codex Butler host build/runtime integration remains a separate optional consumer acceptance step; it is not evidence for campus-network protocol acceptance.
+Neither integration mode may bypass Coordinator environment/session/source-route gates, expose passwords or protocol secrets, enable Teaching logout, create a localhost control service, or treat offline fixtures as real campus acceptance. All repository tests use fake executors/transports and synthetic credentials.

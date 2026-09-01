@@ -19,7 +19,11 @@
     <key>CFBundleShortVersionString</key>
     <string>2.0.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
+    <key>SZUNETAutomationOwnershipSchema</key>
+    <integer>1</integer>
+    <key>SZUNETCredentialMode</key>
+    <string>local</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

@@ -20,7 +20,7 @@ from scripts.scan_release_artifacts import scan_directory, scan_zip
 from scripts.verify_windows_package import verify_executable, verify_release, verify_source
 
 
-def synthetic_pe(*, subsystem: int) -> bytes:
+def synthetic_pe(*, subsystem: int, machine: int = 0x8664) -> bytes:
     payload = bytearray(1_000_002)
     payload[:2] = b"MZ"
     pe_offset = 0x80
@@ -30,7 +30,7 @@ def synthetic_pe(*, subsystem: int) -> bytes:
         "<HHIIIHH",
         payload,
         pe_offset + 4,
-        0x8664,
+        machine,
         1,
         0,
         0,
@@ -148,6 +148,26 @@ class WindowsPackagingTests(unittest.TestCase):
             console.write_bytes(synthetic_pe(subsystem=3))
             failures = verify_executable(console, expected_subsystem=2)
             self.assertTrue(any("subsystem" in failure for failure in failures))
+
+    def test_executable_verifier_accepts_and_distinguishes_x64_and_arm64(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            x64 = root / "x64.exe"
+            arm64 = root / "arm64.exe"
+            x64.write_bytes(synthetic_pe(subsystem=2, machine=0x8664))
+            arm64.write_bytes(synthetic_pe(subsystem=2, machine=0xAA64))
+
+            self.assertEqual(
+                verify_executable(x64, expected_subsystem=2, expected_architecture="x64"),
+                [],
+            )
+            self.assertEqual(
+                verify_executable(arm64, expected_subsystem=2, expected_architecture="arm64"),
+                [],
+            )
+            self.assertTrue(
+                verify_executable(arm64, expected_subsystem=2, expected_architecture="x64")
+            )
 
     def test_scanner_checks_exe_bytes_in_directory_and_zip(self):
         with tempfile.TemporaryDirectory() as directory:

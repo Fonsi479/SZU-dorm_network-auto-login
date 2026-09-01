@@ -23,10 +23,25 @@ MIN_SYSTEM="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "${INFO
 UI_ELEMENT="$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "${INFO_PLIST}")"
 
 [[ "${VERSION}" == "2.0.0" ]] || { echo "版本错误：${VERSION}" >&2; exit 1; }
-[[ "${BUILD}" == "1" ]] || { echo "构建号错误：${BUILD}" >&2; exit 1; }
+[[ "${BUILD}" == "2" ]] || { echo "构建号错误：${BUILD}" >&2; exit 1; }
 [[ "${IDENTIFIER}" == "com.szu-netlogin.dorm-login" ]] || { echo "Bundle ID 错误：${IDENTIFIER}" >&2; exit 1; }
 [[ "${MIN_SYSTEM}" == "13.0" ]] || { echo "最低系统版本错误：${MIN_SYSTEM}" >&2; exit 1; }
 [[ "${UI_ELEMENT}" == "true" ]] || { echo "App 未配置为状态栏应用。" >&2; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :SZUNETAutomationOwnershipSchema' "${INFO_PLIST}")" == "1" ]] \
+  || { echo "App 缺少自动化所有权能力标记。" >&2; exit 1; }
+
+CREDENTIAL_MODE="$(/usr/libexec/PlistBuddy -c 'Print :SZUNETCredentialMode' "${INFO_PLIST}")"
+if [[ "${CREDENTIAL_MODE}" == "shared" ]]; then
+  ACCESS_GROUP="$(/usr/libexec/PlistBuddy -c 'Print :SZUNETKeychainAccessGroup' "${INFO_PLIST}")"
+  [[ -n "${ACCESS_GROUP}" ]] || { echo "共享钥匙串模式缺少 access group。" >&2; exit 1; }
+  codesign -d --entitlements :- "${APP_BUNDLE}" 2>&1 | grep -Fq "${ACCESS_GROUP}" \
+    || { echo "App 签名未包含共享钥匙串 entitlement。" >&2; exit 1; }
+  [[ -f "${APP_BUNDLE}/Contents/embedded.provisionprofile" ]] \
+    || { echo "共享钥匙串模式缺少 provisioning profile。" >&2; exit 1; }
+elif [[ "${CREDENTIAL_MODE}" != "local" ]]; then
+  echo "未知凭据模式：${CREDENTIAL_MODE}" >&2
+  exit 1
+fi
 
 VERSION_OUTPUT="$("${EXECUTABLE}" --version)"
 [[ "${VERSION_OUTPUT}" == *"native Swift"* ]] || { echo "可执行文件不是预期的 Swift 版本。" >&2; exit 1; }
@@ -60,6 +75,8 @@ if find "${APP_BUNDLE}/Contents" -iname '*python*' -print -quit | grep -q .; the
 fi
 
 codesign --verify --deep --strict "${APP_BUNDLE}"
+lipo "${EXECUTABLE}" -verify_arch arm64 x86_64
+lipo "${CLI_EXECUTABLE}" -verify_arch arm64 x86_64
 [[ "$(lipo -archs "${EXECUTABLE}")" == "$(lipo -archs "${CLI_EXECUTABLE}")" ]] \
   || { echo "App 与 JSON CLI 架构不一致。" >&2; exit 1; }
 bash "${PROJECT_ROOT}/scripts/run_swift_checks.sh"

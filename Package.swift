@@ -4,19 +4,16 @@ import PackageDescription
 
 let package = Package(
     name: "SZUDormLogin",
-    platforms: [
-        .macOS(.v13),
-    ],
+    platforms: [.macOS(.v13)],
     products: [
         .library(name: "SZUNetCore", targets: ["SZUNetCore"]),
         .library(name: "SZUNETFeature", targets: ["SZUNETFeature"]),
+        .library(name: "SZUNETEmbedded", targets: ["SZUNETEmbedded"]),
         .library(name: "SZUDormLoginApp", targets: ["SZUDormLoginApp"]),
         .executable(name: "SZUDormLogin", targets: ["SZUDormLogin"]),
         .executable(name: "szu-campus-netctl", targets: ["SZUCampusNetctl"]),
     ],
     dependencies: [
-        // Command Line Tools installations do not always bundle XCTest/Testing.
-        // Keep the official Swift Testing package test-only and version-pinned.
         .package(
             url: "https://github.com/swiftlang/swift-testing.git",
             exact: "6.3.2"
@@ -25,16 +22,34 @@ let package = Package(
     targets: [
         .target(
             name: "SZUNetCore",
-            dependencies: [],
+            path: "macos/Sources/SZUNetCore",
             linkerSettings: [
                 .linkedFramework("CoreWLAN"),
                 .linkedFramework("Security"),
             ]
         ),
         .target(
+            name: "SZUNETFeature",
+            dependencies: [],
+            path: "macos/Sources/SZUNETFeature",
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("SwiftUI"),
+            ]
+        ),
+        .target(
+            name: "SZUNETEmbedded",
+            dependencies: ["SZUNetCore", "SZUNETFeature"],
+            path: "macos/Sources/SZUNETEmbedded",
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("SwiftUI"),
+            ]
+        ),
+        .target(
             name: "SZUDormLoginApp",
-            dependencies: ["SZUNetCore"],
-            path: "Sources/SZUDormLogin",
+            dependencies: ["SZUNetCore", "SZUNETEmbedded"],
+            path: "macos/Sources/SZUDormLogin",
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("Network"),
@@ -43,23 +58,16 @@ let package = Package(
                 .linkedFramework("UserNotifications"),
             ]
         ),
-        .target(
-            name: "SZUNETFeature",
-            dependencies: [],
-            linkerSettings: [
-                .linkedFramework("AppKit"),
-                .linkedFramework("SwiftUI"),
-            ]
-        ),
         .executableTarget(
             name: "SZUDormLogin",
             dependencies: ["SZUDormLoginApp"],
-            path: "Sources/SZUDormLoginExecutable"
+            path: "macos/Sources/SZUDormLoginExecutable"
         ),
         .executableTarget(
             name: "SZUCampusNetctl",
             dependencies: ["SZUNetCore"],
-            path: "Sources/SZUCampusNetctl",
+            path: "macos/Sources/SZUCampusNetctl",
+            swiftSettings: [.unsafeFlags(["-parse-as-library"])],
             linkerSettings: [.linkedFramework("AppKit")]
         ),
         .testTarget(
@@ -67,7 +75,8 @@ let package = Package(
             dependencies: [
                 "SZUNetCore",
                 .product(name: "Testing", package: "swift-testing"),
-            ]
+            ],
+            path: "macos/Tests/SZUNetCoreTests"
         ),
         .testTarget(
             name: "SZUDormLoginAppTests",
@@ -75,14 +84,26 @@ let package = Package(
                 "SZUDormLoginApp",
                 "SZUNetCore",
                 .product(name: "Testing", package: "swift-testing"),
-            ]
+            ],
+            path: "macos/Tests/SZUDormLoginAppTests"
         ),
         .testTarget(
             name: "SZUNETFeatureTests",
             dependencies: [
                 "SZUNETFeature",
                 .product(name: "Testing", package: "swift-testing"),
-            ]
+            ],
+            path: "macos/Tests/SZUNETFeatureTests"
+        ),
+        .testTarget(
+            name: "SZUNETEmbeddedTests",
+            dependencies: [
+                "SZUNETEmbedded",
+                "SZUNETFeature",
+                "SZUNetCore",
+                .product(name: "Testing", package: "swift-testing"),
+            ],
+            path: "macos/Tests/SZUNETEmbeddedTests"
         ),
     ],
     swiftLanguageModes: [.v5]

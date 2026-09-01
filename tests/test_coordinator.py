@@ -111,12 +111,163 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(result.outcome, AuthOutcome.UNCHANGED)
         self.assertEqual((spy.calls, provider.login_calls), (0, 0))
 
+    def test_stale_dorm_recovery_requires_exact_absence_and_known_free_slot(self):
+        class StaleDormProvider(StubProvider):
+            def session_status(self, context, probe, username):
+                self.session_calls += 1
+                return SessionResult(
+                    SessionState.ONLINE,
+                    account_match=False,
+                    exact_online_record_present=False,
+                    online_device_count=2,
+                    online_device_limit=3,
+                )
+
+        provider = StaleDormProvider("dorm")
+        spy = CredentialSpy()
+        result = CampusNetworkCoordinator([provider]).recover_stale_dorm_session(
+            self.context(), "synthetic", spy
+        )
+
+        self.assertEqual(result.outcome, AuthOutcome.SUCCEEDED)
+        self.assertEqual((spy.calls, provider.login_calls), (1, 1))
+
+    def test_stale_dorm_recovery_blocks_existing_exact_record_without_credentials(self):
+        class ExistingDormProvider(StubProvider):
+            def session_status(self, context, probe, username):
+                return SessionResult(
+                    SessionState.ONLINE,
+                    account_match=True,
+                    exact_online_record_present=True,
+                    online_device_count=1,
+                    online_device_limit=3,
+                )
+
+        provider = ExistingDormProvider("dorm")
+        spy = CredentialSpy()
+        result = CampusNetworkCoordinator([provider]).recover_stale_dorm_session(
+            self.context(), "synthetic", spy
+        )
+
+        self.assertEqual(result.error_code, "NET_CAMPUS_EGRESS_UNAVAILABLE")
+        self.assertEqual((spy.calls, provider.login_calls), (0, 0))
+
+    def test_stale_dorm_recovery_blocks_unknown_or_full_count_without_credentials(self):
+        class GuardedDormProvider(StubProvider):
+            current = SessionResult(
+                SessionState.UNKNOWN,
+                exact_online_record_present=False,
+                online_device_count=None,
+                online_device_limit=3,
+            )
+
+            def session_status(self, context, probe, username):
+                return self.current
+
+        provider = GuardedDormProvider("dorm")
+        coordinator = CampusNetworkCoordinator([provider])
+        unknown_spy = CredentialSpy()
+        unknown = coordinator.recover_stale_dorm_session(
+            self.context(), "synthetic", unknown_spy
+        )
+        provider.current = SessionResult(
+            SessionState.OFFLINE,
+            exact_online_record_present=False,
+            online_device_count=3,
+            online_device_limit=3,
+        )
+        full_spy = CredentialSpy()
+        full = coordinator.recover_stale_dorm_session(
+            self.context(), "synthetic", full_spy
+        )
+
+        self.assertEqual(unknown.error_code, "SESSION_UNKNOWN")
+        self.assertEqual(full.error_code, "AUTH_DEVICE_LIMIT")
+        self.assertEqual((unknown_spy.calls, full_spy.calls, provider.login_calls), (0, 0, 0))
+
     def test_offline_reads_one_credential_and_logs_in_once(self):
         spy = CredentialSpy()
         provider = StubProvider("dorm")
         result = CampusNetworkCoordinator([provider]).login(self.context(), "synthetic", spy)
         self.assertEqual(result.outcome, AuthOutcome.SUCCEEDED)
         self.assertEqual((spy.calls, provider.login_calls), (1, 1))
+
+    def test_device_limit_blocks_before_credential_read_or_login(self):
+        class FullDormProvider(StubProvider):
+            def session_status(self, context, probe, username):
+                self.session_calls += 1
+                return SessionResult(
+                    SessionState.UNKNOWN,
+                    error_code="AUTH_DEVICE_LIMIT",
+                    online_device_count=3,
+                    online_device_limit=3,
+                )
+
+        provider = FullDormProvider("dorm")
+        spy = CredentialSpy()
+        result = CampusNetworkCoordinator([provider]).login(
+            self.context(), "synthetic", spy, requested_provider="dorm"
+        )
+
+        self.assertEqual(result.error_code, "AUTH_DEVICE_LIMIT")
+        self.assertEqual((spy.calls, provider.login_calls), (0, 0))
+        self.assertEqual((result.online_device_count, result.online_device_limit), (3, 3))
+
+    def test_force_login_requires_confirmation_and_logs_in_once(self):
+        class FullDormProvider(StubProvider):
+            def session_status(self, context, probe, username):
+                self.session_calls += 1
+                return SessionResult(
+                    SessionState.UNKNOWN,
+                    error_code="AUTH_DEVICE_LIMIT",
+                    online_device_count=3,
+                    online_device_limit=3,
+                )
+
+        provider = FullDormProvider("dorm")
+        spy = CredentialSpy()
+        result = CampusNetworkCoordinator([provider]).force_login(
+            self.context(), "synthetic", spy
+        )
+
+        self.assertEqual(result.outcome, AuthOutcome.SUCCEEDED)
+        self.assertEqual((spy.calls, provider.login_calls), (1, 1))
+
+    def test_force_login_is_dorm_only_and_unknown_count_cannot_be_bypassed(self):
+        teaching = StubProvider("teaching")
+        teaching_result = CampusNetworkCoordinator(
+            [teaching], settings=CoordinatorSettings(teaching_enabled=True)
+        ).force_login(self.context(), "synthetic", CredentialSpy(), requested_provider="teaching")
+        self.assertEqual(teaching_result.error_code, "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED")
+        self.assertEqual(teaching.login_calls, 0)
+
+        class UnknownDormProvider(StubProvider):
+            def session_status(self, context, probe, username):
+                return SessionResult(SessionState.UNKNOWN, error_code="SESSION_UNKNOWN")
+
+        unknown = UnknownDormProvider("dorm")
+        unknown_result = CampusNetworkCoordinator([unknown]).force_login(
+            self.context(), "synthetic", CredentialSpy()
+        )
+        self.assertEqual(unknown_result.error_code, "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED")
+        self.assertEqual(unknown.login_calls, 0)
+
+        class UnprovenLimitDormProvider(StubProvider):
+            def session_status(self, context, probe, username):
+                return SessionResult(
+                    SessionState.OFFLINE,
+                    error_code="AUTH_DEVICE_LIMIT",
+                )
+
+        unproven = UnprovenLimitDormProvider("dorm")
+        unproven_result = CampusNetworkCoordinator([unproven]).force_login(
+            self.context(), "synthetic", CredentialSpy()
+        )
+        self.assertEqual(
+            unproven_result.error_code,
+            "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED",
+        )
+        self.assertEqual(unproven.login_calls, 0)
 
     def test_stale_generation_has_zero_credential_reads(self):
         spy = CredentialSpy()
@@ -192,6 +343,28 @@ class CoordinatorTests(unittest.TestCase):
         result = coordinator.login(NetworkContext(1), "synthetic", spy)
         self.assertEqual(result.error_code, "AUTH_BAD_PASSWORD")
         self.assertEqual(spy.calls, 0)
+
+    def test_dynamic_device_limit_result_is_rechecked_next_round(self):
+        provider = StubProvider(
+            "dorm",
+            login_result=AuthResult(
+                AuthOutcome.BLOCKED,
+                "dorm",
+                error_code="AUTH_DEVICE_LIMIT",
+            ),
+        )
+        coordinator = CampusNetworkCoordinator([provider])
+        first_spy = CredentialSpy()
+        first = coordinator.login(self.context(), "synthetic", first_spy)
+
+        provider.login_result = AuthResult(AuthOutcome.SUCCEEDED, "dorm")
+        second_spy = CredentialSpy()
+        second = coordinator.login(self.context(), "synthetic", second_spy)
+
+        self.assertEqual(first.error_code, "AUTH_DEVICE_LIMIT")
+        self.assertEqual(second.outcome, AuthOutcome.SUCCEEDED)
+        self.assertEqual((first_spy.calls, second_spy.calls), (1, 1))
+        self.assertEqual(provider.login_calls, 2)
 
     def test_logout_is_rejected_while_login_is_in_progress(self):
         started = threading.Event()

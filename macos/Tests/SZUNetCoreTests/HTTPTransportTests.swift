@@ -5,6 +5,41 @@ import Testing
 
 @Suite("HTTP transport", .serialized)
 struct HTTPTransportTests {
+    @Test("campus egress probe binds every request to the verified source IP")
+    func campusEgressProbeRequiresSourceBinding() async {
+        let transport = RecordingDirectTransport()
+        var configuration = AppConfiguration.default
+        configuration.network.testURLs = [
+            "http://captive.apple.com/hotspot-detect.html",
+            "http://www.baidu.com/",
+        ]
+        configuration.network.maxTestURLs = 2
+        let probe = CampusDirectEgressProbe(
+            configuration: configuration,
+            transport: transport,
+            logger: AppLogger(fileURL: temporaryHTTPLogURL())
+        )
+
+        let result = await probe.check(
+            context: CampusNetworkContext(
+                generation: 0,
+                sourceIP: "192.0.2.27",
+                sourceRouteBound: true,
+                dormPortalIdentityVerified: true
+            )
+        )
+
+        #expect(result.available)
+        #expect(await transport.sourceIPs == ["192.0.2.27", "192.0.2.27"])
+    }
+
+    @Test("URLSession transport clears proxy configuration")
+    func transportClearsProxyConfiguration() {
+        let configuration = URLSessionConfiguration.ephemeral
+        _ = URLSessionHTTPTransport(configuration: configuration)
+        #expect(configuration.connectionProxyDictionary?.isEmpty == true)
+    }
+
     @Test("one portal transport keeps cookies across requests")
     func oneTransportKeepsPortalCookiesAcrossRequests() async throws {
         defer { MockURLProtocol.reset() }
@@ -118,6 +153,35 @@ struct HTTPTransportTests {
         }
         #expect(try await peerIP == nil)
     }
+}
+
+private actor RecordingDirectTransport: HTTPTransporting {
+    private var recordedSourceIPs: [String] = []
+
+    var sourceIPs: [String] {
+        recordedSourceIPs
+    }
+
+    func get(
+        _ url: URL,
+        query: [String: String],
+        headers: [String: String],
+        timeout: TimeInterval,
+        sourceIP: String?
+    ) async throws -> HTTPResponse {
+        recordedSourceIPs.append(sourceIP ?? "")
+        return HTTPResponse(
+            statusCode: 200,
+            headers: [:],
+            body: Data("Success".utf8),
+            finalURL: url
+        )
+    }
+}
+
+private func temporaryHTTPLogURL() -> URL {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent("szunet-http-tests-\(UUID().uuidString).log")
 }
 
 private func waitUntil(_ predicate: () -> Bool) async -> Bool {

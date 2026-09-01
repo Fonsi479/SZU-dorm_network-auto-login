@@ -1,14 +1,32 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from src.szu_netlogin import control
+from src.szu_netlogin.contracts import AuthOutcome, AuthResult
 from src.szu_netlogin.dorm_drcom_client import PortalSessionFact
 from src.szu_netlogin.portal_detect import NetworkStatus
 
 
 class ControlTests(unittest.TestCase):
+    def test_force_login_commands_are_explicit(self) -> None:
+        self.assertEqual(control.parse_args(["force-login"]).command, "force-login")
+        self.assertEqual(control.parse_args(["force-login-now"]).command, "force-login-now")
+
+    def test_check_and_login_uses_safe_recovery_entrypoint(self) -> None:
+        service = Mock()
+        service.recover_automatically.return_value = AuthResult(
+            AuthOutcome.UNCHANGED,
+            "dorm",
+            error_code="SESSION_ONLINE",
+        )
+
+        self.assertEqual(control.check_and_login(service), 0)
+
+        service.recover_automatically.assert_called_once_with()
+        service.login.assert_not_called()
+
     def test_logout_verification_uses_portal_session_not_internet(self) -> None:
         config = {"user": {"username": "481505"}, "network": {}}
         with (

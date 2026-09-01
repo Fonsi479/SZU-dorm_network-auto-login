@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import SZUNETEmbedded
 import SZUNetCore
 
 @MainActor
@@ -32,6 +33,13 @@ final class AppModel: ObservableObject {
     @Published var passwordSaved = false
     @Published var campusProviderConfiguration = CampusProductConfiguration.default
     @Published var campusSnapshot: CampusProductSnapshot?
+    @Published var automationOwnershipSnapshot =
+        CampusAutomationOwnershipSnapshot(
+            currentOwner: nil,
+            ownerRunning: false,
+            canTransfer: true,
+            isCurrentHostOwner: false
+        )
 
     var onResult: ((LoginActionResult, Bool) -> Void)?
     var onConfigurationMigrated: ((URL) -> Void)?
@@ -40,8 +48,8 @@ final class AppModel: ObservableObject {
     let logger: AppLogger
     let launchAtLogin: LaunchAtLoginController
     let automation: AppAutomationScheduler
-    let campusSettingsStore: CampusProviderSettingsStore
-    let campusProductController: CampusProductController?
+    let automationOwnership: AppAutomationOwnership
+    let embeddedRuntime: SZUNETEmbeddedRuntime?
     let defaults: UserDefaults
 
     var lastNetworkStatus: NetworkStatus?
@@ -54,7 +62,8 @@ final class AppModel: ObservableObject {
         logger: AppLogger = AppLogger(),
         launchAtLogin: LaunchAtLoginController = LaunchAtLoginController(),
         automation: AppAutomationScheduler? = nil,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        automationOwnership: AppAutomationOwnership? = nil
     ) {
         self.logger = logger
         self.defaults = defaults
@@ -62,17 +71,23 @@ final class AppModel: ObservableObject {
         self.launchAtLogin = launchAtLogin
         self.automation = automation ?? AppAutomationScheduler()
         let paths = self.coordinator.configurationStore.paths
-        campusSettingsStore = CampusProviderSettingsStore(
-            fileURL: paths.campusProviderConfigurationFile
+        self.automationOwnership = automationOwnership
+            ?? AppAutomationOwnership(
+                store: CampusAutomationStore(
+                    fileURL: paths.automationFile,
+                    lockFileURL: paths.automationLockFile,
+                    legacyOwner: AppAutomationOwnership.legacyOwnerIfNeeded(paths: paths)
+                )
+            )
+        automationOwnershipSnapshot = self.automationOwnership.snapshot
+        _ = try? self.coordinator.configurationStore.load()
+        embeddedRuntime = try? SZUNETEmbeddedRuntime.make(
+            configuration: Self.makeEmbeddedConfiguration(paths: paths)
         )
-        let legacyConfiguration = try? self.coordinator.configurationStore.load().configuration
-        campusProviderConfiguration = (try? campusSettingsStore.load(
-            legacyConfiguration: legacyConfiguration
-        )) ?? .default
-        campusProductController = try? CampusProductRuntime.make(paths: paths)
 
-        networkProbeEnabled = CampusAutomationPreferences.networkProbeEnabled(in: defaults)
-        networkProbeIntervalSeconds = CampusAutomationPreferences.probeIntervalSeconds(in: defaults)
+        let sharedProbePreferences = self.automationOwnership.sharedProbePreferences()
+        networkProbeEnabled = sharedProbePreferences.enabled
+        networkProbeIntervalSeconds = sharedProbePreferences.intervalSeconds
         autoLoginEnabled = campusProviderConfiguration.automaticEnabled
             && !self.coordinator.pauseStore.isPaused
         launchAtLoginState = launchAtLogin.state
@@ -80,7 +95,47 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
-        automationStarted = true
+        automationStarted = automationOwnership.start()
+        automationOwnershipSnapshot = automationOwnership.snapshot
+        if let embeddedRuntime {
+            Task { @MainActor [weak self] in
+                do {
+                    try await embeddedRuntime.start(enabled: true)
+                    let providers = try await embeddedRuntime.providerConfiguration()
+                    self?.campusProviderConfiguration = providers
+                    self?.autoLoginEnabled = providers.automaticEnabled
+                        && !(self?.coordinator.pauseStore.isPaused ?? true)
+                } catch {
+                    guard let self else { return }
+                    self.statusText = "●  校园网模块初始化失败"
+                    self.statusTone = .failure
+                    self.statusDetail = error.localizedDescription
+                    self.logger.error("Embedded Runtime 初始化失败：\(error.localizedDescription)")
+                    return
+                }
+                guard let self else { return }
+                self.refreshAutomationOwnership()
+                guard self.automationStarted else { return }
+                guard self.networkProbeEnabled else {
+                    self.clearNetworkStatus()
+                    return
+                }
+                self.refreshStatus(allowAutoLogin: false)
+                self.startProbeTimer(initialDelay: 5)
+            }
+            if !automationStarted {
+                statusText = "●  自动化由其他客户端管理"
+                statusTone = .neutral
+                statusDetail = automationOwnershipDescription
+            }
+            return
+        }
+        guard automationStarted else {
+            statusText = "●  自动化由其他客户端管理"
+            statusTone = .neutral
+            statusDetail = automationOwnershipDescription
+            return
+        }
         guard networkProbeEnabled else {
             clearNetworkStatus()
             return
@@ -92,6 +147,11 @@ final class AppModel: ObservableObject {
     func stop() {
         automationStarted = false
         automation.stop()
+        automationOwnership.stop()
+        automationOwnershipSnapshot = automationOwnership.snapshot
+        if let embeddedRuntime {
+            Task { try? await embeddedRuntime.shutdown() }
+        }
         isRefreshing = false
         isBusy = false
     }

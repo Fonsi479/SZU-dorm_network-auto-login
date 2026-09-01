@@ -6,11 +6,12 @@
 
 ## 下载与版本
 
-当前公开候选是 `2.0.0-beta.1`，不是生产稳定版。GitHub 自动生成的 `Source code` 包含完整双平台源码；普通用户应下载与系统对应的 ZIP，而不是源码包。
+当前源码中的 macOS 候选是 `2.0.0-beta.2`，Windows 仍为 `2.0.0-beta.1`；两者都不是生产稳定版。GitHub 自动生成的 `Source code` 包含完整双平台源码；普通用户应下载与系统对应的 ZIP，而不是源码包。
 
 | 版本线 | macOS | Windows | 状态 |
 |---|---|---|---|
-| 2.0 Beta 1 | [`macos-v2.0.0-beta.1`](https://github.com/Fonsi479/SZU-dorm_network-auto-login/releases/tag/macos-v2.0.0-beta.1) | [`windows-v2.0.0-beta.1`](https://github.com/Fonsi479/SZU-dorm_network-auto-login/releases/tag/windows-v2.0.0-beta.1) | 双 Provider；Teaching 默认关闭；分平台 prerelease |
+| 2.0 Beta 2 / Beta 1 | `macos-v2.0.0-beta.2`（待发布） | [`windows-v2.0.0-beta.1`](https://github.com/Fonsi479/SZU-dorm_network-auto-login/releases/tag/windows-v2.0.0-beta.1) | macOS 新增可嵌入 Runtime；Teaching 默认关闭；分平台 prerelease |
+| 2.0 Beta 1 | [`macos-v2.0.0-beta.1`](https://github.com/Fonsi479/SZU-dorm_network-auto-login/releases/tag/macos-v2.0.0-beta.1) | — | 已发布 macOS 历史候选 |
 | 1.x Legacy | [`macos-v1.1.0`](https://github.com/Fonsi479/SZU-dorm_network-auto-login/releases/tag/macos-v1.1.0) | [`windows-v1.0.0`](https://github.com/Fonsi479/SZU-dorm_network-auto-login/releases/tag/windows-v1.0.0) | Dorm-only 历史归档，不含 v2 安全修复 |
 
 macOS 与 Windows 始终使用独立 Tag、Release 和资产，但 v2 源码统一由 `main` 维护。完整分支、版本号和晋级规则见 [版本与发行策略](docs/VERSIONING_AND_RELEASES.md)。
@@ -20,7 +21,7 @@ macOS 与 Windows 始终使用独立 Tag、Release 和资产，但 v2 源码统�
 ## 安全原则
 
 - `nonCampus`、`ambiguous`、`unknown`、Provider 关闭或会话状态未知时，读取凭据和认证请求均为 0。
-- 手动登录与自动登录执行相同的环境、Portal 身份、源路由和明确离线门控；手动按钮不是绕过入口。
+- 普通登录执行相同的环境、Portal 身份、源路由和明确离线门控；Portal 假在线恢复还必须满足直连出口失败、本机精确记录缺失且设备数小于 3，手动按钮不是绕过入口。
 - macOS 使用 Keychain，Windows 使用 Credential Manager；配置、CLI、进程参数、日志和诊断中不保存密码。
 - 认证请求绑定目标路由选出的源 IP；SRun 使用 HTTPS 默认 TLS 校验、固定 Portal 主机、禁用系统代理继承和跨主机重定向。
 - 任意时刻最多一个认证操作。网络 generation 改变、暂停或退出会取消旧任务，旧结果不得继续发送后续请求。
@@ -43,19 +44,17 @@ macOS 与 Windows 使用同一份协议契约、Fixture 和错误码，但构建
 
 ### macOS
 
-- macOS 13 或更新版本；原生 Swift、AppKit/SwiftUI、Network.framework、Security、ServiceManagement。
+- macOS 13 或更新版本；单一通用 App 同时包含 arm64 与 x86_64，使用原生 Swift、AppKit/SwiftUI、Network.framework、Security、ServiceManagement。
 - 为兼容 1.x 升级、Bundle ID、Keychain 与登录项，App Bundle 仍名为 `SZU Dorm Login.app`；这不表示 v2 仅支持 Dorm。
 - 最终 App 不依赖 Python，也不依赖 Codex 管家仓库或外部相对路径 Package。
-- 状态栏提供 Dorm/Teaching 状态与开关、暂停/恢复、立即检查、明确登录、设置、诊断和退出。
+- 独立 App 保持状态栏形态，不打开主窗口；状态栏提供 Dorm/Teaching 状态与开关、暂停/恢复、立即检查、明确登录、设置、诊断和退出。
 - App 内附无密码 JSON CLI `szu-campus-netctl`，供脚本或 Codex 管家可选调用。
 
 开发与验证：
 
 ```bash
-cd macos
 swift test --disable-automatic-resolution
 swift build --configuration release --disable-automatic-resolution
-cd ..
 bash scripts/build_app.sh
 bash scripts/verify_app.sh
 ```
@@ -63,12 +62,12 @@ bash scripts/verify_app.sh
 App 产物：
 
 ```text
-%LOCALAPPDATA%\SZU Dorm NetLogin\Logs\netlogin.log
+dist/SZU Dorm Login.app
 ```
 
 ### Windows
 
-- Windows 10/11；Python 源码通过 PyInstaller 生成两个独立 PE，最终用户无需安装 Python。
+- Windows 10/11；分别生成原生 x64 与 ARM64 包，最终用户无需安装 Python。
 - `SZU Campus Network.exe` 是 GUI；`szu-campus-netctl.exe` 是 JSON CLI。
 - 密码只通过 GUI 写入 Windows Credential Manager；CLI 不接受密码字段、参数、环境变量或配置值。
 
@@ -82,9 +81,10 @@ python3 scripts/verify_windows_package.py --package-root .
 PE 必须在 Windows 或 Windows CI 中构建：
 
 ```powershell
+# x64；ARM64 改用 requirements-windows-arm64.lock 和 --architecture arm64
 py -3 -m pip install --require-hashes -r requirements-windows.lock
 py -3 scripts\build_windows_exe.py --version 2.0.0
-py -3 scripts\build_windows_package.py --version 2.0.0 --release-label beta.1
+py -3 scripts\build_windows_package.py --version 2.0.0 --release-label beta.1 --architecture x64
 ```
 
 ## JSON CLI 契约
@@ -120,11 +120,34 @@ Windows 配置与日志位于当前用户的本地应用数据目录。迁移不
 
 操作前请阅读 [迁移与回滚](docs/MIGRATION_AND_ROLLBACK.md)。
 
-## Codex 管家可选适配
+## SwiftPM 嵌入与 Codex 管家
 
-独立 SZUNET App 是认证和凭据的唯一所有者。Codex 管家只能读取脱敏状态并发送高层命令；它不能读取密码，也不拥有 Provider、Coordinator、设置或最终 SZUNET App。
+`SZUNETEmbedded` 把同一套 Provider、Coordinator、安全门控、设置和通用 SwiftUI 页面作为进程内模块公开；宿主不需要安装独立 App 或调用 CLI，也不得复制这套实现。独立 `SZU Dorm Login.app` 继续作为完整发行形态。
 
-默认边界是稳定 JSON CLI。`SZUNETFeature` 只是这个 CLI 的 Swift 消费端：它不链接 `SZUNetCore`，不创建 Provider、Coordinator、凭据存储或自动登录任务，也不提供账号/密码或 Provider 设置界面。独立 App 未安装或 CLI 不可用时会失败关闭。没有 localhost HTTP 服务。
+`SZUNETFeature` 继续保持传输无关和 CLI 兼容，不链接 `SZUNetCore`。需要完整进程内能力的宿主显式依赖 `SZUNETEmbedded`；脚本和旧消费者仍可使用稳定 JSON CLI。两种形态都没有 localhost HTTP 服务。
+
+宿主可从 Git URL 或本地 checkout 引用同一公开产品：
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/Fonsi479/SZU-dorm_network-auto-login.git", branch: "main"),
+]
+
+// target dependencies
+.product(name: "SZUNETEmbedded", package: "szustd")
+```
+
+本地开发可给 checkout 一个稳定别名：
+
+```swift
+dependencies: [
+    .package(name: "SZUNET", path: "../campus"),
+]
+
+.product(name: "SZUNETEmbedded", package: "SZUNET")
+```
+
+官方同 Team 构建使用 `89546MG775.com.fonsi.szunet.credentials` 共享 Keychain access group；构建时必须提供授权该组的 provisioning profile。普通源码自编译/ad-hoc 构建保持 local 模式，不会冒充可共享凭据。
 
 详见 [Codex 管家适配边界](docs/CODEX_BUTLER_ADAPTER.md)。
 
@@ -141,7 +164,8 @@ Windows 配置与日志位于当前用户的本地应用数据目录。迁移不
 ## 源码结构
 
 ```text
-macos/                         原生 Swift App、CLI、CLI-only SZUNETFeature 与测试
+Package.swift                  可从 Git URL 直接引用的公开 SwiftPM 入口
+macos/                         原生 Swift App、CLI、SZUNETFeature/Embedded 与测试
 apps/windows_desktop/          Windows Tk GUI
 src/szu_netlogin/              Windows/Python Provider、Coordinator 与 CLI
 protocol-spec/                 双平台共享 Schema、Fixture、向量和错误码

@@ -14,12 +14,14 @@ from pathlib import Path
 
 EXECUTABLE_NAME = "SZU Campus Network.exe"
 CLI_EXECUTABLE_NAME = "szu-campus-netctl.exe"
+MACHINE_TYPES = {"x64": 0x8664, "arm64": 0xAA64}
 SOURCE_REQUIRED_PATHS = (
     "README.md",
     "LICENSE",
     "requirements.txt",
     "requirements-build.txt",
     "requirements-windows.lock",
+    "requirements-windows-arm64.lock",
     "config.example.yaml",
     "apps/windows_desktop/README.md",
     "apps/windows_desktop/szu_windows_desktop.py",
@@ -98,6 +100,7 @@ def verify_executable(
     executable: Path,
     *,
     expected_subsystem: int | None = None,
+    expected_architecture: str | None = None,
 ) -> list[str]:
     failures: list[str] = []
     if not executable.is_file():
@@ -131,9 +134,15 @@ def verify_executable(
     except OSError as exc:
         return [f"无法读取 Windows GUI：{exc}"]
 
-    if machine != 0x8664:
+    accepted_machines = (
+        {MACHINE_TYPES[expected_architecture]}
+        if expected_architecture is not None
+        else set(MACHINE_TYPES.values())
+    )
+    if machine not in accepted_machines:
+        expected = expected_architecture or "x64/arm64"
         failures.append(
-            f"Windows 可执行文件架构不是 AMD64 (0x8664)：0x{machine:04x}"
+            f"Windows 可执行文件架构不是 {expected}：0x{machine:04x}"
         )
     if section_count == 0 or section_count > 96:
         failures.append(f"Windows 可执行文件 section 数异常：{section_count}")
@@ -158,9 +167,17 @@ def verify_executable(
     return failures
 
 
-def verify_release(root: Path) -> list[str]:
-    failures = verify_executable(root / EXECUTABLE_NAME, expected_subsystem=2)
-    failures += verify_executable(root / CLI_EXECUTABLE_NAME, expected_subsystem=3)
+def verify_release(root: Path, *, expected_architecture: str | None = None) -> list[str]:
+    failures = verify_executable(
+        root / EXECUTABLE_NAME,
+        expected_subsystem=2,
+        expected_architecture=expected_architecture,
+    )
+    failures += verify_executable(
+        root / CLI_EXECUTABLE_NAME,
+        expected_subsystem=3,
+        expected_architecture=expected_architecture,
+    )
     for relative in (
         "README.txt",
         "SHA256.txt",
@@ -265,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--package-root", type=Path)
     parser.add_argument("--executable", type=Path)
     parser.add_argument("--release-root", type=Path)
+    parser.add_argument("--architecture", choices=tuple(MACHINE_TYPES))
     args = parser.parse_args(argv)
 
     root = Path(__file__).resolve().parents[1]
@@ -275,10 +293,14 @@ def main(argv: list[str] | None = None) -> int:
             if target.name == CLI_EXECUTABLE_NAME
             else 2 if target.name == EXECUTABLE_NAME else None
         )
-        failures = verify_executable(target, expected_subsystem=expected_subsystem)
+        failures = verify_executable(
+            target,
+            expected_subsystem=expected_subsystem,
+            expected_architecture=args.architecture,
+        )
     elif args.release_root:
         target = args.release_root.expanduser().resolve()
-        failures = verify_release(target)
+        failures = verify_release(target, expected_architecture=args.architecture)
     else:
         target = (args.package_root or root).expanduser().resolve()
         failures = verify_source(target)

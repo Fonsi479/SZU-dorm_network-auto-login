@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import socket
 import os
 import subprocess
@@ -19,8 +20,13 @@ from .config import (
 )
 from .contracts import AuthOutcome, AuthResult, CredentialHandle, NetworkContext, SessionState
 from .coordinator import CampusNetworkCoordinator, CoordinatorSettings
+from .logger import get_logger
 from .password_store import get_provider_password
-from .portal_detect import classify_network_environment, probe_gateway
+from .portal_detect import (
+    classify_network_environment,
+    probe_campus_egress_direct,
+    probe_gateway,
+)
 from .platform_paths import get_user_log_dir
 from .platform_paths import open_path_with_default_app
 from .providers import DormDrcomProvider, TeachingSRunProvider
@@ -178,12 +184,14 @@ class WindowsCampusService:
         provider_factory: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         process_lock: ProcessAuthenticationLock | Any | None = None,
         coordinator_factory: Callable[..., CampusNetworkCoordinator] = CampusNetworkCoordinator,
+        direct_egress_probe: Callable[[dict[str, Any], str], Any] = probe_campus_egress_direct,
     ) -> None:
         self.config_loader = config_loader
         self.detector = detector or WindowsEnvironmentDetector()
         self.provider_factory = provider_factory or self._default_providers
         self.process_lock = process_lock or ProcessAuthenticationLock()
         self.coordinator_factory = coordinator_factory
+        self.direct_egress_probe = direct_egress_probe
         self.generation = 0
         self._providers: dict[str, Any] | None = None
         self._coordinator: CampusNetworkCoordinator | None = None
@@ -220,6 +228,8 @@ class WindowsCampusService:
                 "errorCode": item.session.error_code or None,
                 "account": self._mask_account(self._username(config, provider_id)),
                 "accountMatch": item.session.account_match,
+                "onlineDeviceCount": item.session.online_device_count,
+                "onlineDeviceLimit": item.session.online_device_limit,
             }
         return {
             "networkContext": status.network_context,
@@ -233,6 +243,98 @@ class WindowsCampusService:
     def check(self) -> dict[str, Any]:
         return self.status()
 
+    def recover_automatically(self) -> AuthResult:
+        if not self.process_lock.acquire():
+            return AuthResult(AuthOutcome.BLOCKED, "auto", error_code="OPERATION_IN_PROGRESS")
+        try:
+            result, session_state = self._recover_automatically_locked()
+            count = result.online_device_count
+            limit = result.online_device_limit
+            get_logger().info(
+                "automatic_recovery trigger=host-scheduler session=%s devices=%s/%s outcome=%s result=%s",
+                session_state,
+                count if count is not None else "unknown",
+                limit if limit is not None else "unknown",
+                result.outcome.value,
+                result.error_code or "none",
+            )
+            return result
+        finally:
+            self.process_lock.release()
+
+    def _recover_automatically_locked(self) -> tuple[AuthResult, str]:
+        config = self.config_loader()
+        snapshot = self.detector.detect(config, self.generation)
+        _providers, coordinator = self._runtime(config)
+        status = coordinator.status(snapshot.contexts, self._usernames(config))
+        if status.error_code or status.generation != self.generation:
+            code = status.error_code or "ENV_NETWORK_CHANGED"
+            return AuthResult(AuthOutcome.BLOCKED, "auto", error_code=code), "unknown"
+        if is_paused() or not bool((config.get("general") or {}).get("autoDetect", True)):
+            return AuthResult(
+                AuthOutcome.BLOCKED,
+                status.network_context,
+                error_code="OPERATION_CANCELLED",
+            ), "blocked"
+
+        selected = status.providers.get(status.network_context)
+        if selected is None or not selected.enabled:
+            return AuthResult(
+                AuthOutcome.BLOCKED,
+                status.network_context,
+                error_code="ENV_AMBIGUOUS" if status.network_context == "ambiguous" else "ENV_NON_CAMPUS",
+            ), "unknown"
+        session = selected.session
+        credential_loaders = self._credential_loaders(config)
+
+        if status.network_context == "dorm" and session.state in {
+            SessionState.ONLINE,
+            SessionState.UNKNOWN,
+        }:
+            context = snapshot.contexts["dorm"]
+            direct = self.direct_egress_probe(config, context.source_ip)
+            if direct.ok:
+                return AuthResult(
+                    AuthOutcome.UNCHANGED,
+                    "dorm",
+                    session_state=SessionState.ONLINE,
+                    error_code="SESSION_ONLINE",
+                    online_device_count=session.online_device_count,
+                    online_device_limit=session.online_device_limit,
+                ), session.state.value
+            result = coordinator.recover_stale_dorm_session(
+                snapshot.contexts,
+                self._usernames(config),
+                credential_loaders,
+            )
+            return result, session.state.value
+
+        if session.state == SessionState.OFFLINE:
+            result = coordinator.login(
+                snapshot.contexts,
+                self._usernames(config),
+                credential_loaders,
+                requested_provider=status.network_context,
+                manual=False,
+            )
+            return result, session.state.value
+        if session.state == SessionState.ONLINE:
+            return AuthResult(
+                AuthOutcome.UNCHANGED,
+                status.network_context,
+                session_state=SessionState.ONLINE,
+                error_code="SESSION_ONLINE",
+                online_device_count=session.online_device_count,
+                online_device_limit=session.online_device_limit,
+            ), session.state.value
+        return AuthResult(
+            AuthOutcome.BLOCKED,
+            status.network_context,
+            error_code=session.error_code or "SESSION_UNKNOWN",
+            online_device_count=session.online_device_count,
+            online_device_limit=session.online_device_limit,
+        ), session.state.value
+
     def login(self, requested_provider: str = "auto", *, manual: bool = False) -> AuthResult:
         if not self.process_lock.acquire():
             return AuthResult(AuthOutcome.BLOCKED, requested_provider, error_code="OPERATION_IN_PROGRESS")
@@ -241,11 +343,57 @@ class WindowsCampusService:
         finally:
             self.process_lock.release()
 
-    def _login_locked(self, requested_provider: str, *, manual: bool) -> AuthResult:
+    def force_login(self, requested_provider: str = "dorm") -> AuthResult:
+        """Perform an explicitly confirmed Dorm slot replacement.
+
+        This is separate from ``login`` so automatic/background callers cannot
+        opt into eviction accidentally.  The coordinator re-reads the portal
+        list and accepts the operation only when it still observes a confirmed
+        full Dorm account (3/3 devices).
+        """
+
+        if requested_provider != "dorm":
+            return AuthResult(
+                AuthOutcome.BLOCKED,
+                requested_provider,
+                error_code="AUTH_DEVICE_REPLACEMENT_UNSUPPORTED",
+            )
+        if not self.process_lock.acquire():
+            return AuthResult(AuthOutcome.BLOCKED, requested_provider, error_code="OPERATION_IN_PROGRESS")
+        try:
+            return self._login_locked(requested_provider, manual=True, force=True)
+        finally:
+            self.process_lock.release()
+
+    def _login_locked(
+        self,
+        requested_provider: str,
+        *,
+        manual: bool,
+        force: bool = False,
+    ) -> AuthResult:
         config = self.config_loader()
         snapshot = self.detector.detect(config, self.generation)
         _providers, coordinator = self._runtime(config)
 
+        credential_loaders = self._credential_loaders(config)
+        if force:
+            return coordinator.force_login(
+                snapshot.contexts,
+                self._usernames(config),
+                credential_loaders,
+                requested_provider=requested_provider,
+            )
+        return coordinator.login(
+            snapshot.contexts,
+            self._usernames(config),
+            credential_loaders,
+            requested_provider=requested_provider,
+            manual=manual,
+        )
+
+    @staticmethod
+    def _credential_loaders(config: dict[str, Any]) -> dict[str, Callable[[], CredentialHandle | None]]:
         def credential_loader(provider_id: str):
             def open_credential() -> CredentialHandle | None:
                 secret = get_provider_password(config, provider_id)
@@ -253,16 +401,10 @@ class WindowsCampusService:
 
             return open_credential
 
-        return coordinator.login(
-            snapshot.contexts,
-            self._usernames(config),
-            {
-                provider_id: credential_loader(provider_id)
-                for provider_id in ("dorm", "teaching")
-            },
-            requested_provider=requested_provider,
-            manual=manual,
-        )
+        return {
+            provider_id: credential_loader(provider_id)
+            for provider_id in ("dorm", "teaching")
+        }
 
     def logout(self, requested_provider: str) -> AuthResult:
         if not self.process_lock.acquire():
@@ -358,6 +500,8 @@ class WindowsCampusService:
                     "errorCode": code,
                     "account": "****",
                     "accountMatch": None,
+                    "onlineDeviceCount": None,
+                    "onlineDeviceLimit": None,
                 }
                 for provider_id in ("dorm", "teaching")
             },
@@ -412,6 +556,47 @@ def set_provider_enabled(
             break
     if not replaced:
         raise ValueError(f"providers.{provider_id}.enabled not found")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text("".join(lines), encoding="utf-8")
+    temporary.replace(path)
+
+
+def set_provider_account(
+    provider_id: str, account: str, *, path: Path = DEFAULT_CONFIG_PATH
+) -> None:
+    if provider_id not in {"dorm", "teaching"}:
+        raise ValueError("provider must be dorm or teaching")
+    account = account.strip()
+    if not account or len(account) > 128:
+        raise ValueError("account must contain 1 to 128 characters")
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    encoded = json.dumps(account, ensure_ascii=False)
+    in_providers = False
+    in_target = False
+    provider_replaced = False
+    legacy_replaced = provider_id != "dorm"
+    in_user = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            in_providers = stripped == "providers:"
+            in_user = stripped == "user:"
+            in_target = False
+        elif in_providers and indent == 2 and stripped.endswith(":"):
+            in_target = stripped == f"{provider_id}:"
+        elif in_target and indent == 4 and stripped.startswith("accountLabel:"):
+            newline = "\n" if line.endswith("\n") else ""
+            lines[index] = f"    accountLabel: {encoded}{newline}"
+            provider_replaced = True
+        elif in_user and indent == 2 and stripped.startswith("username:"):
+            if provider_id == "dorm":
+                newline = "\n" if line.endswith("\n") else ""
+                lines[index] = f"  username: {encoded}{newline}"
+                legacy_replaced = True
+    if not provider_replaced or not legacy_replaced:
+        raise ValueError(f"providers.{provider_id}.accountLabel not found")
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text("".join(lines), encoding="utf-8")
     temporary.replace(path)

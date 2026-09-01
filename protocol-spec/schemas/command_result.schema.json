@@ -106,6 +106,25 @@
     "ownerAppRunning": {
       "type": "boolean"
     },
+    "onlineDeviceCount": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 3
+    },
+    "onlineDeviceLimit": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "const": 3
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "message": {
       "type": "string",
       "maxLength": 1000

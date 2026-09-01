@@ -7,7 +7,7 @@ import os
 from typing import Any, TextIO
 
 from .config import ConfigError, get_password_env_name, load_config
-from .dorm_drcom_client import DormDrcomClient
+from .dorm_drcom_client import DORM_ONLINE_DEVICE_LIMIT, DormDrcomClient
 from .logger import LOG_FILE, get_logger
 from .password_store import describe_password_source, get_password
 from .platform_paths import get_user_log_dir
@@ -117,6 +117,18 @@ def main() -> int:
             print("校园网门户已确认登录，不需要重复登录。")
             logger.info("门户会话已在线，登录退出")
             return 0
+        online_device_count = getattr(session, "online_device_count", None)
+        if not isinstance(online_device_count, int) or isinstance(online_device_count, bool):
+            print("账号在线设备数无法确认，本轮不读取账号密码。")
+            logger.warning("登录停止本轮：online device count unknown")
+            return 0
+        if online_device_count >= DORM_ONLINE_DEVICE_LIMIT:
+            print(
+                f"账号已有 {online_device_count}/{DORM_ONLINE_DEVICE_LIMIT} 台设备在线，"
+                "为避免挤下其他设备，本轮不读取账号密码。"
+            )
+            logger.warning("登录停止本轮：AUTH_DEVICE_LIMIT")
+            return 0
         if session.state != "offline":
             print("校园网门户状态或身份无法确认，本轮不读取账号密码。")
             logger.warning("登录停止本轮：portal session not confirmed offline")
@@ -219,6 +231,8 @@ def login_failure_reason_label(reason: str) -> str:
         "server_failed": "门户返回失败",
         "request_exception": "登录请求异常",
         "source_ip_unverified": "未确认处于校园网源地址",
+        "AUTH_DEVICE_LIMIT": "账号在线设备已达上限",
+        "SESSION_UNKNOWN": "门户会话状态暂时不可用",
         "login_not_confirmed": "门户未确认登录会话",
         "session_verification_unavailable": "门户会话状态暂时不可用",
         "portal_url_invalid": "门户地址配置不安全",

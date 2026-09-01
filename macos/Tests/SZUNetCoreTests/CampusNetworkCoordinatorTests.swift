@@ -87,6 +87,249 @@ struct CampusNetworkCoordinatorTests {
         }
     }
 
+    @Test("Dorm 3/3 blocks manual and automatic login before credential access")
+    func deviceLimitBlocksNormalAndAutomaticLogin() async {
+        for automatic in [false, true] {
+            let provider = CoordinatorStubProvider(
+                .dorm,
+                onlineDeviceCount: 3,
+                onlineDeviceLimit: 3
+            )
+            let broker = CoordinatorCredentialBroker()
+            let coordinator = CampusNetworkCoordinator(
+                providers: [provider],
+                credentialBroker: broker
+            )
+            let result = await coordinator.login(
+                context: context(dorm: true),
+                username: "synthetic",
+                automatic: automatic
+            )
+
+            #expect(result.outcome == .blocked)
+            #expect(result.errorCode == "AUTH_DEVICE_LIMIT")
+            #expect(result.onlineDeviceCount == 3)
+            #expect(result.onlineDeviceLimit == 3)
+            #expect(await broker.readCount == 0)
+            #expect(await provider.loginCount == 0)
+        }
+    }
+
+    @Test("force login bypasses only a confirmed Dorm 3/3 gate")
+    func forceLoginRequiresDormDeviceLimit() async {
+        let provider = CoordinatorStubProvider(
+            .dorm,
+            onlineDeviceCount: 3,
+            onlineDeviceLimit: 3
+        )
+        let broker = CoordinatorCredentialBroker()
+        let coordinator = CampusNetworkCoordinator(
+            providers: [provider],
+            credentialBroker: broker
+        )
+        let forced = await coordinator.forceLogin(
+            context: context(dorm: true),
+            username: "synthetic",
+            requestedProvider: .dorm
+        )
+        #expect(forced.outcome == .succeeded)
+        #expect(await broker.readCount == 1)
+        #expect(await provider.loginCount == 1)
+
+        let belowLimitProvider = CoordinatorStubProvider(
+            .dorm,
+            onlineDeviceCount: 2,
+            onlineDeviceLimit: 3
+        )
+        let belowLimitBroker = CoordinatorCredentialBroker()
+        let belowLimitCoordinator = CampusNetworkCoordinator(
+            providers: [belowLimitProvider],
+            credentialBroker: belowLimitBroker
+        )
+        let belowLimit = await belowLimitCoordinator.forceLogin(
+            context: context(dorm: true),
+            username: "synthetic"
+        )
+        #expect(belowLimit.errorCode == "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED")
+        #expect(await belowLimitBroker.readCount == 0)
+        #expect(await belowLimitProvider.loginCount == 0)
+
+        let teaching = CoordinatorStubProvider(
+            .teaching,
+            onlineDeviceCount: 3,
+            onlineDeviceLimit: 3
+        )
+        let teachingBroker = CoordinatorCredentialBroker()
+        let teachingCoordinator = CampusNetworkCoordinator(
+            providers: [teaching],
+            credentialBroker: teachingBroker,
+            settings: .init(dormEnabled: false, teachingEnabled: true)
+        )
+        let teachingResult = await teachingCoordinator.forceLogin(
+            context: context(teaching: true),
+            username: "synthetic",
+            requestedProvider: .teaching
+        )
+        #expect(teachingResult.errorCode == "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED")
+        #expect(await teachingBroker.readCount == 0)
+        #expect(await teaching.loginCount == 0)
+    }
+
+    @Test("Dorm unknown device count fails closed before credentials")
+    func unknownDormDeviceCountBlocksLogin() async {
+        let provider = CoordinatorStubProvider(
+            .dorm,
+            onlineDeviceCount: nil,
+            onlineDeviceLimit: 3
+        )
+        let broker = CoordinatorCredentialBroker()
+        let coordinator = CampusNetworkCoordinator(
+            providers: [provider],
+            credentialBroker: broker
+        )
+
+        let result = await coordinator.login(
+            context: context(dorm: true),
+            username: "synthetic"
+        )
+
+        #expect(result.errorCode == "SESSION_UNKNOWN")
+        #expect(await broker.readCount == 0)
+        #expect(await provider.loginCount == 0)
+    }
+
+    @Test("stale Dorm recovery requires authoritative missing local record")
+    func staleDormRecoveryEvidenceGate() async {
+        let present = RecoveryProviderStub(sessions: [
+            ProviderSessionResult(
+                state: .online,
+                accountMatch: .matches,
+                exactOnlineRecordPresent: true,
+                onlineDeviceCount: 2,
+                onlineDeviceLimit: 3
+            ),
+        ])
+        let presentBroker = CoordinatorCredentialBroker()
+        let presentCoordinator = CampusNetworkCoordinator(
+            providers: [present],
+            credentialBroker: presentBroker
+        )
+        let presentResult = await presentCoordinator.recoverStaleDormSession(
+            context: context(dorm: true),
+            username: "synthetic"
+        )
+        #expect(presentResult.errorCode == "NET_CAMPUS_EGRESS_UNAVAILABLE")
+        #expect(await presentBroker.readCount == 0)
+        #expect(await present.loginCount == 0)
+
+        let missing = RecoveryProviderStub(sessions: [
+            ProviderSessionResult(
+                state: .unknown,
+                accountMatch: .matches,
+                exactOnlineRecordPresent: false,
+                onlineDeviceCount: 2,
+                onlineDeviceLimit: 3,
+                errorCode: "SESSION_UNKNOWN"
+            ),
+        ])
+        let missingBroker = CoordinatorCredentialBroker()
+        let missingCoordinator = CampusNetworkCoordinator(
+            providers: [missing],
+            credentialBroker: missingBroker
+        )
+        let missingResult = await missingCoordinator.recoverStaleDormSession(
+            context: context(dorm: true),
+            username: "synthetic"
+        )
+        #expect(missingResult.outcome == .succeeded)
+        #expect(await missingBroker.readCount == 1)
+        #expect(await missing.loginCount == 1)
+    }
+
+    @Test("stale recovery blocks unknown count and rechecks a dynamic 3/3 limit")
+    func staleDormRecoveryRechecksDynamicLimit() async {
+        let unknown = RecoveryProviderStub(sessions: [
+            ProviderSessionResult(
+                state: .unknown,
+                accountMatch: .matches,
+                exactOnlineRecordPresent: false,
+                onlineDeviceCount: nil,
+                onlineDeviceLimit: 3,
+                errorCode: "SESSION_UNKNOWN"
+            ),
+        ])
+        let unknownBroker = CoordinatorCredentialBroker()
+        let unknownCoordinator = CampusNetworkCoordinator(
+            providers: [unknown],
+            credentialBroker: unknownBroker
+        )
+        let unknownResult = await unknownCoordinator.recoverStaleDormSession(
+            context: context(dorm: true),
+            username: "synthetic"
+        )
+        #expect(unknownResult.errorCode == "SESSION_UNKNOWN")
+        #expect(await unknownBroker.readCount == 0)
+
+        let changing = RecoveryProviderStub(sessions: [
+            ProviderSessionResult(
+                state: .unknown,
+                accountMatch: .matches,
+                exactOnlineRecordPresent: false,
+                onlineDeviceCount: 3,
+                onlineDeviceLimit: 3,
+                errorCode: "SESSION_UNKNOWN"
+            ),
+            ProviderSessionResult(
+                state: .unknown,
+                accountMatch: .matches,
+                exactOnlineRecordPresent: false,
+                onlineDeviceCount: 2,
+                onlineDeviceLimit: 3,
+                errorCode: "SESSION_UNKNOWN"
+            ),
+        ])
+        let changingBroker = CoordinatorCredentialBroker()
+        let changingCoordinator = CampusNetworkCoordinator(
+            providers: [changing],
+            credentialBroker: changingBroker
+        )
+        let full = await changingCoordinator.recoverStaleDormSession(
+            context: context(dorm: true),
+            username: "synthetic"
+        )
+        let available = await changingCoordinator.recoverStaleDormSession(
+            context: context(dorm: true),
+            username: "synthetic"
+        )
+        #expect(full.errorCode == "AUTH_DEVICE_LIMIT")
+        #expect(available.outcome == .succeeded)
+        #expect(await changingBroker.readCount == 1)
+        #expect(await changing.loginCount == 1)
+    }
+
+    @Test("automatic login reauthorizes ownership immediately before credential access")
+    func automaticLoginCredentialAuthorization() async {
+        let provider = CoordinatorStubProvider(.dorm)
+        let broker = CoordinatorCredentialBroker()
+        let authorization = CoordinatorCredentialAuthorization(allowed: false)
+        let coordinator = CampusNetworkCoordinator(
+            providers: [provider],
+            credentialBroker: broker
+        )
+
+        let result = await coordinator.login(
+            context: context(dorm: true),
+            username: "synthetic",
+            automatic: true,
+            credentialAuthorization: { await authorization.authorize() }
+        )
+
+        #expect(result.errorCode == "AUTOMATION_OWNER_CONFLICT")
+        #expect(await authorization.checkCount == 1)
+        #expect(await broker.readCount == 0)
+        #expect(await provider.loginCount == 0)
+    }
+
     @Test("generation change cancels prior work, blocks stale completion, and global mutex rejects overlap")
     func generationCancellationAndMutex() async {
         let provider = CoordinatorStubProvider(.dorm, holdSession: true)
@@ -244,11 +487,25 @@ private actor CoordinatorCredentialBroker: CampusCredentialBroker {
     }
 }
 
+private actor CoordinatorCredentialAuthorization {
+    private(set) var checkCount = 0
+    private let allowed: Bool
+
+    init(allowed: Bool) { self.allowed = allowed }
+
+    func authorize() -> Bool {
+        checkCount += 1
+        return allowed
+    }
+}
+
 private actor CoordinatorStubProvider: NetworkAuthProvider {
     nonisolated let providerID: CampusProviderID
     private let session: ProviderSessionState
     private let loginResult: ProviderAuthResult
     private let holdSession: Bool
+    private let onlineDeviceCount: Int?
+    private let onlineDeviceLimit: Int?
     private var sessionStarted = false
     private var startWaiters: [CheckedContinuation<Void, Never>] = []
     private var releaseWaiter: CheckedContinuation<Void, Never>?
@@ -260,7 +517,9 @@ private actor CoordinatorStubProvider: NetworkAuthProvider {
         _ providerID: CampusProviderID,
         session: ProviderSessionState = .offline,
         loginResult: ProviderAuthResult? = nil,
-        holdSession: Bool = false
+        holdSession: Bool = false,
+        onlineDeviceCount: Int? = nil,
+        onlineDeviceLimit: Int? = nil
     ) {
         self.providerID = providerID
         self.session = session
@@ -272,6 +531,8 @@ private actor CoordinatorStubProvider: NetworkAuthProvider {
             clientIP: "198.51.100.27"
         )
         self.holdSession = holdSession
+        self.onlineDeviceCount = onlineDeviceCount
+        self.onlineDeviceLimit = onlineDeviceLimit
     }
 
     func probeEnvironment(_ context: CampusNetworkContext) async -> ProviderProbe {
@@ -306,6 +567,8 @@ private actor CoordinatorStubProvider: NetworkAuthProvider {
             state: session,
             accountMatch: session == .online ? .matches : .unknown,
             clientIP: probe.clientIP,
+            onlineDeviceCount: onlineDeviceCount,
+            onlineDeviceLimit: onlineDeviceLimit,
             errorCode: session == .unknown ? "SESSION_UNKNOWN" : nil
         )
     }
@@ -343,6 +606,64 @@ private actor CoordinatorStubProvider: NetworkAuthProvider {
         guard !sessionStarted else { return }
         await withCheckedContinuation { startWaiters.append($0) }
     }
+}
+
+private actor RecoveryProviderStub: NetworkAuthProvider {
+    nonisolated let providerID = CampusProviderID.dorm
+    private var sessions: [ProviderSessionResult]
+    private(set) var loginCount = 0
+
+    init(sessions: [ProviderSessionResult]) {
+        self.sessions = sessions
+    }
+
+    func probeEnvironment(_ context: CampusNetworkContext) async -> ProviderProbe {
+        ProviderProbe(
+            providerID: .dorm,
+            support: context.dormPortalIdentityVerified ? .supported : .unsupported,
+            confidence: context.dormPortalIdentityVerified ? .verified : .unknown,
+            sourceIP: context.sourceIP,
+            clientIP: context.sourceIP
+        )
+    }
+
+    func sessionStatus(
+        _ context: CampusNetworkContext,
+        probe: ProviderProbe,
+        username: String
+    ) async -> ProviderSessionResult {
+        guard !sessions.isEmpty else {
+            return ProviderSessionResult(state: .unknown, errorCode: "SESSION_UNKNOWN")
+        }
+        return sessions.removeFirst()
+    }
+
+    func login(
+        _ context: CampusNetworkContext,
+        probe: ProviderProbe,
+        username: String,
+        credential: CredentialHandle
+    ) async -> ProviderAuthResult {
+        loginCount += 1
+        return ProviderAuthResult(
+            outcome: .succeeded,
+            providerID: .dorm,
+            sessionState: .online,
+            accountMatch: .matches,
+            onlineDeviceCount: 2,
+            onlineDeviceLimit: 3
+        )
+    }
+
+    func logout(
+        _ context: CampusNetworkContext,
+        probe: ProviderProbe,
+        username: String
+    ) async -> ProviderAuthResult {
+        .blocked(.dorm, "INTERNAL_ERROR")
+    }
+
+    func cancelPendingOperations(generation: UInt64) async {}
 }
 
 private final class CoordinatorTestClock: @unchecked Sendable {

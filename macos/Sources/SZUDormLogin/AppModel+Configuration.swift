@@ -1,19 +1,35 @@
 import Foundation
+import SZUNETEmbedded
 import SZUNetCore
 
 @MainActor
 extension AppModel {
     func saveCampusProviderConfiguration(_ newConfiguration: CampusProductConfiguration) throws {
-        try campusSettingsStore.save(newConfiguration)
+        guard let embeddedRuntime else {
+            throw SZUNetError.configuration(
+                "Embedded Runtime 初始化失败；Provider 设置未保存。"
+            )
+        }
+        let previousConfiguration = campusProviderConfiguration
         campusProviderConfiguration = newConfiguration
-        if let campusProductController {
-            Task { [weak self] in
-                do {
-                    try await campusProductController.updateConfiguration(newConfiguration)
-                    self?.refreshCampusProduct(allowAutoLogin: false)
-                } catch {
-                    self?.logger.error("Provider 配置应用失败：\(error.localizedDescription)")
+        Task { [weak self] in
+            do {
+                try await embeddedRuntime.updateProviderConfiguration(newConfiguration)
+                self?.refreshCampusProduct(allowAutoLogin: false)
+            } catch {
+                if self?.campusProviderConfiguration == newConfiguration {
+                    self?.campusProviderConfiguration = previousConfiguration
                 }
+                self?.logger.error("Embedded Provider 配置应用失败：\(error.localizedDescription)")
+                self?.onResult?(
+                    LoginActionResult(
+                        outcome: .failed,
+                        title: "Provider 设置保存失败",
+                        detail: error.localizedDescription,
+                        reason: "provider_settings_error"
+                    ),
+                    true
+                )
             }
         }
     }
@@ -21,14 +37,10 @@ extension AppModel {
     func saveConfiguration(_ newConfiguration: AppConfiguration, password: String?) throws {
         var normalized = newConfiguration
         normalized.user.username = normalized.user.username.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let password, !password.isEmpty {
-            normalized.security.passwordSource = .keychain
-        }
         _ = try normalized.validatedForLogin()
         try coordinator.configurationStore.save(normalized)
         if let password, !password.isEmpty {
-            try coordinator.savePassword(password, configuration: normalized)
-            passwordSaved = true
+            try saveProviderPassword(password, providerID: .dorm)
         }
         configuration = normalized
         logger.info("原生 Swift 配置已保存。")
@@ -36,26 +48,16 @@ extension AppModel {
     }
 
     func saveUsername(_ username: String) throws {
-        let oldAccount = configuration.keychainAccount
-        let oldPassword = try? coordinator.currentPassword(configuration: configuration)
         let updated = try coordinator.configurationStore.updateUsername(username)
         configuration = updated
-        if let oldPassword, !oldPassword.isEmpty, oldAccount != updated.keychainAccount {
-            try coordinator.savePassword(oldPassword, configuration: updated)
-        }
+        var providers = campusProviderConfiguration
+        providers.dorm.accountLabel = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        try saveCampusProviderConfiguration(providers)
         refreshStatus(allowAutoLogin: false)
     }
 
     func savePassword(_ password: String) throws {
-        var current = try coordinator.currentConfiguration().validatedForLogin()
-        if current.security.passwordSource != .keychain {
-            current.security.passwordSource = .keychain
-            try coordinator.configurationStore.save(current)
-        }
-        try coordinator.savePassword(password, configuration: current)
-        configuration = current
-        passwordSaved = true
-        logger.info("密码已保存到 macOS 钥匙串。")
+        try saveProviderPassword(password, providerID: .dorm)
     }
 
     func saveProviderPassword(
@@ -72,13 +74,32 @@ extension AppModel {
         guard !settings.credentialReference.isEmpty else {
             throw SZUNetError.configuration("credential reference 不能为空。")
         }
-        try KeychainStore().setPassword(
-            password,
-            service: CampusKeychainCredentialBroker.serviceName(for: providerID),
-            account: settings.credentialReference
-        )
-        if providerID == .dorm { passwordSaved = true }
-        logger.info("\(providerID.rawValue) Provider 密码已保存到 macOS 钥匙串。")
+        guard let embeddedRuntime else {
+            throw SZUNetError.configuration(
+                "Embedded Runtime 初始化失败；Provider 密码未保存。"
+            )
+        }
+        Task { [weak self] in
+            do {
+                if let providerConfiguration {
+                    try await embeddedRuntime.updateProviderConfiguration(providerConfiguration)
+                    self?.campusProviderConfiguration = providerConfiguration
+                }
+                try await embeddedRuntime.savePassword(password, provider: providerID)
+                if providerID == .dorm { self?.passwordSaved = true }
+                self?.logger.info("\(providerID.rawValue) Provider 密码已通过 Embedded Runtime 保存。")
+            } catch {
+                self?.onResult?(
+                    LoginActionResult(
+                        outcome: .failed,
+                        title: "保存 Provider 密码失败",
+                        detail: error.localizedDescription,
+                        reason: "provider_credential_error"
+                    ),
+                    true
+                )
+            }
+        }
     }
 
     func loadConfiguration() {

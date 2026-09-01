@@ -1,10 +1,11 @@
 import Darwin
 import Foundation
+import SZUNETEmbedded
 import SZUNetCore
 
 enum CommandLineRunner {
     static let version = "2.0.0"
-    static let build = "1"
+    static let build = "2"
 
     static func run(_ command: String) -> Never {
         if command == "--version" {
@@ -15,32 +16,72 @@ enum CommandLineRunner {
         Task {
             let logger = AppLogger()
             let coordinator = LoginCoordinator(logger: logger)
+            let embeddedRuntime = await makeEmbeddedRuntime(
+                paths: coordinator.configurationStore.paths
+            )
             let exitCode: Int32
             switch command {
             case "--self-test":
                 exitCode = selfTest(coordinator: coordinator)
             case "--check-and-login":
-                exitCode = report(await coordinator.checkAndLogin())
+                if let embeddedRuntime {
+                    exitCode = report(await embeddedRuntime.login(automatic: true))
+                } else {
+                    exitCode = embeddedUnavailable()
+                }
             case "--login":
-                exitCode = report(await coordinator.loginNow())
+                if let embeddedRuntime {
+                    exitCode = report(await embeddedRuntime.login())
+                } else {
+                    exitCode = embeddedUnavailable()
+                }
+            case "--force-login":
+                if let embeddedRuntime {
+                    exitCode = report(await embeddedRuntime.forceLogin())
+                } else {
+                    exitCode = embeddedUnavailable()
+                }
             case "--logout":
-                exitCode = report(await coordinator.logout())
+                if let embeddedRuntime {
+                    exitCode = report(await embeddedRuntime.logout(providerID: .dorm))
+                } else {
+                    exitCode = embeddedUnavailable()
+                }
             case "--probe":
-                exitCode = await probe(coordinator: coordinator)
+                exitCode = if let embeddedRuntime {
+                    await probe(runtime: embeddedRuntime)
+                } else {
+                    embeddedUnavailable()
+                }
             case "--session-status":
-                exitCode = await sessionStatus(coordinator: coordinator)
+                exitCode = if let embeddedRuntime {
+                    await sessionStatus(runtime: embeddedRuntime)
+                } else {
+                    embeddedUnavailable()
+                }
             case "--diagnostic-report":
                 exitCode = await diagnosticReport(coordinator: coordinator, logger: logger)
             case "--launch-at-login-status":
                 print("登录时启动：\(LaunchAtLoginController().description)")
                 exitCode = EXIT_SUCCESS
             case "--auto-login-status":
-                print(coordinator.pauseStore.isPaused ? "自动登录：已暂停" : "自动登录：已启用")
-                exitCode = EXIT_SUCCESS
+                exitCode = if let embeddedRuntime {
+                    await autoLoginStatus(runtime: embeddedRuntime)
+                } else {
+                    embeddedUnavailable()
+                }
             case "--pause-auto-login":
-                exitCode = updateAutoLogin(store: coordinator.pauseStore, enabled: false)
+                exitCode = if let embeddedRuntime {
+                    await updateAutoLogin(runtime: embeddedRuntime, enabled: false)
+                } else {
+                    embeddedUnavailable()
+                }
             case "--resume-auto-login":
-                exitCode = updateAutoLogin(store: coordinator.pauseStore, enabled: true)
+                exitCode = if let embeddedRuntime {
+                    await updateAutoLogin(runtime: embeddedRuntime, enabled: true)
+                } else {
+                    embeddedUnavailable()
+                }
             default:
                 fputs("未知参数：\(command)\n", stderr)
                 fputs("可用参数：\(supportedCommands)\n", stderr)
@@ -54,6 +95,11 @@ enum CommandLineRunner {
     private static func report(_ result: LoginActionResult) -> Int32 {
         print("\(result.title)：\(result.detail)")
         return result.isSuccess ? 0 : 1
+    }
+
+    private static func report(_ result: ProviderAuthResult) -> Int32 {
+        print("校园网操作：\(result.errorCode ?? result.outcome.rawValue)")
+        return result.outcome == .succeeded || result.outcome == .unchanged ? 0 : 1
     }
 
     private static func selfTest(coordinator: LoginCoordinator) -> Int32 {
@@ -71,33 +117,25 @@ enum CommandLineRunner {
         }
     }
 
-    private static func probe(coordinator: LoginCoordinator) async -> Int32 {
-        do {
-            let (_, status, environment) = try await coordinator.probe()
-            print("网络环境：\(environment.label)")
-            print("网关可达：\(status.gatewayReachable ? "是" : "否")")
-            print("校园网出口：\(status.campusInternetOK ? "可用" : "不可用")")
-            print("门户会话：\(status.campusSessionState.rawValue)")
-            print("源 IP：\(status.sourceIP.isEmpty ? "-" : status.sourceIP)")
-            return EXIT_SUCCESS
-        } catch {
-            fputs("网络探测失败：\(error.localizedDescription)\n", stderr)
-            return 1
-        }
+    private static func probe(runtime: SZUNETEmbeddedRuntime) async -> Int32 {
+        let snapshot = await runtime.refreshProduct()
+        print("网络环境：\(snapshot.category.rawValue)")
+        print("Dorm 会话：\(snapshot.dorm.lifecycle)")
+        print("Teaching 会话：\(snapshot.teaching.lifecycle)")
+        if let code = snapshot.lastErrorCode { print("错误码：\(code)") }
+        return snapshot.lastErrorCode == nil ? EXIT_SUCCESS : 1
     }
 
-    private static func sessionStatus(coordinator: LoginCoordinator) async -> Int32 {
-        do {
-            let (_, status, environment) = try await coordinator.sessionStatus()
-            print("网络环境：\(environment.label)")
-            print("网关可达：\(status.gatewayReachable ? "是" : "否")")
-            print("门户会话：\(status.campusSessionState.rawValue)")
-            print("源 IP：\(status.sourceIP.isEmpty ? "-" : status.sourceIP)")
-            return EXIT_SUCCESS
-        } catch {
-            fputs("门户会话查询失败：\(error.localizedDescription)\n", stderr)
-            return 1
+    private static func sessionStatus(runtime: SZUNETEmbeddedRuntime) async -> Int32 {
+        let snapshot = await runtime.refreshProduct()
+        let lifecycle = switch snapshot.category {
+        case .dorm: snapshot.dorm.lifecycle
+        case .teaching: snapshot.teaching.lifecycle
+        case .ambiguous, .nonCampus, .unknown: "unknown"
         }
+        print("网络环境：\(snapshot.category.rawValue)")
+        print("门户会话：\(lifecycle)")
+        return snapshot.lastErrorCode == nil ? EXIT_SUCCESS : 1
     }
 
     private static func diagnosticReport(
@@ -117,13 +155,16 @@ enum CommandLineRunner {
         }
     }
 
-    private static func updateAutoLogin(store: PauseStore, enabled: Bool) -> Int32 {
+    private static func updateAutoLogin(
+        runtime: SZUNETEmbeddedRuntime,
+        enabled: Bool
+    ) async -> Int32 {
         do {
             if enabled {
-                try store.resume()
+                try await runtime.resumeAutomation()
                 print("自动登录：已恢复")
             } else {
-                try store.pause()
+                try await runtime.pauseAutomation()
                 print("自动登录：已暂停")
             }
             return EXIT_SUCCESS
@@ -133,8 +174,24 @@ enum CommandLineRunner {
         }
     }
 
+    private static func autoLoginStatus(runtime: SZUNETEmbeddedRuntime) async -> Int32 {
+        let snapshot = await runtime.currentProductSnapshot()
+        print(snapshot.automaticEnabled ? "自动登录：已启用" : "自动登录：已暂停")
+        return EXIT_SUCCESS
+    }
+
+    private static func makeEmbeddedRuntime(paths: AppPaths) async -> SZUNETEmbeddedRuntime? {
+        let configuration = await AppModel.makeEmbeddedConfiguration(paths: paths)
+        return try? SZUNETEmbeddedRuntime.make(configuration: configuration)
+    }
+
+    private static func embeddedUnavailable() -> Int32 {
+        fputs("Embedded Runtime 初始化失败；未执行校园网操作。\n", stderr)
+        return 2
+    }
+
     private static let supportedCommands = [
-        "--version", "--self-test", "--ui-smoke-test", "--probe", "--session-status", "--login",
+        "--version", "--self-test", "--ui-smoke-test", "--probe", "--session-status", "--login", "--force-login",
         "--check-and-login", "--logout", "--diagnostic-report",
         "--launch-at-login-status", "--auto-login-status",
         "--pause-auto-login", "--resume-auto-login",

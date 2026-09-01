@@ -24,6 +24,8 @@ struct SZUNETWireResult: Codable, Equatable, Sendable {
     let ownerAppRunning: Bool?
     let networkProbeEnabled: Bool?
     let probeIntervalSeconds: Int?
+    let onlineDeviceCount: Int?
+    let onlineDeviceLimit: Int?
     let message: String
     let timestamp: String
 
@@ -40,6 +42,8 @@ struct SZUNETWireResult: Codable, Equatable, Sendable {
         ownerAppRunning: Bool?,
         networkProbeEnabled: Bool? = nil,
         probeIntervalSeconds: Int? = nil,
+        onlineDeviceCount: Int? = nil,
+        onlineDeviceLimit: Int? = nil,
         message: String,
         timestamp: String
     ) {
@@ -55,6 +59,8 @@ struct SZUNETWireResult: Codable, Equatable, Sendable {
         self.ownerAppRunning = ownerAppRunning
         self.networkProbeEnabled = networkProbeEnabled
         self.probeIntervalSeconds = probeIntervalSeconds
+        self.onlineDeviceCount = onlineDeviceCount
+        self.onlineDeviceLimit = onlineDeviceLimit
         self.message = message
         self.timestamp = timestamp
     }
@@ -195,6 +201,8 @@ public actor SZUNETCLIClient: SZUNETCommandExecuting {
             ownerAppRunning: wire.ownerAppRunning,
             networkProbeEnabled: wire.networkProbeEnabled,
             probeIntervalSeconds: wire.probeIntervalSeconds,
+            onlineDeviceCount: wire.onlineDeviceCount,
+            onlineDeviceLimit: wire.onlineDeviceLimit,
             observedAt: ISO8601DateFormatter().date(from: wire.timestamp)
         )
     }
@@ -221,11 +229,11 @@ public actor SZUNETModule {
         activeTask = nil
         snapshot.adapterEnabled = adapterEnabled
         if adapterEnabled {
-            snapshot.detail = "适配已启用；认证与设置仍由独立 SZUNET App 管理。"
+            snapshot.detail = "校园网功能已启用；认证与设置由当前执行器管理。"
         } else {
             snapshot.status = nil
             snapshot.lastAction = nil
-            snapshot.detail = "适配已关闭；不会启动独立校园网 CLI。"
+            snapshot.detail = "校园网功能已关闭；不会读取状态或发送认证请求。"
         }
         return snapshot
     }
@@ -240,6 +248,13 @@ public actor SZUNETModule {
 
     public func manualLogin(provider: SZUNETCommandProvider = .auto) async -> SZUNETSnapshot {
         await perform(.login, provider: provider, interactive: true)
+    }
+
+    /// Explicitly acknowledged device-limit takeover.  The UI owns the
+    /// confirmation step; this method only dispatches the high-level command
+    /// after that confirmation has happened.
+    public func forceLogin(provider: SZUNETCommandProvider = .auto) async -> SZUNETSnapshot {
+        await perform(.forceLogin, provider: provider, interactive: true)
     }
 
     public func manualLogout() async -> SZUNETSnapshot {
@@ -351,7 +366,7 @@ public actor SZUNETModule {
              .probeEvery30Seconds, .probeEvery60Seconds,
              .probeEvery120Seconds, .probeEvery300Seconds:
             true
-        case .status, .check, .login, .logout, .openSettings, .diagnostics:
+        case .status, .check, .login, .forceLogin, .logout, .openSettings, .diagnostics:
             false
         }
     }

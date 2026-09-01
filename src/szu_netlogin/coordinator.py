@@ -23,7 +23,6 @@ from .contracts import (
 _FATAL_CODES = {
     "AUTH_BAD_PASSWORD",
     "AUTH_ACCOUNT_NOT_FOUND",
-    "AUTH_DEVICE_LIMIT",
     "AUTH_ACCOUNT_BLOCKED",
     "AUTH_PRODUCT_SUFFIX_INVALID",
     "NET_TLS_FAILED",
@@ -101,6 +100,7 @@ class CampusNetworkCoordinator:
         *,
         requested_provider: str = "auto",
         manual: bool = False,
+        force: bool = False,
     ) -> AuthResult:
         if not self._lock.acquire(blocking=False):
             return self._blocked("auto", "OPERATION_IN_PROGRESS")
@@ -113,11 +113,26 @@ class CampusNetworkCoordinator:
                 return self._blocked("auto", "OPERATION_CANCELLED")
             if not manual and not self.settings.automatic_enabled:
                 return self._blocked("auto", "OPERATION_CANCELLED")
+            if force and not manual:
+                return self._blocked(
+                    requested_provider,
+                    "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED",
+                )
+            if force and requested_provider not in {"auto", "dorm"}:
+                return self._blocked(
+                    requested_provider,
+                    "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED",
+                )
 
             provider, probe, error_code = self._select_provider(context, requested_provider)
             if error_code:
                 return self._blocked(probe.provider_id if probe else "auto", error_code)
             assert provider is not None and probe is not None
+            if force and probe.provider_id != "dorm":
+                return self._blocked(
+                    probe.provider_id,
+                    "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED",
+                )
             if not self._contexts_are_current(context, operation_generation):
                 return self._blocked(probe.provider_id, "ENV_NETWORK_CHANGED")
             provider_context = self._context_for(context, probe.provider_id)
@@ -138,9 +153,50 @@ class CampusNetworkCoordinator:
                     probe.provider_id,
                     session_state=SessionState.ONLINE,
                     error_code="SESSION_ONLINE",
+                    online_device_count=session.online_device_count,
+                    online_device_limit=session.online_device_limit,
                 )
-            if session.state != SessionState.OFFLINE:
-                return self._blocked(probe.provider_id, session.error_code or "SESSION_UNKNOWN")
+            online_device_count = getattr(session, "online_device_count", None)
+            online_device_limit = getattr(session, "online_device_limit", None)
+            confirmed_device_limit = (
+                probe.provider_id == "dorm"
+                and online_device_limit == 3
+                and isinstance(online_device_count, int)
+                and not isinstance(online_device_count, bool)
+                and online_device_count >= online_device_limit
+            )
+            if session.error_code == "AUTH_DEVICE_LIMIT":
+                if not force:
+                    # The ordinary path deliberately stops before opening the
+                    # credential.  A forced switch is allowed only after the
+                    # provider itself confirmed the account is at its limit.
+                    return self._blocked(
+                        probe.provider_id,
+                        "AUTH_DEVICE_LIMIT",
+                        online_device_count=online_device_count,
+                        online_device_limit=online_device_limit,
+                    )
+                if not confirmed_device_limit:
+                    return self._blocked(
+                        probe.provider_id,
+                        "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED",
+                        online_device_count=online_device_count,
+                        online_device_limit=online_device_limit,
+                    )
+            elif force:
+                return self._blocked(
+                    probe.provider_id,
+                    "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED",
+                )
+            if session.state != SessionState.OFFLINE and not (
+                force and session.error_code == "AUTH_DEVICE_LIMIT"
+            ):
+                return self._blocked(
+                    probe.provider_id,
+                    session.error_code or "SESSION_UNKNOWN",
+                    online_device_count=online_device_count,
+                    online_device_limit=online_device_limit,
+                )
 
             with self._generation_lock:
                 if self.generation != operation_generation:
@@ -155,6 +211,136 @@ class CampusNetworkCoordinator:
             result = provider.login(provider_context, probe, selected_username, credential)
             if not self._contexts_are_current(context, operation_generation):
                 return self._blocked(probe.provider_id, "ENV_NETWORK_CHANGED")
+            self._record_result(result)
+            return result
+        finally:
+            self._lock.release()
+
+    def force_login(
+        self,
+        context: NetworkContext | Mapping[str, NetworkContext],
+        username: str | Mapping[str, str],
+        credential_loader: CredentialLoader | Mapping[str, CredentialLoader],
+        *,
+        requested_provider: str = "dorm",
+    ) -> AuthResult:
+        """Explicitly replace a confirmed full Dorm device slot.
+
+        This is intentionally a separate entry point so automatic/background
+        callers cannot accidentally opt into server-side session eviction.
+        ``login`` still enforces the manual and provider checks for defense in
+        depth.
+        """
+
+        if requested_provider != "dorm":
+            return self._blocked(
+                requested_provider,
+                "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED",
+            )
+        return self.login(
+            context,
+            username,
+            credential_loader,
+            requested_provider="dorm",
+            manual=True,
+            force=True,
+        )
+
+    def recover_stale_dorm_session(
+        self,
+        context: NetworkContext | Mapping[str, NetworkContext],
+        username: str | Mapping[str, str],
+        credential_loader: CredentialLoader | Mapping[str, CredentialLoader],
+    ) -> AuthResult:
+        """Recover one Dorm session only after the direct egress probe failed.
+
+        The caller supplies the egress evidence; this method independently
+        re-selects Dorm, re-reads the portal online list, and opens credentials
+        only when the exact local record is absent and occupancy is known to be
+        below the server limit.  It never performs a force login.
+        """
+        if not self._lock.acquire(blocking=False):
+            return self._blocked("dorm", "OPERATION_IN_PROGRESS")
+        try:
+            operation_generation = self._current_generation()
+            if not self._contexts_are_current(context, operation_generation):
+                return self._blocked("dorm", "ENV_NETWORK_CHANGED")
+            if self.settings.paused or not self.settings.automatic_enabled:
+                return self._blocked("dorm", "OPERATION_CANCELLED")
+
+            provider, probe, error_code = self._select_provider(context, "dorm")
+            if error_code:
+                return self._blocked(probe.provider_id if probe else "dorm", error_code)
+            assert provider is not None and probe is not None
+            if probe.provider_id != "dorm" or not self._provider_enabled("dorm"):
+                return self._blocked("dorm", "PROVIDER_DISABLED")
+            if "dorm" in self._fatal:
+                return self._blocked("dorm", self._fatal["dorm"])
+            if self.clock() < self._backoff_until.get("dorm", 0):
+                return self._blocked("dorm", "PROVIDER_BACKING_OFF")
+
+            provider_context = self._context_for(context, "dorm")
+            selected_username = self._username_for(username, "dorm")
+            session = provider.session_status(provider_context, probe, selected_username)
+            if not self._contexts_are_current(context, operation_generation):
+                return self._blocked("dorm", "ENV_NETWORK_CHANGED")
+
+            count = session.online_device_count
+            limit = session.online_device_limit
+            exact = session.exact_online_record_present
+            if exact is True:
+                return self._blocked(
+                    "dorm",
+                    "NET_CAMPUS_EGRESS_UNAVAILABLE",
+                    online_device_count=count,
+                    online_device_limit=limit,
+                )
+            if exact is not False:
+                return self._blocked(
+                    "dorm",
+                    "SESSION_UNKNOWN",
+                    online_device_count=count,
+                    online_device_limit=limit,
+                )
+            trustworthy_count = (
+                isinstance(count, int)
+                and not isinstance(count, bool)
+                and count >= 0
+                and isinstance(limit, int)
+                and not isinstance(limit, bool)
+                and limit > 0
+            )
+            if not trustworthy_count:
+                return self._blocked(
+                    "dorm",
+                    "SESSION_UNKNOWN",
+                    online_device_count=count,
+                    online_device_limit=limit,
+                )
+            if count >= limit:
+                return self._blocked(
+                    "dorm",
+                    "AUTH_DEVICE_LIMIT",
+                    online_device_count=count,
+                    online_device_limit=limit,
+                )
+
+            with self._generation_lock:
+                if self.generation != operation_generation:
+                    return self._blocked("dorm", "ENV_NETWORK_CHANGED")
+                credential = self._credential_for(credential_loader, "dorm")
+                if credential is None or not credential.reveal():
+                    return self._blocked("dorm", "CRED_MISSING")
+            if not self._contexts_are_current(context, operation_generation):
+                return self._blocked("dorm", "ENV_NETWORK_CHANGED")
+            result = provider.login(
+                provider_context,
+                probe,
+                selected_username,
+                credential,
+            )
+            if not self._contexts_are_current(context, operation_generation):
+                return self._blocked("dorm", "ENV_NETWORK_CHANGED")
             self._record_result(result)
             return result
         finally:
@@ -423,5 +609,17 @@ class CampusNetworkCoordinator:
             self._backoff_until[provider_id] = self.clock() + base * (1 + jitter)
 
     @staticmethod
-    def _blocked(provider_id: str, error_code: str) -> AuthResult:
-        return AuthResult(AuthOutcome.BLOCKED, provider_id, error_code=error_code)
+    def _blocked(
+        provider_id: str,
+        error_code: str,
+        *,
+        online_device_count: int | None = None,
+        online_device_limit: int | None = None,
+    ) -> AuthResult:
+        return AuthResult(
+            AuthOutcome.BLOCKED,
+            provider_id,
+            error_code=error_code,
+            online_device_count=online_device_count,
+            online_device_limit=online_device_limit,
+        )

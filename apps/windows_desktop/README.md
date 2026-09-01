@@ -16,7 +16,9 @@
 py -3 -m unittest tests.test_windows_desktop
 py -3 -m py_compile apps\windows_desktop\szu_windows_desktop.py
 py -3 scripts\build_windows_exe.py --version 2.0.0
-py -3 scripts\build_windows_package.py --version 2.0.0 --release-label beta.1
+py -3 scripts\build_windows_package.py --version 2.0.0 --release-label beta.1 --architecture x64
 ```
+
+ARM64 构建改用 `requirements-windows-arm64.lock` 与 `--architecture arm64`。
 
 Teaching 默认关闭且注销禁用，等待真实校园环境验收。公开 Beta 未执行 Authenticode、Defender/SmartScreen 声誉验收；下载后必须核对同一 Release 中的 `.sha256` 文件。

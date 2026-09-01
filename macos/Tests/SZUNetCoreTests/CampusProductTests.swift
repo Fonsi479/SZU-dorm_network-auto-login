@@ -4,6 +4,47 @@ import Testing
 
 @Suite("Campus product configuration and CLI", .serialized)
 struct CampusProductTests {
+    @Test("Dorm transport reasons are converted to the public stable-code contract")
+    func dormReasonsUseStableCodes() {
+        #expect(DormDrCOMErrorCode.login("password_error") == "AUTH_BAD_PASSWORD")
+        #expect(DormDrCOMErrorCode.login("portal_interface_changed") == "ENV_PORTAL_IDENTITY_UNVERIFIED")
+        #expect(DormDrCOMErrorCode.login("login_not_confirmed") == "AUTH_NOT_CONFIRMED")
+        #expect(DormDrCOMErrorCode.login("request_exception") == "NET_TIMEOUT")
+        #expect(DormDrCOMErrorCode.logout("logout_not_confirmed") == "SESSION_ONLINE")
+        #expect(DormDrCOMErrorCode.logout("session_state_unknown") == "SESSION_UNKNOWN")
+        #expect(DormDrCOMErrorCode.logout("terminal_ip_not_found") == "ENV_SOURCE_ROUTE_UNVERIFIED")
+        #expect(DormDrCOMErrorCode.logout("untrusted-server-detail") == "INTERNAL_ERROR")
+    }
+
+    @Test("a Core-verified Dorm login refreshes device occupancy once")
+    func verifiedDormLoginIsNotRechecked() async {
+        let service = VerifiedDormService()
+        let provider = DormDrCOMProvider(client: service)
+        let context = CampusNetworkContext(
+            generation: 0,
+            sourceIP: "198.51.100.27",
+            sourceRouteBound: true,
+            dormPortalIdentityVerified: true
+        )
+        let probe = ProviderProbe(
+            providerID: .dorm,
+            support: .supported,
+            confidence: .verified,
+            sourceIP: context.sourceIP
+        )
+
+        let result = await provider.login(
+            context,
+            probe: probe,
+            username: "fixture-account",
+            credential: CredentialHandle("fixture-password")
+        )
+
+        #expect(result.outcome == .succeeded)
+        #expect(result.sessionState == .online)
+        #expect(await service.sessionChecks == 1)
+    }
+
     @Test("schema v2 defaults keep Dorm on, Teaching off, and contain no secret fields")
     func defaultsAndSafeEncoding() throws {
         let configuration = CampusProductConfiguration.default
@@ -302,6 +343,127 @@ struct CampusProductTests {
         #expect(await broker.readCount == 0)
     }
 
+    @Test("automatic recovery handles false-online Dorm evidence exactly once")
+    func automaticRecoveryHandlesFalseOnlineEvidence() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let configuration = CampusProductConfiguration(
+            dorm: .init(
+                enabled: true,
+                accountLabel: "synthetic-user",
+                credentialReference: "dorm-ref"
+            )
+        )
+        let store = CampusProviderSettingsStore(fileURL: root.appendingPathComponent("providers.json"))
+        try store.save(configuration)
+        let provider = ProductRecoveryProvider(sessions: [
+            ProviderSessionResult(
+                state: .online,
+                accountMatch: .matches,
+                exactOnlineRecordPresent: false,
+                onlineDeviceCount: 2,
+                onlineDeviceLimit: 3
+            ),
+            ProviderSessionResult(
+                state: .unknown,
+                accountMatch: .matches,
+                exactOnlineRecordPresent: false,
+                onlineDeviceCount: 2,
+                onlineDeviceLimit: 3,
+                errorCode: "SESSION_UNKNOWN"
+            ),
+        ])
+        let broker = CountingCredentialBroker()
+        let direct = ProductDirectEgressProbe(available: false)
+        let coordinator = CampusNetworkCoordinator(
+            providers: [provider],
+            credentialBroker: broker,
+            settings: configuration.coordinatorSettings,
+            authenticationLockURL: root.appendingPathComponent("auth.lock")
+        )
+        let controller = CampusProductController(
+            detector: DormDetectorStub(),
+            coordinator: coordinator,
+            settingsStore: store,
+            pauseStore: makePauseStore(root),
+            configuration: configuration,
+            directEgressProbe: direct,
+            automaticCredentialAuthorization: { true }
+        )
+
+        let result = await controller.recoverAutomatically()
+
+        #expect(result.outcome == .succeeded)
+        #expect(await direct.checkCount == 1)
+        #expect(await provider.sessionCount == 2)
+        #expect(await provider.loginCount == 1)
+        #expect(await broker.readCount == 1)
+    }
+
+    @Test("direct egress success or an existing exact record never logs in")
+    func automaticRecoveryAvoidsRedundantLogin() async throws {
+        for (directAvailable, directEvidence, exactPresent, expectedCode) in [
+            (true, "CAMPUS_EGRESS_AVAILABLE", false, "SESSION_ONLINE"),
+            (false, "CAMPUS_EGRESS_UNAVAILABLE", true, "NET_CAMPUS_EGRESS_UNAVAILABLE"),
+            (false, "ENV_SOURCE_ROUTE_UNVERIFIED", false, "SESSION_ONLINE"),
+        ] {
+            let root = temporaryRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let configuration = CampusProductConfiguration(
+                dorm: .init(
+                    enabled: true,
+                    accountLabel: "synthetic-user",
+                    credentialReference: "dorm-ref"
+                )
+            )
+            let store = CampusProviderSettingsStore(fileURL: root.appendingPathComponent("providers.json"))
+            try store.save(configuration)
+            let session = ProviderSessionResult(
+                state: .online,
+                accountMatch: .matches,
+                exactOnlineRecordPresent: exactPresent,
+                onlineDeviceCount: 2,
+                onlineDeviceLimit: 3
+            )
+            let provider = ProductRecoveryProvider(sessions: [session, session])
+            let broker = CountingCredentialBroker()
+            let direct = ProductDirectEgressProbe(
+                available: directAvailable,
+                evidenceCode: directEvidence
+            )
+            let coordinator = CampusNetworkCoordinator(
+                providers: [provider],
+                credentialBroker: broker,
+                settings: configuration.coordinatorSettings,
+                authenticationLockURL: root.appendingPathComponent("auth.lock")
+            )
+            let controller = CampusProductController(
+                detector: DormDetectorStub(),
+                coordinator: coordinator,
+                settingsStore: store,
+                pauseStore: makePauseStore(root),
+                configuration: configuration,
+                directEgressProbe: direct,
+                automaticCredentialAuthorization: { true }
+            )
+
+            let result = await controller.recoverAutomatically()
+
+            #expect(result.errorCode == expectedCode)
+            #expect(await provider.loginCount == 0)
+            #expect(await broker.readCount == 0)
+        }
+    }
+
+    private func makePauseStore(_ root: URL) -> PauseStore {
+        PauseStore(
+            fileURL: root.appendingPathComponent("pause.json"),
+            lockFileURL: root.appendingPathComponent("pause.lock"),
+            legacyFileURL: root.appendingPathComponent("legacy-pause"),
+            migrationFileURL: root.appendingPathComponent("pause-migrated")
+        )
+    }
+
     private func temporaryRoot() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("campus-product-tests-\(UUID().uuidString)", isDirectory: true)
@@ -383,6 +545,23 @@ private actor CampusCredentialBrokerStub: CampusCredentialBroker {
     }
 }
 
+private actor VerifiedDormService: DrCOMServicing {
+    private(set) var sessionChecks = 0
+
+    func login(username: String, password: String, knownSourceIP: String) async -> LoginResult {
+        LoginResult(status: .success, reason: "session_verified", sourceIP: knownSourceIP)
+    }
+
+    func logout(username: String, knownSourceIP: String) async -> LogoutResult {
+        LogoutResult(status: .success, reason: "portal_logout_verified")
+    }
+
+    func isSessionOnline(username: String, sourceIP: String) async -> Bool? {
+        sessionChecks += 1
+        return true
+    }
+}
+
 private struct CampusDetectorStub: CampusEnvironmentDetecting {
     func detect(
         generation: UInt64,
@@ -453,6 +632,89 @@ private actor ProductProviderStub: NetworkAuthProvider {
         username: String
     ) async -> ProviderAuthResult {
         ProviderAuthResult(outcome: .succeeded, providerID: .dorm, sessionState: .offline)
+    }
+
+    func cancelPendingOperations(generation: UInt64) async {}
+}
+
+private actor ProductDirectEgressProbe: CampusDirectEgressProbing {
+    private let available: Bool
+    private let evidenceCode: String
+    private(set) var checkCount = 0
+
+    init(
+        available: Bool,
+        evidenceCode: String? = nil
+    ) {
+        self.available = available
+        self.evidenceCode = evidenceCode
+            ?? (available ? "CAMPUS_EGRESS_AVAILABLE" : "CAMPUS_EGRESS_UNAVAILABLE")
+    }
+
+    func check(context: CampusNetworkContext) async -> CampusDirectEgressResult {
+        checkCount += 1
+        return CampusDirectEgressResult(
+            available: available,
+            evidenceCode: evidenceCode
+        )
+    }
+}
+
+private actor ProductRecoveryProvider: NetworkAuthProvider {
+    nonisolated let providerID = CampusProviderID.dorm
+    private var sessions: [ProviderSessionResult]
+    private(set) var sessionCount = 0
+    private(set) var loginCount = 0
+
+    init(sessions: [ProviderSessionResult]) {
+        self.sessions = sessions
+    }
+
+    func probeEnvironment(_ context: CampusNetworkContext) async -> ProviderProbe {
+        ProviderProbe(
+            providerID: .dorm,
+            support: context.dormPortalIdentityVerified ? .supported : .unsupported,
+            confidence: context.dormPortalIdentityVerified ? .verified : .unknown,
+            sourceIP: context.sourceIP,
+            clientIP: context.sourceIP
+        )
+    }
+
+    func sessionStatus(
+        _ context: CampusNetworkContext,
+        probe: ProviderProbe,
+        username: String
+    ) async -> ProviderSessionResult {
+        sessionCount += 1
+        guard !sessions.isEmpty else {
+            return ProviderSessionResult(state: .unknown, errorCode: "SESSION_UNKNOWN")
+        }
+        return sessions.removeFirst()
+    }
+
+    func login(
+        _ context: CampusNetworkContext,
+        probe: ProviderProbe,
+        username: String,
+        credential: CredentialHandle
+    ) async -> ProviderAuthResult {
+        loginCount += 1
+        return ProviderAuthResult(
+            outcome: .succeeded,
+            providerID: .dorm,
+            sessionState: .online,
+            accountMatch: .matches,
+            onlineDeviceCount: 2,
+            onlineDeviceLimit: 3
+        )
+    }
+
+    func logout(
+        _ context: CampusNetworkContext,
+        probe: ProviderProbe,
+        username: String
+    ) async -> ProviderAuthResult {
+        .blocked(.dorm, "INTERNAL_ERROR")
     }
 
     func cancelPendingOperations(generation: UInt64) async {}

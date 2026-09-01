@@ -72,6 +72,42 @@ class LoginLockTests(unittest.TestCase):
         get_password.assert_not_called()
         client.login_with_result.assert_not_called()
 
+    def test_manual_login_full_device_budget_reads_zero_credentials(self) -> None:
+        logger = Mock()
+        config = {"user": {"username": "student-id"}, "network": {}}
+        client = Mock()
+        client.session_fact.return_value = Mock(
+            state="offline",
+            matches=Mock(return_value=False),
+            online_device_count=3,
+        )
+        get_password = Mock()
+        with (
+            patch(
+                "src.szu_netlogin.login.parse_args",
+                return_value=argparse.Namespace(check_and_login=False, dry_run=False),
+            ),
+            patch("src.szu_netlogin.login.get_logger", return_value=logger),
+            patch("src.szu_netlogin.login.load_config", return_value=config),
+            patch("src.szu_netlogin.login.describe_password_source", return_value="credential-manager"),
+            patch(
+                "src.szu_netlogin.login.probe_gateway",
+                return_value=NetworkStatus(True, False, source_ip="172.24.1.2"),
+            ),
+            patch(
+                "src.szu_netlogin.login.classify_network_environment",
+                return_value=NetworkEnvironment("宿舍网络", True, True),
+            ),
+            patch("src.szu_netlogin.login.get_password", get_password),
+            patch("src.szu_netlogin.login.DormDrcomClient", return_value=client),
+            patch("builtins.print"),
+        ):
+            result = login.main()
+
+        self.assertEqual(result, 0)
+        get_password.assert_not_called()
+        client.login_with_result.assert_not_called()
+
     def test_lock_contention_logs_skip_instead_of_login_failure(self) -> None:
         logger = Mock()
 

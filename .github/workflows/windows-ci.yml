@@ -12,11 +12,20 @@ env:
 
 jobs:
   test-windows:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.12"]
+        include:
+          - runner: windows-latest
+            architecture: x64
+            python-version: "3.10"
+          - runner: windows-latest
+            architecture: x64
+            python-version: "3.12"
+          - runner: windows-11-arm
+            architecture: arm64
+            python-version: "3.12"
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -39,7 +48,17 @@ jobs:
   build-windows-gui:
     if: github.event_name != 'pull_request'
     needs: test-windows
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            architecture: x64
+            lock-file: requirements-windows.lock
+          - runner: windows-11-arm
+            architecture: arm64
+            lock-file: requirements-windows-arm64.lock
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -49,7 +68,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install reproducible build dependencies
-        run: python -m pip install --require-hashes -r requirements-windows.lock
+        run: python -m pip install --require-hashes -r ${{ matrix.lock-file }}
 
       - name: Build standalone windowed executable
         run: python scripts/build_windows_exe.py --version 2.0.0
@@ -57,12 +76,12 @@ jobs:
       - name: Verify PE file and frozen self-test
         shell: pwsh
         run: |
-          python scripts/verify_windows_package.py --executable "dist/windows-app/SZU Campus Network.exe"
+          python scripts/verify_windows_package.py --architecture ${{ matrix.architecture }} --executable "dist/windows-app/SZU Campus Network.exe"
           $process = Start-Process -FilePath "dist/windows-app/SZU Campus Network.exe" -ArgumentList "--self-test" -Wait -PassThru
           if ($process.ExitCode -ne 0) {
             throw "Frozen GUI self-test failed with exit code $($process.ExitCode)"
           }
-          python scripts/verify_windows_package.py --executable "dist/windows-app/szu-campus-netctl.exe"
+          python scripts/verify_windows_package.py --architecture ${{ matrix.architecture }} --executable "dist/windows-app/szu-campus-netctl.exe"
           $process = Start-Process -FilePath "dist/windows-app/szu-campus-netctl.exe" -ArgumentList "--self-test" -Wait -PassThru
           if ($process.ExitCode -ne 0) {
             throw "Frozen JSON CLI self-test failed with exit code $($process.ExitCode)"
@@ -70,16 +89,16 @@ jobs:
 
       - name: Assemble end-user double-click package
         run: |
-          python scripts/build_windows_package.py --version 2.0.0 --release-label beta.1 --executable "dist/windows-app/SZU Campus Network.exe" --cli-executable "dist/windows-app/szu-campus-netctl.exe"
-          python scripts/verify_windows_package.py --release-root "dist/windows-staging/SZU-Campus-Network-Windows-v2.0.0-beta.1"
+          python scripts/build_windows_package.py --version 2.0.0 --release-label beta.1 --architecture ${{ matrix.architecture }} --executable "dist/windows-app/SZU Campus Network.exe" --cli-executable "dist/windows-app/szu-campus-netctl.exe"
+          python scripts/verify_windows_package.py --architecture ${{ matrix.architecture }} --release-root "dist/windows-staging/SZU-Campus-Network-Windows-${{ matrix.architecture }}-v2.0.0-beta.1"
 
       - name: Upload Windows GUI package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: SZU-Campus-Network-Windows-v2.0.0-beta.1
+          name: SZU-Campus-Network-Windows-${{ matrix.architecture }}-v2.0.0-beta.1
           path: |
-            dist/release/SZU-Campus-Network-Windows-v2.0.0-beta.1.zip
-            dist/release/SZU-Campus-Network-Windows-v2.0.0-beta.1.zip.sha256
+            dist/release/SZU-Campus-Network-Windows-${{ matrix.architecture }}-v2.0.0-beta.1.zip
+            dist/release/SZU-Campus-Network-Windows-${{ matrix.architecture }}-v2.0.0-beta.1.zip.sha256
             dist/windows-app/SZU Campus Network.exe
             dist/windows-app/szu-campus-netctl.exe
           if-no-files-found: error

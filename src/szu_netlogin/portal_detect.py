@@ -152,6 +152,34 @@ def probe_internet(
     )
 
 
+def probe_campus_egress_direct(
+    config: dict[str, Any] | None,
+    source_ip: str,
+    timeout_seconds: int | None = None,
+) -> InternetProbe:
+    """Probe outside connectivity on the verified campus source route.
+
+    This recovery-only probe never inherits ambient proxy settings and binds
+    both HTTP and HTTPS sockets to the source IP selected for the Dorm portal.
+    """
+    if not source_ip or not is_campus_source_ip(config, source_ip):
+        return InternetProbe(False, "source_ip_unverified", route="campus-direct")
+    timeout = timeout_seconds if timeout_seconds is not None else _get_timeout_seconds(config)
+    session = _build_session(source_ip, trust_env=False)
+    try:
+        return _probe_urls(
+            session,
+            _get_test_urls(config),
+            timeout,
+            route="campus-direct",
+            source_ip="",
+            log_failure=False,
+            log_details=False,
+        )
+    finally:
+        session.close()
+
+
 def classify_network_environment(
     config: dict[str, Any] | None,
     status: NetworkStatus,
@@ -280,6 +308,7 @@ def _probe_urls(
     route: str,
     source_ip: str,
     log_failure: bool = True,
+    log_details: bool = True,
 ) -> InternetProbe:
     logger = get_logger()
     failures: list[str] = []
@@ -308,13 +337,14 @@ def _probe_urls(
 
         if _is_successful_connectivity_response(url, response.status_code, preview):
             successful_hosts.add(_url_label(url))
-            logger.info(
-                "校园网出口检测：可用 route=%s source_ip=%s url=%s status=%s",
-                route,
-                source_ip or "-",
-                _url_label(url),
-                response.status_code,
-            )
+            if log_details:
+                logger.info(
+                    "校园网出口检测：可用 route=%s source_ip=%s url=%s status=%s",
+                    route,
+                    source_ip or "-",
+                    _url_label(url),
+                    response.status_code,
+                )
             if len(successful_hosts) >= MIN_SUCCESSFUL_PROBES:
                 return InternetProbe(True, "ok", route=route)
             failures.append(f"{_url_label(url)}=only_one_success")

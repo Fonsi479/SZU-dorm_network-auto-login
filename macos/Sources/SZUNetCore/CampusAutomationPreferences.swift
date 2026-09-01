@@ -8,7 +8,7 @@ public enum CampusAutomationPreferences {
     public static let ownerDefaultsDomain = "com.szu-netlogin.dorm-login"
     public static let networkProbeEnabledKey = "networkProbeEnabled"
     public static let probeIntervalSecondsKey = "networkProbeIntervalSeconds"
-    public static let defaultProbeIntervalSeconds = 60
+    public static let defaultProbeIntervalSeconds = 30
     public static let allowedProbeIntervals = [30, 60, 120, 300]
 
     public static func networkProbeEnabled(in defaults: UserDefaults) -> Bool {

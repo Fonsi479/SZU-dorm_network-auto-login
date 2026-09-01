@@ -6,6 +6,8 @@ __pycache__/
 .venv-windows-build-*/
 venv/
 
+.build/
+.swiftpm/
 macos/.build/
 macos/.swiftpm/
 DerivedData/

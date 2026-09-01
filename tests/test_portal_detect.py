@@ -13,6 +13,7 @@ from src.szu_netlogin.portal_detect import (
     classify_network_environment,
     check_gateway_reachable,
     check_internet,
+    probe_campus_egress_direct,
 )
 
 
@@ -79,6 +80,33 @@ class CampusInternetProbeTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.route, "default")
         probe_urls.assert_called_once()
+
+    @patch("src.szu_netlogin.portal_detect._build_session")
+    @patch("src.szu_netlogin.portal_detect._probe_urls")
+    def test_direct_recovery_probe_binds_campus_source_and_disables_proxies(
+        self,
+        probe_urls: Mock,
+        build_session: Mock,
+    ) -> None:
+        probe_urls.return_value = InternetProbe(False, "timeout", route="campus-direct")
+
+        result = probe_campus_egress_direct({}, "172.24.9.84", 3)
+
+        self.assertFalse(result.ok)
+        build_session.assert_called_once_with("172.24.9.84", trust_env=False)
+        self.assertEqual(probe_urls.call_args.kwargs["route"], "campus-direct")
+        self.assertFalse(probe_urls.call_args.kwargs["log_details"])
+
+    @patch("src.szu_netlogin.portal_detect._build_session")
+    def test_direct_recovery_probe_rejects_unverified_source_without_socket(
+        self,
+        build_session: Mock,
+    ) -> None:
+        result = probe_campus_egress_direct({}, "198.51.100.8", 3)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "source_ip_unverified")
+        build_session.assert_not_called()
 
     @patch("src.szu_netlogin.portal_detect.get_logger")
     @patch("src.szu_netlogin.portal_detect.socket.create_connection")

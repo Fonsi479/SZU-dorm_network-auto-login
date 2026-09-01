@@ -1,10 +1,20 @@
 import Foundation
+import SZUNETEmbedded
 import SZUNetCore
+
+private struct CampusRefreshResult {
+    let snapshot: CampusProductSnapshot
+    let recovery: ProviderAuthResult?
+}
 
 @MainActor
 extension AppModel {
     func refreshStatus(allowAutoLogin: Bool = true) {
         guard !isRefreshing, !automation.isProbing else { return }
+        // Timer, wake and network-path refreshes are automation work. A
+        // non-owner may still trigger an explicit menu/settings refresh by
+        // passing `allowAutoLogin: false`.
+        if allowAutoLogin, !verifyAutomationOwner() { return }
         launchAtLoginState = launchAtLogin.state
         autoLoginEnabled = campusProviderConfiguration.automaticEnabled
             && !coordinator.pauseStore.isPaused
@@ -14,96 +24,13 @@ extension AppModel {
             return
         }
 
-        if campusProductController != nil {
-            refreshCampusProduct(allowAutoLogin: allowAutoLogin)
-            return
-        }
-
-        isRefreshing = true
-        if lastNetworkStatus == nil {
-            statusText = "●  正在检查网络…"
-            statusTone = .checking
-        }
-        let coordinator = coordinator
-        if !automation.startProbe(
-            operation: { try await coordinator.probe() },
-            completion: { [weak self] result in
-                self?.finishProbe(result, allowAutoLogin: allowAutoLogin)
-            }
-        ) {
-            isRefreshing = false
-        }
-    }
-
-    func finishProbe(
-        _ result: Result<ProbeSnapshot, Error>,
-        allowAutoLogin: Bool
-    ) {
-        isRefreshing = false
-        guard networkProbeEnabled else { return }
-
-        switch result {
-        case .success(let snapshot):
-            let previousSessionState = lastNetworkStatus?.campusSessionState
-            configuration = snapshot.configuration
-            lastNetworkStatus = snapshot.status
-            lastEnvironment = snapshot.environment
-            apply(status: snapshot.status, environment: snapshot.environment)
-            if snapshot.status.campusSessionState == .online {
-                automation.recordAutoLoginSuccess()
-            } else if Self.shouldAllowImmediateAutoLogin(
-                previous: previousSessionState,
-                current: snapshot.status.campusSessionState
-            ) {
-                // An online probe continuously keeps the ordinary retry
-                // deadline in the future. Once the dorm portal is first seen
-                // offline, bypass that stale success delay exactly once.
-                automation.allowImmediateAutoLogin()
-                logger.info("检测到宿舍门户会话断开，立即放行一次自动登录。")
-            }
-            if allowAutoLogin {
-                maybeAutoLogin(status: snapshot.status, environment: snapshot.environment)
-            }
-        case .failure(let error):
-            statusText = "●  配置需要检查"
+        guard embeddedRuntime != nil else {
+            statusText = "●  校园网模块不可用"
             statusTone = .failure
-            statusDetail = error.localizedDescription
-            logger.error("状态刷新失败：\(error.localizedDescription)")
-        }
-    }
-
-    func apply(status: NetworkStatus, environment: NetworkEnvironment) {
-        let presentation = AppStatusPresentation.make(
-            status: status,
-            environment: environment,
-            autoLoginEnabled: autoLoginEnabled
-        )
-        environmentLabel = environment.label
-        statusText = presentation.text
-        statusTone = presentation.tone
-        statusDetail = presentation.detail
-        logger.info(presentation.logMessage)
-    }
-
-    func maybeAutoLogin(status: NetworkStatus, environment: NetworkEnvironment) {
-        guard networkProbeEnabled,
-              !automation.hasActiveOperation,
-              autoLoginEnabled,
-              !coordinator.pauseStore.isPaused,
-              status.campusSessionState == .offline,
-              environment.autoLoginAvailable,
-              automation.consumeAutoLoginDeadline() else {
+            statusDetail = "Embedded Runtime 初始化失败；未执行状态探测或认证。"
             return
         }
-
-        let coordinator = coordinator
-        guard automation.startAutoLogin(
-            operation: { await coordinator.checkAndLogin() },
-            completion: { [weak self] result in self?.finishAutoLogin(result) }
-        ) else {
-            return
-        }
-        isBusy = true
+        refreshCampusProduct(allowAutoLogin: allowAutoLogin)
     }
 
     func finishAutoLogin(_ result: LoginActionResult) {
@@ -152,27 +79,39 @@ extension AppModel {
     }
 
     func notifyCampusNetworkChangedAndRefresh() {
-        guard let campusProductController else {
-            refreshStatus()
+        guard verifyAutomationOwner() else { return }
+        guard let embeddedRuntime else {
+            statusText = "●  校园网模块不可用"
+            statusTone = .failure
+            statusDetail = "Embedded Runtime 初始化失败；未执行网络变化处理。"
             return
         }
         Task { [weak self] in
-            await campusProductController.networkChanged()
+            await embeddedRuntime.networkChanged()
             self?.refreshStatus()
         }
     }
 
     func refreshCampusProduct(allowAutoLogin: Bool) {
-        guard let campusProductController,
+        guard let embeddedRuntime,
               !isRefreshing,
               !automation.isProbing else { return }
+        if allowAutoLogin, !verifyAutomationOwner() { return }
         isRefreshing = true
         if campusSnapshot == nil {
             statusText = "●  正在检查网络…"
             statusTone = .checking
         }
         guard automation.startProbe(
-            operation: { await campusProductController.refresh() },
+            operation: {
+                let recovery = allowAutoLogin
+                    ? await embeddedRuntime.recoverAutomatically()
+                    : nil
+                return CampusRefreshResult(
+                    snapshot: await embeddedRuntime.refreshProduct(),
+                    recovery: recovery
+                )
+            },
             completion: { [weak self] result in
                 self?.finishCampusProbe(result, allowAutoLogin: allowAutoLogin)
             }
@@ -182,8 +121,8 @@ extension AppModel {
         }
     }
 
-    func finishCampusProbe(
-        _ result: Result<CampusProductSnapshot, Error>,
+    private func finishCampusProbe(
+        _ result: Result<CampusRefreshResult, Error>,
         allowAutoLogin: Bool
     ) {
         isRefreshing = false
@@ -194,7 +133,8 @@ extension AppModel {
             statusTone = .failure
             statusDetail = error.localizedDescription
             logger.error("双 Provider 状态刷新失败：\(error.localizedDescription)")
-        case .success(let snapshot):
+        case .success(let refresh):
+            let snapshot = refresh.snapshot
             campusSnapshot = snapshot
             applyCampusSnapshot(snapshot)
             let lifecycle = selectedLifecycle(snapshot)
@@ -204,22 +144,24 @@ extension AppModel {
                 automation.allowImmediateAutoLogin()
             }
             lastCampusLifecycle = lifecycle
-            guard let campusProductController,
-                  allowAutoLogin,
-                  snapshot.automaticEnabled,
-                  snapshot.category == .dorm || snapshot.category == .teaching,
-                  lifecycle == "offline",
-                  !automation.hasActiveOperation,
-                  automation.consumeAutoLoginDeadline() else { return }
-            guard automation.startAutoLogin(
-                operation: {
-                    Self.mapCampusResult(
-                        await campusProductController.login(automatic: true)
-                    )
-                },
-                completion: { [weak self] action in self?.finishAutoLogin(action) }
-            ) else { return }
-            isBusy = true
+            guard allowAutoLogin, let recovery = refresh.recovery else { return }
+            switch recovery.outcome {
+            case .succeeded:
+                automation.recordAutoLoginSuccess()
+                onResult?(Self.mapCampusResult(recovery), false)
+            case .unchanged:
+                automation.recordAutoLoginSuccess()
+            case .failed:
+                automation.recordAutoLoginFailure()
+                onResult?(Self.mapCampusResult(recovery), true)
+            case .cancelled:
+                automation.recordAutoLoginFailure()
+            case .blocked:
+                // Core owns the authentication backoff and fatal/dynamic
+                // safety gates.  A blocked recovery remains visible in the
+                // compact status without producing a notification every 30s.
+                break
+            }
         }
     }
 
@@ -265,6 +207,7 @@ extension AppModel {
         statusDetail = [
             "Provider：\(snapshot.category.rawValue)",
             "会话：\(lifecycle)",
+            Self.onlineDeviceSummary(snapshot),
             snapshot.lastErrorCode.map { "错误码：\($0)" },
         ].compactMap { $0 }.joined(separator: "  ·  ")
         logger.info(
@@ -277,5 +220,12 @@ extension AppModel {
         current: CampusSessionState
     ) -> Bool {
         current == .offline && previous != .offline
+    }
+
+    /// Device identifiers are intentionally never exposed.  Only the
+    /// server-reported aggregate is shown in the compact status surface.
+    private static func onlineDeviceSummary(_ snapshot: CampusProductSnapshot) -> String? {
+        guard let count = snapshot.onlineDeviceCount else { return nil }
+        return "在线设备：\(count)/\(snapshot.onlineDeviceLimit ?? 3)"
     }
 }

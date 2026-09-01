@@ -23,7 +23,12 @@ from .portal_detect import (
     probe_internet,
 )
 from .state import PAUSE_FLAG_FILE, describe_pause_state, is_paused, pause, resume
-from .windows_product import WindowsCampusService, get_process_service, set_provider_enabled
+from .windows_product import (
+    WindowsCampusService,
+    get_process_service,
+    set_provider_account,
+    set_provider_enabled,
+)
 
 
 LAUNCHAGENT_PLIST = Path.home() / "Library" / "LaunchAgents" / "com.szu-netlogin.dorm-drcom.plist"
@@ -38,6 +43,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers.add_parser("resume", help="恢复自动登录")
     subparsers.add_parser("status", help="查看当前状态")
     subparsers.add_parser("login-now", help="立即登录")
+    subparsers.add_parser("force-login", help="确认后强制切换宿舍区在线设备")
+    # Windows frozen dispatch uses the explicit -now spelling while the
+    # regular CLI keeps the shorter documented command.
+    subparsers.add_parser("force-login-now", help=argparse.SUPPRESS)
     subparsers.add_parser("check-and-login", help="检查门户会话，确认离线时自动登录")
     subparsers.add_parser("diagnose", help="诊断当前网络状态")
     subparsers.add_parser("generate-diagnostic-report", help="生成一键诊断报告")
@@ -57,6 +66,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     provider_parser = subparsers.add_parser("set-provider-enabled", help="启用或关闭 Provider")
     provider_parser.add_argument("provider", choices=("dorm", "teaching"))
     provider_parser.add_argument("enabled", choices=("true", "false"))
+    account_parser = subparsers.add_parser("set-provider-account", help="修改 Provider 账号")
+    account_parser.add_argument("provider", choices=("dorm", "teaching"))
+    account_parser.add_argument("account")
     subparsers.add_parser("reset-pause", help="重置暂停状态")
     subparsers.add_parser("check-dependencies", help="检查常见依赖是否可用")
     subparsers.add_parser("set-project-home-env", help="写入 launchctl SZU_NETLOGIN_HOME")
@@ -108,6 +120,9 @@ def main(
     if args.command == "login-now":
         return login_now(product_service)
 
+    if args.command in {"force-login", "force-login-now"}:
+        return force_login_now(product_service)
+
     if args.command == "check-and-login":
         return check_and_login(product_service)
 
@@ -134,6 +149,15 @@ def main(
             print(f"更新 Provider 开关失败：{exc}")
             return 2
         print(f"{args.provider} Provider 已{'启用' if args.enabled == 'true' else '关闭'}。")
+        return 0
+
+    if args.command == "set-provider-account":
+        try:
+            set_provider_account(args.provider, args.account)
+        except (OSError, ValueError) as exc:
+            print(f"更新 Provider 账号失败：{exc}")
+            return 2
+        print(f"{args.provider} Provider 账号已更新。")
         return 0
 
     if args.command == "reset-pause":
@@ -170,7 +194,14 @@ def print_status(service: WindowsCampusService | None = None) -> int:
         print(f"暂停状态：{status['pauseDescription']}")
         for provider_id in ("dorm", "teaching"):
             item = status["providers"][provider_id]
-            print(f"{provider_id}: enabled={item['enabled']} state={item['state']} account={item['account']}")
+            device_count = item.get("onlineDeviceCount")
+            device_limit = item.get("onlineDeviceLimit")
+            devices = (
+                f" online_devices={device_count}/{device_limit}"
+                if device_count is not None and device_limit is not None
+                else " online_devices=unknown"
+            )
+            print(f"{provider_id}: enabled={item['enabled']} state={item['state']} account={item['account']}{devices}")
         return 0
     config_exists = DEFAULT_CONFIG_PATH.exists()
     config, config_error = _load_config_for_status()
@@ -216,8 +247,28 @@ def login_now(service: WindowsCampusService | None = None) -> int:
     return _run_product_login(manual=True, service=service)
 
 
+def force_login_now(service: WindowsCampusService | None = None) -> int:
+    try:
+        result = (service or get_process_service()).force_login("dorm")
+    except ConfigError as exc:
+        print(f"配置检查失败：{exc}")
+        return 2
+    print(f"认证结果：{result.outcome.value} provider={result.provider_id} code={result.error_code or '-'}")
+    if result.outcome.value in {"succeeded", "unchanged"}:
+        return 0
+    return 4 if result.retryable else (3 if result.outcome.value == "failed" else 2)
+
+
 def check_and_login(service: WindowsCampusService | None = None) -> int:
-    return _run_product_login(manual=False, service=service)
+    try:
+        result = (service or get_process_service()).recover_automatically()
+    except ConfigError as exc:
+        print(f"配置检查失败：{exc}")
+        return 2
+    print(f"恢复结果：{result.outcome.value} provider={result.provider_id} code={result.error_code or '-'}")
+    if result.outcome.value in {"succeeded", "unchanged"}:
+        return 0
+    return 4 if result.retryable else (3 if result.outcome.value == "failed" else 2)
 
 
 def _run_product_login(

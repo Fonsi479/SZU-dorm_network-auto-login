@@ -11,6 +11,7 @@ from src.szu_netlogin.json_cli import main, run, validate_request, RequestError
 class FakeService:
     def __init__(self):
         self.login_calls = []
+        self.force_login_calls = []
         self.open_settings_calls = 0
 
     def status(self):
@@ -21,6 +22,15 @@ class FakeService:
     def login(self, provider, manual=False):
         self.login_calls.append((provider, manual))
         return AuthResult(AuthOutcome.SUCCEEDED, "dorm")
+
+    def force_login(self, provider):
+        self.force_login_calls.append(provider)
+        return AuthResult(
+            AuthOutcome.SUCCEEDED,
+            "dorm",
+            online_device_count=3,
+            online_device_limit=3,
+        )
 
     def logout(self, provider):
         return AuthResult(AuthOutcome.BLOCKED, "teaching", error_code="SRUN_LOGOUT_DISABLED")
@@ -66,6 +76,23 @@ class JSONCLITests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(service.login_calls, [("dorm", False)])
         self.assertNotIn("password", json.dumps(result).lower())
+
+    def test_force_login_requires_interactive_confirmation(self):
+        service = FakeService()
+        code, result = self.invoke(request("force-login"), service)
+        self.assertEqual(code, 2)
+        self.assertEqual(result["errorCode"], "AUTH_DEVICE_REPLACEMENT_UNSUPPORTED")
+        self.assertEqual(service.force_login_calls, [])
+
+    def test_force_login_dispatches_once_and_returns_aggregate_budget(self):
+        service = FakeService()
+        code, result = self.invoke(
+            request("force-login", provider="dorm", interactive=True), service
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(service.force_login_calls, ["dorm"])
+        self.assertEqual((result["onlineDeviceCount"], result["onlineDeviceLimit"]), (3, 3))
+        self.assertNotIn("mac", json.dumps(result).lower())
 
     def test_rejects_password_field_without_echoing_value(self):
         code, result = self.invoke({**request("login"), "password": "must-not-echo"})

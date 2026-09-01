@@ -11,10 +11,12 @@ public struct ConfigurationLoadResult {
     }
 }
 
-public final class ConfigurationStore {
+public final class ConfigurationStore: @unchecked Sendable {
     public let paths: AppPaths
     private let fileManager: FileManager
     private let legacyCandidates: [URL]
+    private let lock: AdvisoryFileLock
+    private let threadLock = NSLock()
 
     public init(
         paths: AppPaths = .standard,
@@ -23,6 +25,7 @@ public final class ConfigurationStore {
     ) {
         self.paths = paths
         self.fileManager = fileManager
+        self.lock = AdvisoryFileLock(url: paths.configurationLockFile)
 
         if let legacyCandidates {
             self.legacyCandidates = legacyCandidates
@@ -45,10 +48,16 @@ public final class ConfigurationStore {
 
     public func load() throws -> ConfigurationLoadResult {
         try paths.createDirectories()
+        threadLock.lock()
+        defer { threadLock.unlock() }
+        return try lock.withExclusiveLock { try loadLocked() }
+    }
+
+    private func loadLocked() throws -> ConfigurationLoadResult {
 
         if fileManager.fileExists(atPath: paths.configurationFile.path) {
             do {
-                let data = try Data(contentsOf: paths.configurationFile)
+                let data = try SecurePersistence.read(paths.configurationFile)
                 let configuration = try JSONDecoder().decode(AppConfiguration.self, from: data)
                 return ConfigurationLoadResult(configuration: configuration)
             } catch let error as DecodingError {
@@ -64,7 +73,7 @@ public final class ConfigurationStore {
             do {
                 let text = try String(contentsOf: candidate, encoding: .utf8)
                 let configuration = try LegacyYAMLConfigurationParser.parse(text)
-                try save(configuration)
+                try saveLocked(configuration)
                 return ConfigurationLoadResult(configuration: configuration, migratedFrom: candidate)
             } catch let error as SZUNetError {
                 throw error
@@ -76,22 +85,25 @@ public final class ConfigurationStore {
         }
 
         let configuration = AppConfiguration.default
-        try save(configuration)
+        try saveLocked(configuration)
         return ConfigurationLoadResult(configuration: configuration)
     }
 
     public func save(_ configuration: AppConfiguration) throws {
         try paths.createDirectories()
+        threadLock.lock()
+        defer { threadLock.unlock() }
+        try lock.withExclusiveLock { try saveLocked(configuration) }
+    }
+
+    private func saveLocked(_ configuration: AppConfiguration) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
 
         do {
             var data = try encoder.encode(configuration)
             data.append(0x0A)
-            try data.write(to: paths.configurationFile, options: .atomic)
-            guard chmod(paths.configurationFile.path, S_IRUSR | S_IWUSR) == 0 else {
-                throw POSIXError(.init(rawValue: errno) ?? .EPERM)
-            }
+            try SecurePersistence.write(data, to: paths.configurationFile)
         } catch let error as SZUNetError {
             throw error
         } catch {
@@ -100,14 +112,19 @@ public final class ConfigurationStore {
     }
 
     public func updateUsername(_ username: String) throws -> AppConfiguration {
-        var result = try load().configuration
-        let normalized = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else {
-            throw SZUNetError.configuration("校园网账号不能为空。")
+        try paths.createDirectories()
+        threadLock.lock()
+        defer { threadLock.unlock() }
+        return try lock.withExclusiveLock {
+            var result = try loadLocked().configuration
+            let normalized = username.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty else {
+                throw SZUNetError.configuration("校园网账号不能为空。")
+            }
+            result.user.username = normalized
+            try saveLocked(result)
+            return result
         }
-        result.user.username = normalized
-        try save(result)
-        return result
     }
 
     private func uniqueLegacyCandidates() -> [URL] {

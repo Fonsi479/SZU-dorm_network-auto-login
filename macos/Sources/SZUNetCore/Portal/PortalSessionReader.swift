@@ -27,7 +27,11 @@ final class PortalSessionReader {
                 do { try await Task.sleep(nanoseconds: delay) } catch { return nil }
             }
             let fact = await sessionFact(username: username, sourceIP: sourceIP)
-            if fact.matches(username: username, sourceIP: sourceIP) { return true }
+            if fact.matches(
+                username: username,
+                sourceIP: sourceIP,
+                accountPrefix: configuration.auth.accountPrefix
+            ) { return true }
             if fact.state == .offline || fact.state == .online { sawDefinitiveMismatch = true }
         }
         return sawDefinitiveMismatch ? false : nil
@@ -35,7 +39,44 @@ final class PortalSessionReader {
 
     func sessionFact(username: String, sourceIP: String) async -> PortalSessionFact {
         let status = await fetchStatus(sourceIP: sourceIP)
-        let expectedAccount = status.account.isEmpty ? username : status.account
+        return await sessionFact(username: username, sourceIP: sourceIP, status: status)
+    }
+
+    func logoutVerificationState(username: String, sourceIP: String) async -> PortalSessionState {
+        let status = await fetchStatus(sourceIP: sourceIP)
+        if status.readable, status.declaredOnline == false {
+            return .offline
+        }
+        if status.readable, status.declaredOnline == true {
+            var fact = PortalSessionFact()
+            fact.state = .online
+            fact.account = status.account.trimmingCharacters(in: .whitespacesAndNewlines)
+            fact.ip = IPv4CIDR.normalized(status.ip)
+            if fact.matches(
+                username: username,
+                sourceIP: sourceIP,
+                accountPrefix: configuration.auth.accountPrefix
+            ) {
+                return .online
+            }
+        }
+        return await sessionFact(username: username, sourceIP: sourceIP, status: status).state
+    }
+
+    private func sessionFact(
+        username: String,
+        sourceIP: String,
+        status: PortalStatusResult
+    ) async -> PortalSessionFact {
+        let configuredAccount = PortalAccountNormalizer.normalize(
+            username,
+            prefix: configuration.auth.accountPrefix
+        )
+        let statusAccount = PortalAccountNormalizer.normalize(
+            status.account,
+            prefix: configuration.auth.accountPrefix
+        )
+        let expectedAccount = configuredAccount.isEmpty ? statusAccount : configuredAccount
         let expectedIP = status.ip.isEmpty ? IPv4CIDR.normalized(sourceIP) : status.ip
         let onlineList = await fetchOnlineList(
             expectedAccount: expectedAccount,
@@ -44,17 +85,26 @@ final class PortalSessionReader {
         )
 
         var fact = PortalSessionFact()
-        fact.account = expectedAccount.trimmingCharacters(in: .whitespacesAndNewlines)
-        fact.ip = expectedIP
+        // Keep the status endpoint's observed account when it supplies one so
+        // an online session belonging to a different user cannot be mistaken
+        // for the requested account.  The configured username remains the
+        // query identity used for account-wide device counting.
+        fact.account = statusAccount.isEmpty ? expectedAccount : statusAccount
+        fact.ip = IPv4CIDR.normalized(expectedIP)
         fact.vlan = status.vlan.isEmpty ? "0" : status.vlan
         fact.acIP = status.acIP
         fact.acName = status.acName
         fact.statusWasReadable = status.readable
         fact.onlineListWasReadable = onlineList.readable
         fact.exactOnlineRecordPresent = onlineList.readable ? onlineList.exactRecord != nil : nil
+        fact.onlineDeviceCount = onlineList.deviceCount
+        fact.onlineDeviceLimit = CampusOnlineDevicePolicy.dormLimit
 
         if let record = onlineList.exactRecord {
-            let recordAccount = PortalCodec.string(record, keys: ["user_account"])
+            let recordAccount = PortalAccountNormalizer.normalize(
+                PortalCodec.string(record, keys: ["user_account"]),
+                prefix: configuration.auth.accountPrefix
+            )
             let recordIP = IPv4CIDR.normalized(PortalCodec.string(record, keys: ["online_ip"]))
             if !recordAccount.isEmpty { fact.account = recordAccount }
             if !recordIP.isEmpty { fact.ip = recordIP }
@@ -134,16 +184,76 @@ final class PortalSessionReader {
               let records = dictionary["list"] as? [[String: Any]] else {
             return PortalOnlineListResult()
         }
-        let account = expectedAccount.trimmingCharacters(in: .whitespacesAndNewlines)
+        let account = PortalAccountNormalizer.normalize(
+            expectedAccount,
+            prefix: configuration.auth.accountPrefix
+        )
         let ip = IPv4CIDR.normalized(expectedIP)
-        guard !account.isEmpty, !ip.isEmpty else {
-            return PortalOnlineListResult(readable: true, exactRecord: nil)
+        guard !account.isEmpty else {
+            return PortalOnlineListResult(readable: true, exactRecord: nil, deviceCount: nil)
         }
-        let exact = records.first {
-            PortalCodec.string($0, keys: ["user_account"]) == account
+
+        let normalizedAccounts = records.map {
+            PortalAccountNormalizer.normalize(
+                PortalCodec.string($0, keys: ["user_account", "username"]),
+                prefix: configuration.auth.accountPrefix
+            )
+        }
+        // A row without an account cannot be proven to belong to somebody
+        // else. Treat the entire count as unknown instead of under-counting
+        // and risking a fourth login.
+        guard normalizedAccounts.allSatisfy({ !$0.isEmpty }) else {
+            return PortalOnlineListResult(readable: true, exactRecord: nil, deviceCount: nil)
+        }
+        let accountRecords = zip(records, normalizedAccounts).compactMap { record, normalized in
+            normalized == account ? record : nil
+        }
+        let exact = accountRecords.first {
+            !ip.isEmpty
                 && IPv4CIDR.normalized(PortalCodec.string($0, keys: ["online_ip"])) == ip
         }
-        return PortalOnlineListResult(readable: true, exactRecord: exact)
+
+        // Prefer a non-sentinel server MAC as the device identity.  If the
+        // portal does not report one, a valid server IP is a conservative
+        // fallback.  A matching record with neither value makes the total
+        // unknowable instead of silently under-counting active devices.
+        var identities = Set<String>()
+        var macBackedIPs = Set<String>()
+        var fallbackIPs = [String]()
+        var reliable = true
+        for record in accountRecords {
+            let mac = PortalCodec.nonSentinelMAC(
+                PortalCodec.string(record, keys: ["online_mac"])
+            )
+            let recordIP = IPv4CIDR.normalized(
+                PortalCodec.string(record, keys: ["online_ip"])
+            )
+            if !mac.isEmpty {
+                identities.insert("mac:\(mac)")
+                if !recordIP.isEmpty, recordIP != "0.0.0.0" {
+                    macBackedIPs.insert(recordIP)
+                }
+                continue
+            }
+            if !recordIP.isEmpty, recordIP != "0.0.0.0" {
+                fallbackIPs.append(recordIP)
+            } else {
+                reliable = false
+            }
+        }
+        // A portal may expose the same device twice, once with a server MAC
+        // and once with only its IP.  MAC-backed records win; otherwise that
+        // second row would be counted as an extra device.
+        for ip in fallbackIPs where !macBackedIPs.contains(ip) {
+            identities.insert("ip:\(ip)")
+        }
+        return PortalOnlineListResult(
+            readable: true,
+            exactRecord: exact,
+            deviceCount: reliable
+                ? min(identities.count, CampusOnlineDevicePolicy.dormLimit)
+                : nil
+        )
     }
 
     private func runtimeSettings(

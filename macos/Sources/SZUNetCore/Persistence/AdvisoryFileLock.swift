@@ -5,15 +5,13 @@ struct AdvisoryFileLock {
     let url: URL
 
     func withExclusiveLock<T>(_ body: () throws -> T) throws -> T {
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
+        try SecurePersistence.prepareDirectory(url.deletingLastPathComponent())
+        try SecurePersistence.rejectSymbolicLink(at: url, allowMissing: true)
 
         let descriptor = url.path.withCString { path in
             Darwin.open(
                 path,
-                O_CREAT | O_RDWR | O_CLOEXEC,
+                O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW,
                 S_IRUSR | S_IWUSR
             )
         }

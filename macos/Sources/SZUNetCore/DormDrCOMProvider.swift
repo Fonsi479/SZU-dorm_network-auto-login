@@ -43,16 +43,23 @@ public actor DormDrCOMProvider: NetworkAuthProvider {
         guard probe.isVerified else {
             return ProviderSessionResult(state: .blocked, errorCode: "ENV_SOURCE_ROUTE_UNVERIFIED")
         }
-        let online = await client.isSessionOnline(username: username, sourceIP: probe.sourceIP)
-        if online == true {
-            return ProviderSessionResult(
-                state: .online,
-                accountMatch: .matches,
-                clientIP: probe.sourceIP
-            )
+        var result = await client.sessionStatus(
+            username: username,
+            sourceIP: probe.sourceIP
+        )
+        if result.state == .offline,
+           result.onlineDeviceCount.map({ $0 >= CampusOnlineDevicePolicy.dormLimit }) == true {
+            result.errorCode = "AUTH_DEVICE_LIMIT"
         }
-        if online == false { return ProviderSessionResult(state: .offline, clientIP: probe.sourceIP) }
-        return ProviderSessionResult(state: .unknown, errorCode: "SESSION_UNKNOWN")
+        // The lower-level client owns portal parsing and account-wide device
+        // counting.  Keep a defensive source IP fallback for legacy test
+        // doubles that only return a boolean-derived status.
+        if result.clientIP.isEmpty {
+            var enriched = result
+            enriched.clientIP = probe.sourceIP
+            return enriched
+        }
+        return result
     }
 
     public func login(
@@ -73,23 +80,34 @@ public actor DormDrCOMProvider: NetworkAuthProvider {
             return ProviderAuthResult(outcome: .cancelled, providerID: providerID, errorCode: "OPERATION_CANCELLED")
         }
         guard result.status == .success else {
+            let code = DormDrCOMErrorCode.login(result.reason)
             return ProviderAuthResult(
                 outcome: result.status == .unknown ? .blocked : .failed,
                 providerID: providerID,
                 clientIP: probe.sourceIP,
-                errorCode: result.reason.isEmpty ? "INTERNAL_ERROR" : result.reason,
-                retryable: result.reason == "request_exception"
+                errorCode: code,
+                retryable: code == "NET_TIMEOUT"
             )
         }
-        let confirmed = await client.isSessionOnline(username: username, sourceIP: probe.sourceIP)
-        guard confirmed == true else {
+        // Refresh the richer session fact exactly once after a successful
+        // portal response.  This carries the server's account-wide device
+        // occupancy into the public result without ever reading a local MAC.
+        let confirmed = await client.sessionStatus(
+            username: username,
+            sourceIP: probe.sourceIP
+        )
+        guard confirmed.state == .online,
+              confirmed.accountMatch == .matches else {
             return ProviderAuthResult(
                 outcome: .failed,
                 providerID: providerID,
-                sessionState: confirmed == false ? .offline : .unknown,
+                sessionState: confirmed.state,
+                accountMatch: confirmed.accountMatch,
                 clientIP: probe.sourceIP,
+                onlineDeviceCount: confirmed.onlineDeviceCount,
+                onlineDeviceLimit: confirmed.onlineDeviceLimit,
                 errorCode: "AUTH_NOT_CONFIRMED",
-                retryable: confirmed == false
+                retryable: confirmed.state == .offline
             )
         }
         return ProviderAuthResult(
@@ -97,7 +115,9 @@ public actor DormDrCOMProvider: NetworkAuthProvider {
             providerID: providerID,
             sessionState: .online,
             accountMatch: .matches,
-            clientIP: probe.sourceIP
+            clientIP: probe.sourceIP,
+            onlineDeviceCount: confirmed.onlineDeviceCount,
+            onlineDeviceLimit: confirmed.onlineDeviceLimit
         )
     }
 
@@ -107,14 +127,42 @@ public actor DormDrCOMProvider: NetworkAuthProvider {
         username: String
     ) async -> ProviderAuthResult {
         let result = await client.logout(username: username, knownSourceIP: probe.sourceIP)
+        let code = result.status == .success ? nil : DormDrCOMErrorCode.logout(result.reason)
         return ProviderAuthResult(
             outcome: result.status == .success ? .succeeded : .failed,
             providerID: providerID,
             sessionState: result.status == .success ? .offline : .unknown,
             clientIP: probe.sourceIP,
-            errorCode: result.status == .success ? nil : result.reason
+            errorCode: code,
+            retryable: code == "NET_TIMEOUT"
         )
     }
 
     public func cancelPendingOperations(generation: UInt64) async {}
+}
+
+enum DormDrCOMErrorCode {
+    static func login(_ reason: String) -> String {
+        switch reason {
+        case "password_error": "AUTH_BAD_PASSWORD"
+        case "gateway_unreachable", "request_exception", "server_response_uncertain": "NET_TIMEOUT"
+        case "portal_interface_changed": "ENV_PORTAL_IDENTITY_UNVERIFIED"
+        case "login_not_confirmed", "server_failed": "AUTH_NOT_CONFIRMED"
+        case "session_verification_unavailable": "SESSION_UNKNOWN"
+        case "request_cancelled": "OPERATION_CANCELLED"
+        default: "INTERNAL_ERROR"
+        }
+    }
+
+    static func logout(_ reason: String) -> String {
+        switch reason {
+        case "logout_url_not_configured": "CFG_INVALID"
+        case "terminal_ip_not_found": "ENV_SOURCE_ROUTE_UNVERIFIED"
+        case "logout_not_confirmed": "SESSION_ONLINE"
+        case "session_state_unknown", "session_verification_unavailable": "SESSION_UNKNOWN"
+        case "gateway_unreachable", "request_exception": "NET_TIMEOUT"
+        case "request_cancelled": "OPERATION_CANCELLED"
+        default: "INTERNAL_ERROR"
+        }
+    }
 }

@@ -127,7 +127,7 @@ def generate(root: Path, platform: str) -> dict[str, object]:
     else:
         dependencies.extend(
             (name, version, "swift")
-            for name, version in parse_swift_resolved(root / "macos" / "Package.resolved")
+            for name, version in parse_swift_resolved(root / "Package.resolved")
         )
     unique = sorted(set(dependencies), key=lambda item: (normalized_name(item[0]), item[1]))
     revision = git_revision(root)

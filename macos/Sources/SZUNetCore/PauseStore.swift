@@ -130,7 +130,7 @@ public final class PauseStore {
 
     private func activeStateLocked() -> PauseState? {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
-        guard let data = try? Data(contentsOf: fileURL) else {
+        guard let data = try? SecurePersistence.read(fileURL) else {
             return PauseState(mode: .manual, pausedAt: now())
         }
 
@@ -212,19 +212,7 @@ public final class PauseStore {
     }
 
     private static func writeAtomically(_ data: Data, to url: URL) throws {
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try data.write(to: url, options: .atomic)
-        guard chmod(url.path, S_IRUSR | S_IWUSR) == 0 else {
-            let code = errno
-            throw NSError(
-                domain: NSPOSIXErrorDomain,
-                code: Int(code),
-                userInfo: [NSFilePathErrorKey: url.path]
-            )
-        }
+        try SecurePersistence.write(data, to: url)
     }
 
     public static func currentBootMarker() -> String {

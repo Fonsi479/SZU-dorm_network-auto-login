@@ -20,11 +20,11 @@ The product follows Semantic Versioning. A channel suffix describes validation m
 
 | Channel | Example | Required evidence |
 |---|---|---|
-| Beta | `2.0.0-beta.1` | Offline fixtures, unit tests, frozen self-tests, package integrity and privacy gates |
+| Beta | `2.0.0-beta.2` (macOS) / `2.0.0-beta.1` (Windows) | Offline fixtures, unit tests, frozen self-tests, package integrity and privacy gates |
 | Release candidate | `2.0.0-rc.1` | Beta gates plus controlled Dorm and Teaching campus acceptance |
 | Stable | `2.0.0` | RC gates plus target-platform signing, notarization/SmartScreen and maintainer approval |
 
-The current channel is `2.0.0-beta.1`. Teaching remains default-off and `PENDING_CAMPUS_VALIDATION`.
+The current source channels are macOS `2.0.0-beta.2` and Windows `2.0.0-beta.1`. Teaching remains default-off and `PENDING_CAMPUS_VALIDATION`.
 
 ## Platform tags and assets
 
@@ -32,8 +32,8 @@ macOS and Windows releases are separate entries built from the same reviewed sou
 
 | Platform | Tag | Assets |
 |---|---|---|
-| macOS | `macos-v2.0.0-beta.1` | `SZU-Campus-Network-macOS-v2.0.0-beta.1.zip` and `.zip.sha256` |
-| Windows | `windows-v2.0.0-beta.1` | `SZU-Campus-Network-Windows-v2.0.0-beta.1.zip` and `.zip.sha256` |
+| macOS | `macos-v2.0.0-beta.2` | `SZU-Campus-Network-macOS-v2.0.0-beta.2.zip` and `.zip.sha256` |
+| Windows | `windows-v2.0.0-beta.1` | Separate `SZU-Campus-Network-Windows-x64-v2.0.0-beta.1.zip` and `SZU-Campus-Network-Windows-arm64-v2.0.0-beta.1.zip` assets with `.zip.sha256` files |
 
 Each Beta or RC GitHub Release must set `prerelease=true`. Do not upload raw executables, local reports, wheelhouses, installers, VM transfer files or any `*-local.zip`.
 

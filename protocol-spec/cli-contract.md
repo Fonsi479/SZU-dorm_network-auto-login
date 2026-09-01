@@ -14,7 +14,7 @@ szu-campus-netctl --json
 {
   "schemaVersion": 1,
   "requestId": "uuid-or-host-request-id",
-  "command": "status|check|login|logout|pause|resume|open-settings|diagnostics",
+  "command": "status|check|login|force-login|logout|pause|resume|open-settings|diagnostics",
   "provider": "auto|dorm|teaching",
   "interactive": true,
   "timeoutSeconds": 15
@@ -22,10 +22,11 @@ szu-campus-netctl --json
 ```
 
 - `login` 仍受环境安全门控。
+- `force-login` 只接受明确的人工交互请求，用于用户确认后的 Dorm 三设备切换；自动登录和 `interactive=false` 必须安全阻止。服务端自行选择被下线的旧设备。
 - `interactive=false` 时，缺凭据或需用户确认直接返回错误，不弹窗。
 - `diagnostics` 默认只返回摘要；导出文件需要用户交互。
 - `status` 与 `diagnostics` 在一次性 CLI 进程内执行只读刷新，不能复用空的进程内缓存。
-- 响应可选字段 `automaticEnabled` 与 `ownerAppRunning` 分别表示自动登录总门和独立 App 当前运行态；旧客户端可忽略它们。
+- 响应可选字段 `automaticEnabled` 与 `ownerAppRunning` 分别表示自动登录总门和独立 App 当前运行态；`onlineDeviceCount` 与 `onlineDeviceLimit` 表示服务端返回的 Dorm 在线设备聚合（上限固定为 3）。旧客户端可忽略这些字段。
 - `resume` 同时恢复自动登录总门、清除暂停状态并确认独立 App 已启动，启动失败不得返回 `succeeded`。
 - `open-settings` 只有在系统接受独立 App 的启动或设置路由后才返回成功。
 

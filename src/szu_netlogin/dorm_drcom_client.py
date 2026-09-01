@@ -24,6 +24,7 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
 )
+DORM_ONLINE_DEVICE_LIMIT = 3
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,11 @@ class PortalStatusResult:
 class PortalOnlineListResult:
     readable: bool = False
     exact_record: dict[str, Any] | None = None
+    # Raw records are retained only inside the client for logout compatibility;
+    # callers receive the aggregate count below and never device identities.
+    account_records: tuple[dict[str, Any], ...] = ()
+    device_count: int | None = None
+    count_reliable: bool = False
 
 
 @dataclass(frozen=True)
@@ -85,11 +91,14 @@ class PortalSessionFact:
     status_was_readable: bool = False
     online_list_was_readable: bool = False
     exact_online_record_present: bool | None = None
+    online_device_count: int | None = None
+    online_device_limit: int = DORM_ONLINE_DEVICE_LIMIT
+    account_prefix: str = ""
 
     def matches(self, username: str, source_ip: str) -> bool:
-        expected_account = username.strip()
+        expected_account = _normalize_account(username, self.account_prefix)
         expected_ip = _normalize_ip(source_ip)
-        account_matches = not expected_account or self.account == expected_account
+        account_matches = not expected_account or _normalize_account(self.account, self.account_prefix) == expected_account
         ip_matches = not expected_ip or self.ip == expected_ip
         return self.state == "online" and account_matches and ip_matches
 
@@ -176,8 +185,8 @@ class DormDrcomClient:
         )
         if not is_campus_source_ip(self.config, source_ip):
             self.logger.warning(
-                "宿舍区 Dr.COM 登录停止：源 IP 未通过校园网段校验 source_ip=%s",
-                source_ip or "-",
+                "宿舍区 Dr.COM 登录停止：源 IP 未通过校园网段校验 source_ip_present=%s",
+                bool(source_ip),
             )
             return LoginResult("failed", "source_ip_unverified", source_ip=source_ip)
 
@@ -290,12 +299,22 @@ class DormDrcomClient:
             self.session.mount("https://", adapter)
 
         status = self._fetch_portal_status()
-        expected_account = status.account.strip() or username.strip()
+        account_prefix = str(self.auth.get("account_prefix") or "").strip()
+        # The configured username is the account whose device limit matters.
+        # A status endpoint can describe another account on a shared gateway;
+        # never let that response redirect the online-list query.
+        expected_account = _normalize_account(username, account_prefix)
         expected_ip = status.ip or source_ip
-        online_list = self._fetch_online_list(expected_account, expected_ip)
+        online_list = self._fetch_online_list(
+            expected_account,
+            expected_ip,
+            account_prefix=account_prefix,
+        )
         record = online_list.exact_record or {}
 
-        account = str(record.get("user_account") or expected_account).strip()
+        account = _normalize_account(
+            str(record.get("user_account") or expected_account), account_prefix
+        )
         ip = _normalize_ip(str(record.get("online_ip") or "")) or expected_ip
         status_mac = _normalize_mac(status.mac)
         record_mac = _normalize_mac(str(record.get("online_mac") or ""))
@@ -331,13 +350,18 @@ class DormDrcomClient:
             exact_online_record_present=(
                 online_list.exact_record is not None if online_list.readable else None
             ),
+            online_device_count=online_list.device_count,
+            online_device_limit=DORM_ONLINE_DEVICE_LIMIT,
+            account_prefix=account_prefix,
         )
         self.logger.info(
-            "门户会话事实：state=%s account_match=%s ip_match=%s mac_source=%s",
+            "门户会话事实：state=%s account_match=%s ip_match=%s mac_source=%s online_device_count=%s",
             fact.state,
-            fact.account == username.strip(),
+            _normalize_account(fact.account, account_prefix)
+            == _normalize_account(username, account_prefix),
             fact.ip == source_ip,
             "server" if fact.mac else "missing",
+            fact.online_device_count if fact.online_device_count is not None else "unknown",
         )
         return fact
 
@@ -357,8 +381,8 @@ class DormDrcomClient:
         source_ip = _normalize_ip(_get_source_ip(logout_url, timeout_seconds))
         if not is_campus_source_ip(self.config, source_ip):
             self.logger.warning(
-                "宿舍区 Dr.COM 退出停止：源 IP 未通过校园网段校验 source_ip=%s",
-                source_ip or "-",
+                "宿舍区 Dr.COM 退出停止：源 IP 未通过校园网段校验 source_ip_present=%s",
+                bool(source_ip),
             )
             return LogoutResult("failed", "source_ip_unverified")
 
@@ -378,12 +402,12 @@ class DormDrcomClient:
             session_fact=before,
         )
         self.logger.info(
-            "宿舍区 Dr.COM 退出终端参数：ip=%s mac=%s vlan=%s ac_ip=%s page_url=%s",
-            terminal.ip,
-            terminal.mac,
+            "宿舍区 Dr.COM 退出终端参数已解析：ip_present=%s mac_present=%s vlan=%s ac_ip_present=%s page_present=%s",
+            bool(terminal.ip),
+            bool(_non_sentinel_mac(terminal.mac)),
             terminal.vlan,
-            terminal.wlan_ac_ip,
-            terminal.page_url,
+            bool(terminal.wlan_ac_ip),
+            bool(terminal.page_url),
         )
         if not terminal.ip:
             self.logger.info("宿舍区 Dr.COM 退出失败：无法确定当前终端 IP")
@@ -536,7 +560,7 @@ class DormDrcomClient:
         inferred_url = urlunparse(parsed._replace(path=logout_path, query="", fragment=""))
         validated = self._safe_portal_url(inferred_url, "logout_url")
         if validated:
-            self.logger.info("宿舍区 Dr.COM 退出接口未显式配置，已从 login_url 推导：%s", validated)
+            self.logger.info("宿舍区 Dr.COM 退出接口未显式配置，已从 login_url 推导。")
         return validated
 
     def _get_unbind_url(self, logout_url: str) -> str:
@@ -646,6 +670,8 @@ class DormDrcomClient:
         self,
         expected_account: str,
         expected_ip: str,
+        *,
+        account_prefix: str = "",
     ) -> PortalOnlineListResult:
         portal_api = self._get_portal_api_url()
         if not portal_api:
@@ -675,19 +701,45 @@ class DormDrcomClient:
         if not isinstance(parsed, dict) or not isinstance(parsed.get("list"), list):
             return PortalOnlineListResult()
 
-        record = _select_online_record(parsed, expected_account, expected_ip)
+        records = parsed.get("list")
+        account_records, device_count, count_reliable = _account_online_records(
+            records,
+            expected_account,
+            account_prefix=account_prefix,
+        )
+        record = _select_online_record(
+            parsed,
+            expected_account,
+            expected_ip,
+            account_prefix=account_prefix,
+        )
         if record:
             self.logger.info(
-                "宿舍区 Dr.COM 在线列表命中当前会话：online_ip=%s online_mac=%s nas_ip=%s",
-                record.get("online_ip"),
-                record.get("online_mac"),
-                record.get("nas_ip"),
+                "宿舍区 Dr.COM 在线列表已读取：当前会话命中=%s 账号设备计数=%s",
+                True,
+                device_count if count_reliable else "unknown",
             )
-        return PortalOnlineListResult(readable=True, exact_record=record or None)
+        else:
+            self.logger.info(
+                "宿舍区 Dr.COM 在线列表已读取：当前会话命中=%s 账号设备计数=%s",
+                False,
+                device_count if count_reliable else "unknown",
+            )
+        return PortalOnlineListResult(
+            readable=True,
+            exact_record=record or None,
+            account_records=tuple(account_records),
+            device_count=device_count if count_reliable else None,
+            count_reliable=count_reliable,
+        )
 
     def _fetch_online_record(self, username: str, source_ip: str = "") -> dict[str, Any]:
         """Compatibility wrapper that only returns an exact account/IP record."""
-        return self._fetch_online_list(username, _normalize_ip(source_ip)).exact_record or {}
+        return self._fetch_online_list(
+            username,
+            _normalize_ip(source_ip),
+            account_prefix=str(self.auth.get("account_prefix") or "").strip(),
+        ).exact_record or {}
 
     def _get_portal_api_url(self) -> str:
         login_url = str(self.auth.get("login_url") or "").strip()
@@ -937,6 +989,8 @@ def _select_online_record(
     parsed: Any,
     username: str,
     source_ip: str,
+    *,
+    account_prefix: str = "",
 ) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         return {}
@@ -949,19 +1003,100 @@ def _select_online_record(
     if not dict_records:
         return {}
 
-    username = str(username).strip()
+    username = _normalize_account(str(username), account_prefix)
     source_ip = _normalize_ip(source_ip)
     if not username or not source_ip:
         return {}
 
     for record in dict_records:
         if (
-            str(record.get("user_account") or "").strip() == username
+            _normalize_account(str(record.get("user_account") or ""), account_prefix)
+            == username
             and _normalize_ip(str(record.get("online_ip") or "")) == source_ip
         ):
             return record
 
     return {}
+
+
+def _account_online_records(
+    records: Any,
+    username: str,
+    *,
+    account_prefix: str = "",
+) -> tuple[list[dict[str, Any]], int | None, bool]:
+    """Return same-account records and a conservative device count.
+
+    The portal has historically returned a loose ``list`` payload.  A count is
+    considered reliable only when every entry can be parsed and every
+    same-account entry has a usable server identity (non-sentinel MAC or valid
+    IP).  Any malformed row, or an identity-less row for the target account,
+    makes the aggregate unknown rather than risking a fourth login that could
+    evict another device.  Well-formed rows for other accounts do not affect
+    the target account's count.
+    """
+
+    if not isinstance(records, list):
+        return [], None, False
+
+    expected_account = _normalize_account(username, account_prefix)
+    if not expected_account:
+        return [], None, False
+
+    account_records: list[dict[str, Any]] = []
+    server_macs: set[str] = set()
+    mac_ips: set[str] = set()
+    fallback_ips: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            return [], None, False
+
+        account = _normalize_account(
+            str(record.get("user_account") or record.get("username") or ""),
+            account_prefix,
+        )
+        if not account:
+            return [], None, False
+
+        if account != expected_account:
+            continue
+        mac, ip = _online_record_server_identity(record)
+        if not mac and not ip:
+            return [], None, False
+        account_records.append(record)
+        if mac:
+            # A real server MAC is the strongest device identity.  Remember
+            # its IP as well so a duplicate row that lost its MAC does not
+            # become a second counted device.
+            server_macs.add(mac)
+            if ip:
+                mac_ips.add(ip)
+        elif ip:
+            fallback_ips.add(ip)
+
+    fallback_ips.difference_update(mac_ips)
+    count = len(server_macs) + len(fallback_ips)
+    # The public protocol deliberately exposes only the fixed 0...3 budget.
+    # Any portal anomaly above the supported limit remains "full" without
+    # expanding the schema or UI into a device-list surface.
+    return account_records, min(count, DORM_ONLINE_DEVICE_LIMIT), True
+
+
+def _online_record_server_identity(record: dict[str, Any]) -> tuple[str, str]:
+    """Return normalized ``(mac, ip)`` values from a server row."""
+
+    mac = ""
+    for key in ("online_mac", "wlan_user_mac", "mac", "user_mac", "olmac"):
+        mac = _non_sentinel_mac(str(record.get(key) or ""))
+        if mac:
+            break
+
+    ip = ""
+    for key in ("online_ip", "wlan_user_ip", "ip", "v46ip", "client_ip"):
+        ip = _normalize_ip(str(record.get(key) or ""))
+        if ip:
+            break
+    return mac, ip
 
 
 def _ip_to_parse_int(ip: str) -> str:
@@ -1003,6 +1138,22 @@ def _normalize_ip(value: str) -> str:
         return str(IPv4Address(candidate))
     except AddressValueError:
         return ""
+
+
+def _normalize_account(value: str, account_prefix: str = "") -> str:
+    """Canonicalize a portal account for comparisons only.
+
+    Dr.COM commonly returns ``user_account`` with the configured login prefix
+    (for example ``,1,481505``) while config stores just ``481505``.  Remove
+    whitespace and that exact configured prefix; never use this helper to
+    build a login request.
+    """
+
+    normalized = "".join(str(value or "").split())
+    prefix = "".join(str(account_prefix or "").split())
+    if prefix and normalized.startswith(prefix):
+        normalized = normalized[len(prefix) :]
+    return normalized
 
 
 def _portal_referer(url: str) -> str:

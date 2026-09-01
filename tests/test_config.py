@@ -209,6 +209,13 @@ class ConfigValidationTests(unittest.TestCase):
 
     def test_normal_portal_urls_keep_the_gateway_port(self) -> None:
         config = _valid_config()
+        # This test is about URL normalization, not password-source policy;
+        # use the only supported Windows source so it is platform neutral.
+        config["security"] = {
+            "password_source": "keychain",
+            "keychain_service": "szu-netlogin",
+            "keychain_account": "student-id",
+        }
         config["auth"].update(
             {
                 "logout_url": "http://172.30.255.42:801/eportal/portal/logout",

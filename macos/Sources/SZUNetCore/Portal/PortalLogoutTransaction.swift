@@ -26,7 +26,9 @@ final class PortalLogoutTransaction {
     }
 
     func execute(username: String, sourceIP: String) async -> LogoutResult {
+        guard !Task.isCancelled else { return cancelled() }
         let before = await reader.snapshot(username: username, sourceIP: sourceIP)
+        guard !Task.isCancelled else { return cancelled() }
         switch before.fact.state {
         case .offline:
             return LogoutResult(status: .success, reason: "already_logged_out")
@@ -58,15 +60,12 @@ final class PortalLogoutTransaction {
                 stripISPSuffix: before.runtime.ispUnbindSuffix
             )
             let result = await call(unbindURL, query: query, sourceIP: before.fact.ip)
+            guard !Task.isCancelled else { return cancelled() }
             logger.info("门户 MAC 解绑应答：\(ackLabel(result.acknowledgement))")
-            if result.acknowledgement == true {
-                let state = await verifiedState(expected: before.fact)
-                if state == .offline {
-                    return LogoutResult(status: .success, reason: "unbind_verified")
-                }
-            }
             // The deployed page intentionally falls through when unbind reports
-            // `mac不存在`; it is not a terminal failure.
+            // `mac不存在`; it is not a terminal failure. Even an accepted
+            // unbind falls through to the explicit logout endpoint so the
+            // account session needs only one final verification cycle.
         }
 
         var lastState = PortalSessionState.unknown
@@ -83,8 +82,10 @@ final class PortalLogoutTransaction {
                 ),
                 sourceIP: before.fact.ip
             )
+            guard !Task.isCancelled else { return cancelled() }
             logger.info("/eportal/portal/logout 应答：\(ackLabel(result.acknowledgement))")
             lastState = await verifiedState(expected: before.fact)
+            guard !Task.isCancelled else { return cancelled() }
             if lastState == .offline {
                 return LogoutResult(status: .success, reason: "portal_logout_verified")
             }
@@ -96,9 +97,11 @@ final class PortalLogoutTransaction {
                 query: ["callback": logoutCallback],
                 sourceIP: before.fact.ip
             )
+            guard !Task.isCancelled else { return cancelled() }
             noWebMode = result.noWebMode
             logger.info("/drcom/logout 应答：\(ackLabel(result.acknowledgement))")
             lastState = await verifiedState(expected: before.fact)
+            guard !Task.isCancelled else { return cancelled() }
             if lastState == .offline {
                 return LogoutResult(status: .success, reason: "drcom_logout_verified")
             }
@@ -112,6 +115,7 @@ final class PortalLogoutTransaction {
         }
         if noWebMode || lastState == .online || lastState == .unknown {
             for candidate in candidates {
+                guard !Task.isCancelled else { return cancelled() }
                 let usesPortalBody = candidate.path.hasSuffix("/portal/logout")
                 let query = usesPortalBody
                     ? PortalRequestBuilder.portalLogout(
@@ -121,11 +125,13 @@ final class PortalLogoutTransaction {
                     )
                     : [:]
                 let result = await call(candidate, query: query, sourceIP: before.fact.ip)
+                guard !Task.isCancelled else { return cancelled() }
                 logger.info(
                     "门户注销 fallback endpoint=\(candidate.path) ack="
                         + ackLabel(result.acknowledgement)
                 )
                 lastState = await verifiedState(expected: before.fact)
+                guard !Task.isCancelled else { return cancelled() }
                 if lastState == .offline {
                     return LogoutResult(status: .success, reason: "portal_logout_verified")
                 }
@@ -136,6 +142,10 @@ final class PortalLogoutTransaction {
             return LogoutResult(status: .failed, reason: "logout_not_confirmed")
         }
         return LogoutResult(status: .unknown, reason: "session_verification_unavailable")
+    }
+
+    private func cancelled() -> LogoutResult {
+        LogoutResult(status: .unknown, reason: "request_cancelled")
     }
 
     private var logoutCallback: String {
@@ -155,8 +165,10 @@ final class PortalLogoutTransaction {
             if delay > 0 {
                 do { try await Task.sleep(nanoseconds: delay) } catch { return last }
             }
-            let fact = await reader.sessionFact(username: expected.account, sourceIP: expected.ip)
-            last = fact.state
+            last = await reader.logoutVerificationState(
+                username: expected.account,
+                sourceIP: expected.ip
+            )
             if last == .offline { return .offline }
         }
         return last
